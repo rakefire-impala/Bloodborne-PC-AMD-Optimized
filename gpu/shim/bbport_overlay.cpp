@@ -17,6 +17,7 @@
 #include "../bbcheats.h"
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
+#include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
@@ -790,6 +791,22 @@ void AdvancedSettings() {
               "неподвижным, отсюда шлейф."));
     ImGui::EndDisabled(); // upscaler off
 
+    Section(Text("Diagnostics", "Диагностика"));
+    static double capture_time = -1.0;
+    if (ImGui::Button(Text("Capture next frame###capture", "Записать следующий кадр###capture"))) {
+        Vulkan::FrameCapture::Arm();
+        capture_time = ImGui::GetTime();
+    }
+    if (capture_time >= 0.0 && ImGui::GetTime() - capture_time < 4.0) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", Text("Recording to user/captures", "Запись в user/captures"));
+    }
+    Hint(Text("Records every rendering pass of the next frame (shaders, targets, textures, "
+              "constants) to user/captures, for reporting a picture problem such as smeared "
+              "textures. Press it while the problem is on screen.",
+              "Записывает все проходы отрисовки следующего кадра (шейдеры, цели, текстуры, "
+              "константы) в user/captures, чтобы сообщить о проблеме с изображением, например о "
+              "размытых текстурах. Нажимайте, пока проблема видна на экране."));
 }
 
 void EffectSettings() {

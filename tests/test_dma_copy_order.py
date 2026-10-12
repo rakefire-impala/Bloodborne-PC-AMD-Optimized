@@ -54,6 +54,11 @@ namespace BbStats {
 std::atomic<u64> host_copies_wait_ns{},copy_threads_wait_ns{},host_copy_waits{};
 struct WaitTimer { explicit WaitTimer(std::atomic<u64>&) {} };
 }
+namespace BbWatch { struct ScopedStage { explicit ScopedStage(const char*) {} }; }
+namespace BbHitch {
+std::atomic<u64> copy_wait_ns{};
+struct Timer { explicit Timer(std::atomic<u64>&) {} };
+}
 namespace BbToggle { constexpr u64 OrderedGuestWrites=0; bool Disabled(u64) { return false; } }
 namespace vk {
 struct CommandBuffer {};
@@ -108,6 +113,7 @@ struct BufferCache {
 struct TextureCache {
     void ClearMeta(VAddr) {}
     bool FindImageFromRange(VAddr,u32) const { return false; }
+    bool HasImageAt(VAddr,bool) const { return false; }
     void InvalidateMemoryFromGPU(VAddr,u32) {}
 };
 struct Runtime {

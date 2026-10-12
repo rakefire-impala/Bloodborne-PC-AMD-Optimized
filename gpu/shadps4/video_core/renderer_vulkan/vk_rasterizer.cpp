@@ -3071,7 +3071,10 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
                "FillBuffer address and size must be a multiple of 4 bytes");
     if (!is_gds) {
         texture_cache.ClearMeta(address);
-        if (!buffer_cache.IsRegionGpuModified(address, num_bytes)) {
+        // bbport: memory a valid image starts at (a render target's) takes the GPU path, so the
+        // fill reaches the image too (below).
+        if (!buffer_cache.IsRegionGpuModified(address, num_bytes) &&
+            !texture_cache.HasImageAt(address, true)) {
             // A recorded draw may still be uploading from this guest range on stage C or
             // a copy worker. Draining stage B alone does not finish those reads.
             scheduler.WaitHostCopies();
@@ -3088,11 +3091,20 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
         return buffer_cache.ObtainBuffer(address, num_bytes, true);
     }();
     runtime.FillBuffer(buffer, offset, num_bytes, value);
+    if (!is_gds) {
+        // bbport: an image at that address is refreshed from the buffer before its next use.
+        // DMA fills clear render targets; without this the clear never reached a cached image
+        // (copies and shader writes already marked it).
+        texture_cache.InvalidateMemoryFromGPU(address, num_bytes);
+    }
 }
 
 void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds) {
     DrainDrawPipe();
-    if (!dst_gds && !buffer_cache.IsRegionGpuModified(dst, num_bytes)) {
+    // bbport: memory a valid image starts at (a render target's) takes the GPU path, as with
+    // the source, so the copy reaches the image too (below).
+    if (!dst_gds && !buffer_cache.IsRegionGpuModified(dst, num_bytes) &&
+        !texture_cache.HasImageAt(dst, true)) {
         if (!src_gds && !buffer_cache.IsRegionGpuModified(src, num_bytes) &&
             !texture_cache.FindImageFromRange(src, num_bytes)) {
             // Read-only stream uploads do not set IsRegionGpuModified. Complete their
@@ -3103,7 +3115,6 @@ void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, b
             return;
         }
     }
-    texture_cache.InvalidateMemoryFromGPU(dst, num_bytes);
     const auto* gds_buffer = buffer_cache.GetGdsBuffer();
     const auto [src_buffer, src_offset] = [&] -> std::pair<const VideoCore::Buffer*, u64> {
         if (src_gds) {
@@ -3123,6 +3134,8 @@ void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, b
         .size = num_bytes,
     };
     runtime.CopyBuffer(src_buffer, dst_buffer, std::span{&copy, 1});
+    // bbport: after obtaining the destination, which first took a valid image's contents there.
+    texture_cache.InvalidateMemoryFromGPU(dst, num_bytes);
 }
 
 u32 Rasterizer::ReadDataFromGds(u32 gds_offset) {

@@ -84,9 +84,13 @@ void AddShader(Entry& entry, u64 hash) {
 }
 
 void Write(VAddr presented) {
-    const char* dir = std::getenv("BB_CAPTURE_DIR");
+    const char* env = std::getenv("BB_CAPTURE_DIR");
+    // bbport: beside last_run.log by default (the game runs in the port's folder).
+    const std::string dir = env && env[0] ? env : "user/captures";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
     const std::string path =
-        std::format("{}/frame_{}.txt", dir ? dir : ".", static_cast<long long>(std::time(nullptr)));
+        std::format("{}/frame_{}.txt", dir, static_cast<long long>(std::time(nullptr)));
     FILE* f = std::fopen(path.c_str(), "w");
     if (!f) {
         std::printf("Frame capture: cannot write %s\n", path.c_str());
@@ -136,6 +140,13 @@ void FrameCapture::OnFlip(VAddr presented_address) {
         std::error_code ec;
         std::filesystem::remove(trigger, ec);
         state.store(Armed, std::memory_order_release);
+        std::printf("Frame capture: armed\n");
+    }
+}
+
+void FrameCapture::Arm() {
+    u32 idle = Idle;
+    if (state.compare_exchange_strong(idle, Armed, std::memory_order_acq_rel)) {
         std::printf("Frame capture: armed\n");
     }
 }

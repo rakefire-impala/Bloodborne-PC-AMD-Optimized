@@ -24,6 +24,10 @@ public:
     /// VideoOut thread, per flip: frame boundary, presented buffer, trigger file check.
     static void OnFlip(VAddr presented_address);
 
+    /// bbport: records the next full frame, as the trigger file does (overlay button). The
+    /// file goes to BB_CAPTURE_DIR, else user/captures.
+    static void Arm();
+
     /// VideoOut: a display buffer the game registered. A pass drawing into one starts a frame
     /// in the GPU command stream (the flip itself runs a frame behind).
     static void AddDisplayBuffer(VAddr address);

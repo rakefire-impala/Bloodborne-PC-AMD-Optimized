@@ -120,7 +120,13 @@ public:
     [[nodiscard]] ImageId FindImage(ImageDesc& desc, bool exact_fmt = false);
 
     /// Retrieves image whose address matches provided
-    [[nodiscard]] ImageId FindImageFromRange(VAddr address, size_t size, bool ensure_valid = true);
+    [[nodiscard]] ImageId FindImageFromRange(VAddr address, size_t size, bool ensure_valid = true,
+                                             bool warn = true);
+
+    /// bbport: whether an image starts at `address`, or only one whose GPU-written contents are
+    /// newer than guest memory and the buffer cache (`valid_only`). Quiet, unlike
+    /// FindImageFromRange, when several images start there.
+    [[nodiscard]] bool HasImageAt(VAddr address, bool valid_only);
 
     /// bbport: a FindView result remembered by the caller for the same image and view info.
     struct ViewMemo {

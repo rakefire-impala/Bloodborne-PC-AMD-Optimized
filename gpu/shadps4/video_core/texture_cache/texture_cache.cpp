@@ -651,9 +651,13 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     return image_id;
 }
 
-ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure_valid) {
+ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure_valid,
+                                         bool warn) {
     ImageIds image_ids;
-    ForEachImageInRegion(address, size, [&](ImageId image_id, Image& image) {
+    // bbport: only images starting at `address` count, and each covers its first byte: looking
+    // there finds them all, without walking every image a large buffer overlaps (written buffers
+    // come here too, on every binding).
+    ForEachImageInRegion(address, 1, [&](ImageId image_id, Image& image) {
         if (image.info.guest_address != address) {
             return;
         }
@@ -674,11 +678,21 @@ ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure
                 return image_ids[i];
             }
         }
-        LOG_WARNING(Render_Vulkan,
-                    "Failed to find exact image match for copy addr={:#x}, size={:#x}", address,
-                    size);
+        if (warn) {
+            LOG_WARNING(Render_Vulkan,
+                        "Failed to find exact image match for copy addr={:#x}, size={:#x}",
+                        address, size);
+        }
     }
     return {};
+}
+
+bool TextureCache::HasImageAt(VAddr address, bool valid_only) {
+    bool found = false;
+    ForEachImageInRegion(address, 1, [&](ImageId, Image& image) {
+        found |= image.info.guest_address == address && (!valid_only || image.SafeToDownload());
+    });
+    return found;
 }
 
 ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc, ViewMemo* memo,

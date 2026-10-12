@@ -1227,8 +1227,11 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
     if (src_buffer) {
         runtime.CopyBuffer(src_buffer, arena, copies);
     }
-    if (is_texel_buffer && !is_written) {
-        return SynchronizeMemoryFromImage(arena, device_addr, size);
+    // bbport: a buffer the GPU writes first takes the newer contents of an image at its address
+    // (a render target's live only in the image). The shader may read what it writes, and the
+    // image is refreshed from the buffer afterwards: what the write leaves must be the image's.
+    if (is_texel_buffer || is_written) {
+        return SynchronizeMemoryFromImage(arena, device_addr, size, is_written);
     }
     return false;
 }
@@ -1311,8 +1314,9 @@ const Buffer* BufferCache::UploadCopies(const Buffer* arena, std::span<vk::Buffe
     return staging.buffer;
 }
 
-bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_addr, u32 size) {
-    if (auto type = texture_cache.IsMeta(device_addr)) {
+bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_addr, u32 size,
+                                             bool for_write) {
+    if (auto type = texture_cache.IsMeta(device_addr); type && !for_write) {
         if (*type == TextureCache::MetaType::HTile) {
             static constexpr u32 ZmaskUncompressed = 0xf;
             runtime.FillBuffer(arena, arena->Offset(device_addr), size, ZmaskUncompressed);
@@ -1328,9 +1332,16 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
         !BbToggle::Disabled(BbToggle::TextureBindingMemo)) {
         return false;
     }
-    const ImageId image_id = texture_cache.FindImageFromRange(device_addr, size);
+    const ImageId image_id =
+        texture_cache.FindImageFromRange(device_addr, size, true, !for_write);
     if (!image_id) {
-        miss = {device_addr, size, generation};
+        // Only an address no image starts at is remembered. One whose image is stale for now
+        // (dirty, or not GPU-written yet) turns valid without the registry changing: remembered,
+        // texel reads of that render target got the buffer's old contents until some image
+        // was created or freed (none for minutes at a time on a 4 GB GPU near its budget).
+        if (!texture_cache.HasImageAt(device_addr, false)) {
+            miss = {device_addr, size, generation};
+        }
         return false;
     }
     // bbport: the lookups above only read what the texture binding helper leaves alone; the
@@ -1348,6 +1359,10 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
         const u32 height = std::max(image.info.size.height >> mip, 1u);
         const u32 depth = std::max(image.info.size.depth >> mip, 1u);
         if (arena_offset + mip_info.offset + mip_info.size > arena->size_bytes) {
+            break;
+        }
+        // A write covers only its own range: levels past it keep their memory as it is.
+        if (for_write && mip_info.offset + mip_info.size > size) {
             break;
         }
         buffer_copies.push_back(vk::BufferImageCopy{

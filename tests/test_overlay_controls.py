@@ -56,6 +56,7 @@ prefix=r'''#include <algorithm>
 #include "imgui.h"
 #include "imgui_internal.h"
 
+namespace Vulkan { struct FrameCapture { static void Arm() {} }; }
 std::atomic<bool> menu_open{true};
 bool dirty=false;
 float base_scale=1.0f, frame_ms_avg=16.666f;
@@ -80,7 +81,15 @@ bool TrackedTab(const char* label) {
 }
 bool TrackedButton(const char* label) {
     bool result=ImGui::Button(label);
-    if (const char* key=std::strstr(label,"###")) buttons[key+3]=GImGui->LastItemData.Rect;
+    if (const char* key=std::strstr(label,"###")) {
+        // A button in a tab's scrolling panel is checked like the panel's other controls; the
+        // footer's must stay in view.
+        if (GImGui->CurrentWindow->Flags & ImGuiWindowFlags_ChildWindow) {
+            controls[key+3]=GImGui->LastItemData.Rect; control_windows[key+3]=GImGui->CurrentWindow; control_ids[key+3]=GImGui->LastItemData.ID;
+        } else {
+            buttons[key+3]=GImGui->LastItemData.Rect;
+        }
+    }
     return result;
 }
 bool TrackedCombo(const char* label,const char* preview) {

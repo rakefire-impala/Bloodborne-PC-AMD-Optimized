@@ -202,7 +202,10 @@ private:
     const Buffer* UploadCopies(const Buffer* arena, std::span<vk::BufferCopy> copies,
                                size_t total_size_bytes);
 
-    bool SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_addr, u32 size);
+    /// Copies the image starting at device_addr, if its GPU-written contents are the newest, into
+    /// the buffer (texel reads; `for_write`: GPU writes, up to their size, metadata excluded).
+    bool SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_addr, u32 size,
+                                    bool for_write = false);
 
     const Vulkan::Instance& instance;
     Vulkan::Scheduler& scheduler;
