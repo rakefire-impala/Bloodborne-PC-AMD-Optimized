@@ -137,8 +137,11 @@ void UniqueBuffer::Create(vk::BufferCreateInfo& buffer_ci, MemoryType mem_type,
         VkBuffer unsafe_buffer{};
         VkResult result = vmaCreateBuffer(allocator, &buffer_ci_unsafe, &alloc_ci, &unsafe_buffer,
                                           &allocation, out_alloc_info);
-        if ((result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) &&
-            HandleOutOfMemory()) {
+        // Each call frees the next thing it can (idle staging, then the VRAM reserve).
+        for (u32 attempt = 0;
+             (result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) &&
+             attempt < 4 && HandleOutOfMemory();
+             ++attempt) {
             result = vmaCreateBuffer(allocator, &buffer_ci_unsafe, &alloc_ci, &unsafe_buffer,
                                      &allocation, out_alloc_info);
         }
@@ -190,6 +193,10 @@ Buffer::Buffer(const Vulkan::Instance& instance, VAddr cpu_addr_, u64 size_bytes
         .usage = AllFlags,
         .sharingMode = vk::SharingMode::eExclusive,
     };
+    // bbport: buffer arenas share memory (bridges map their neighbours' bindings).
+    if (mem_type == MemoryType::Sparse && instance.IsSparseAliasingSupported()) {
+        buffer_ci.flags |= vk::BufferCreateFlagBits::eSparseAliased;
+    }
     VmaAllocationInfo alloc_info{};
     buffer.Create(buffer_ci, mem_type, &alloc_info);
 

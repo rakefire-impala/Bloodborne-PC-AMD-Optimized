@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include "common/types.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/vk_barrier_tracker.h"
@@ -110,6 +111,14 @@ public:
     }
 
 private:
+    /// bbport: VRAM held back on small-VRAM GPUs, handed back when the driver refuses an
+    /// allocation at its budget (see the constructor).
+    bool ReleaseVramReserve();
+    void RefillVramReserve();
+    std::atomic<VmaAllocation> vram_reserve{};
+    u32 vram_reserve_types = 0; ///< memory types it may use, 0 without a reserve
+    u32 reserve_ticks = 0;
+
     void (*image_access_hook)(void*) = nullptr;
     void* image_access_context = nullptr;
     const Instance& instance;

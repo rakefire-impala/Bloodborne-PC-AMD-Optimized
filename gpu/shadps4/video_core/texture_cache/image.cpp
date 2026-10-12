@@ -110,9 +110,9 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     // knows the driver's budget, and with VRAM at it, it placed new images in system memory
     // without a word: textures and render targets the GPU then read and drew over PCIe (a
     // 485 ms GPU frame on an RX 5500M) while heavily blurred, smeared textures covered the
-    // screen. At the budget, idle staging is released first; then the image goes into VRAM over
-    // the budget, as before VMA knew it (Windows pages out what it must); system memory is the
-    // last resort and is reported.
+    // screen. At the budget, idle staging is released first, then the VRAM reserve (Runtime);
+    // then the image goes into VRAM over the budget, as before VMA knew it (Windows pages out
+    // what it must); system memory is the last resort and is reported.
     const u32 vram_types = VideoCore::ImageMemoryTypeBits();
     const VmaAllocationCreateInfo alloc_ci = {
         .flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT,
@@ -132,7 +132,9 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     };
     VkResult result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_ci, &unsafe_image,
                                      &allocation, &alloc_info);
-    if (out_of_memory(result) && VideoCore::HandleOutOfMemory()) {
+    // Each call frees the next thing it can (idle staging, then the VRAM reserve).
+    for (u32 attempt = 0; out_of_memory(result) && attempt < 4 && VideoCore::HandleOutOfMemory();
+         ++attempt) {
         result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_ci, &unsafe_image, &allocation,
                                 &alloc_info);
     }

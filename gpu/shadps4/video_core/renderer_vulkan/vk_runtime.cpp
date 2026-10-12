@@ -13,6 +13,7 @@
 #include "video_core/texture_cache/blit_helper.h"
 #include "video_core/texture_cache/image.h"
 
+#include <vk_mem_alloc.h>
 #include <vulkan/vulkan_format_traits.hpp>
 
 namespace Vulkan {
@@ -106,8 +107,10 @@ Runtime::Runtime(const Instance& instance_, Scheduler& scheduler_)
     memory_barrier.dstAccessMask =
         vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
 
-    // bbport: a buffer or image VRAM refuses first gets the idle staging back.
-    VideoCore::SetOutOfMemoryHandler([this] { return staging_pool.ReleaseIdle() != 0; });
+    // bbport: a buffer or image VRAM refuses first gets the idle staging back, then the VRAM
+    // reserve (each call frees the next one).
+    VideoCore::SetOutOfMemoryHandler(
+        [this] { return staging_pool.ReleaseIdle() != 0 || ReleaseVramReserve(); });
 
     // bbport: images go to the largest device-local heap, in types the CPU cannot map (not the
     // small CPU-visible VRAM window, not system memory). Integrated GPUs keep every type: their
@@ -132,15 +135,75 @@ Runtime::Runtime(const Instance& instance_, Scheduler& scheduler_)
             }
         }
         VideoCore::SetImageMemoryTypeBits(bits);
+        // bbport: with VRAM at the driver's budget, AMD's driver refuses every new allocation,
+        // system memory included, and the space left inside VMA's blocks comes in pieces: an
+        // RX 5500M crashed on a 5.4 MiB texture with 223 MiB free in them. On GPUs with at most
+        // 6 GiB, 64 MiB of VRAM is held back and handed to the first allocation refused that
+        // way, then taken again once the heap has room.
+        if (props.memoryHeaps[largest_heap].size <= 6_GB && bits != 0) {
+            vram_reserve_types = bits;
+            RefillVramReserve();
+        }
     }
 }
 
 Runtime::~Runtime() {
     VideoCore::SetOutOfMemoryHandler({});
+    if (const VmaAllocation allocation = vram_reserve.exchange(nullptr)) {
+        vmaFreeMemory(instance.GetAllocator(), allocation);
+    }
 }
 
 void Runtime::TickFrame() {
     staging_pool.TickFrame();
+    // bbport: a few times a second.
+    if (vram_reserve_types != 0 && (++reserve_ticks & 15) == 0) {
+        RefillVramReserve();
+    }
+}
+
+namespace {
+constexpr u64 VRAM_RESERVE_SIZE = 64_MB;
+} // namespace
+
+bool Runtime::ReleaseVramReserve() {
+    const VmaAllocation allocation = vram_reserve.exchange(nullptr, std::memory_order_acq_rel);
+    if (!allocation) {
+        return false;
+    }
+    vmaFreeMemory(instance.GetAllocator(), allocation);
+    std::printf("VRAM reserve: %llu MiB handed to an allocation the driver refused at its "
+                "budget; %s\n",
+                (unsigned long long)(VRAM_RESERVE_SIZE >> 20), instance.DescribeMemory().c_str());
+    return true;
+}
+
+void Runtime::RefillVramReserve() {
+    if (vram_reserve.load(std::memory_order_acquire)) {
+        return;
+    }
+    // Only with room to spare: taken at the budget, it would make other allocations fail.
+    if (instance.CanReportMemoryUsage()) {
+        const auto levels = instance.GetMemoryLevels();
+        if (levels.budget == 0 || levels.usage + VRAM_RESERVE_SIZE + 128_MB > levels.budget) {
+            return;
+        }
+    }
+    const VkMemoryRequirements requirements = {
+        .size = VRAM_RESERVE_SIZE,
+        .alignment = 64_KB,
+        .memoryTypeBits = vram_reserve_types,
+    };
+    const VmaAllocationCreateInfo create_info = {
+        .flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT |
+                 VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT,
+        .memoryTypeBits = vram_reserve_types,
+    };
+    VmaAllocation allocation{};
+    if (vmaAllocateMemory(instance.GetAllocator(), &requirements, &create_info, &allocation,
+                          nullptr) == VK_SUCCESS) {
+        vram_reserve.store(allocation, std::memory_order_release);
+    }
 }
 
 void Runtime::CopyBuffer(const VideoCore::Buffer* src, const VideoCore::Buffer* dst,
@@ -803,13 +866,27 @@ void Runtime::SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool c
     backing = new_backing;
 }
 
-bool Runtime::IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 size,
-                               bool check_read_access) {
-    const AddressRange range = {
+namespace {
+/// bbport: buffer arenas alias one another (a bridge maps the memory of the arenas on both
+/// sides of its boundary), so their accesses are tracked by guest address: a write through one
+/// is found by a read through another.
+constexpr u64 ARENA_RESOURCE = ~u64{0};
+AddressRange TrackedRange(const VideoCore::Buffer* handle, u64 offset, u64 size) {
+    if (handle->mem_type == VideoCore::MemoryType::Sparse) {
+        const u64 start = handle->cpu_addr + offset;
+        return {.resource = ARENA_RESOURCE, .range_start = start, .range_end = start + size - 1};
+    }
+    return {
         .resource = reinterpret_cast<u64>(handle),
         .range_start = offset,
         .range_end = offset + size - 1,
     };
+}
+} // namespace
+
+bool Runtime::IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 size,
+                               bool check_read_access) {
+    const AddressRange range = TrackedRange(handle, offset, size);
     bool has_access = barrier_tracker.FindRange(range, Access::Write);
     if (check_read_access && !has_access) {
         has_access |= barrier_tracker.FindRange(range, Access::Read);
@@ -819,11 +896,7 @@ bool Runtime::IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 
 
 void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size,
                            vk::PipelineStageFlags2 src_stage, vk::AccessFlags2 src_access) {
-    AddressRange range = {
-        .resource = reinterpret_cast<u64>(handle),
-        .range_start = offset,
-        .range_end = offset + size - 1,
-    };
+    AddressRange range = TrackedRange(handle, offset, size);
 
     constexpr static vk::AccessFlags2 READ_MASK =
         vk::AccessFlagBits2::eIndexRead | vk::AccessFlagBits2::eVertexAttributeRead |

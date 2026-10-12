@@ -69,13 +69,16 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     }
     arena_page_size = u64{1} << arena_page_bits;
     num_arena_pages = u64{1} << (ADDRESS_SPACE_BITS - arena_page_bits);
-    if (arena_page_bits != MAX_ARENA_PAGE_BITS) {
-        LOG_INFO(Render_Vulkan, "Buffer arenas of {} MiB (driver buffer limit {} MiB)",
-                 arena_page_size >> 20, instance.GetMaxBufferSize() >> 20);
-    }
+    arena_pairs = (u64{2} << arena_page_bits) <= instance.GetMaxBufferSize();
+    std::printf("Buffer cache: arena pages of %llu MiB, %s (driver buffer limit %llu MiB)\n",
+                (unsigned long long)(arena_page_size >> 20),
+                arena_pairs ? "owned in pairs" : "owned singly",
+                (unsigned long long)(instance.GetMaxBufferSize() >> 20));
     const vk::BufferCreateInfo probe_ci = {
-        .flags =
-            vk::BufferCreateFlagBits::eSparseBinding | vk::BufferCreateFlagBits::eSparseResidency,
+        .flags = vk::BufferCreateFlagBits::eSparseBinding |
+                 vk::BufferCreateFlagBits::eSparseResidency |
+                 (instance.IsSparseAliasingSupported() ? vk::BufferCreateFlagBits::eSparseAliased
+                                                       : vk::BufferCreateFlags{}),
         .size = arena_page_size,
         .usage = ARENA_USAGE,
         .sharingMode = vk::SharingMode::eExclusive,
@@ -198,19 +201,21 @@ void BufferCache::ExtendWriteFault(VAddr device_addr) {
 
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool assume_locks) {
     const auto flush_request = [this, device_addr, size, is_write] {
-        const u32 first_block = device_addr >> block_shift;
-        const u32 last_block = (device_addr + size - 1) >> block_shift;
-        const auto* arena = GetArena(first_block, last_block);
-
         // GPU-modified ranges come as many small scattered islands,
         // so the download is widened to a window around the request
         constexpr u64 WindowSize = 512_KB;
-        const VAddr arena_end = arena->cpu_addr + arena->size_bytes;
-        const VAddr window_start =
-            std::max<VAddr>(Common::AlignDown(device_addr, WindowSize), arena->cpu_addr);
-        const VAddr window_end = std::min<VAddr>(
-            std::max<VAddr>(window_start + WindowSize, device_addr + size), arena_end);
-        DownloadMemory(arena, window_start, window_end - window_start);
+        const VAddr window_start = Common::AlignDown(device_addr, WindowSize);
+        const VAddr window_end = std::max<VAddr>(window_start + WindowSize, device_addr + size);
+        // bbport: from the owner arenas, which hold every resident block (GPU-written ones
+        // included); a page without one has nothing to download.
+        for (VAddr start = window_start; start < window_end;) {
+            const u64 page = start >> arena_page_bits;
+            const VAddr end = std::min<VAddr>((page + 1) << arena_page_bits, window_end);
+            if (const Buffer* owner = address_space[page]) {
+                DownloadMemory(owner, start, end - start);
+            }
+            start = end;
+        }
         if (is_write) {
             memory_tracker->MarkRegionAsCpuModified(device_addr, size);
         }
@@ -383,7 +388,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     const u64 last_block = (device_addr + size - 1) >> block_shift;
     const auto* arena = GetArena(first_block, last_block);
     NoteUse(device_addr, size);
-    EnsureResident(arena, first_block, last_block);
+    EnsureResident(first_block, last_block);
     const u64 uploaded_before = BbStats::buffer_upload_bytes.load(std::memory_order_relaxed);
     SynchronizeMemory(arena, device_addr, size, is_written, is_texel_buffer);
     if (stats) {
@@ -445,10 +450,13 @@ void BufferCache::ProcessFaultBuffer() {
 
 void BufferCache::SynchronizeDmaBuffers() {
     for (const auto& range : resident_ranges) {
-        const u64 page = range.start >> (arena_page_bits - block_shift);
-        const VAddr device_addr = range.start << block_shift;
-        const u64 size = (range.end - range.start) << block_shift;
-        SynchronizeMemory(address_space[page], device_addr, size, false, false);
+        // bbport: through the owners, per run of pages (a range may cross into the next pair).
+        ForEachArenaBinding(range.start, range.end, [&](const Buffer* arena, u64 start, u64 end) {
+            if (address_space[start >> blocks_per_arena_page_shift] == arena) {
+                SynchronizeMemory(arena, start << block_shift, (end - start) << block_shift,
+                                  false, false);
+            }
+        });
     }
 }
 
@@ -458,86 +466,138 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
     ASSERT_MSG(last_page - first_page <= 1,
                "Buffer request cannot span more than two VA arena pages");
 
-    const auto* first_arena = address_space[first_page];
-    const auto* last_arena = address_space[last_page];
-    if (first_arena == last_arena) {
-        if (!first_arena) {
-            // bbport: a new arena covers the aligned pair of pages around the request when both
-            // are free and two pages fit the driver's buffer limit. Bloodborne's GPU memory
-            // spans 0x10xxxxxxxx and 0x11xxxxxxxx: with an arena per page, the first buffer
-            // across 0x1100000000 migrated them, binding every resident range again (1401
-            // sparse binds, a 583 ms frame on an RX 5500M at a boss approach).
-            const u64 pair_page = first_page & ~u64{1};
-            if (last_page <= pair_page + 1 && pair_page + 1 < num_arena_pages &&
-                (u64{2} << arena_page_bits) <= instance.GetMaxBufferSize() &&
-                !address_space[pair_page] && !address_space[pair_page + 1]) {
-                const auto* new_arena =
-                    &arenas.emplace_back(instance, pair_page << arena_page_bits,
-                                         u64{2} << arena_page_bits, MemoryType::Sparse);
-                address_space[pair_page] = new_arena;
-                address_space[pair_page + 1] = new_arena;
-                return new_arena;
-            }
-            const u64 base_block = Common::AlignDownPow2<u64>(first_block, blocks_per_arena_page);
-            const u64 num_pages = last_page - first_page + 1;
-            const auto* new_arena =
-                &arenas.emplace_back(instance, base_block << block_shift,
-                                     num_pages << arena_page_bits, MemoryType::Sparse);
-            address_space[first_page] = new_arena;
-            address_space[last_page] = new_arena;
+    const Buffer* first_arena = OwnerArena(first_page);
+    if (OwnerArena(last_page) == first_arena) {
+        return first_arena;
+    }
+    return BridgeArena(first_block, last_block);
+}
+
+const Buffer* BufferCache::OwnerArena(u64 page) {
+    if (const Buffer* arena = address_space[page]) {
+        return arena;
+    }
+    // Owners are created whole, so the other page of the pair has none either.
+    const u64 first = arena_pairs ? page & ~u64{1} : page;
+    const u64 count = arena_pairs && first + 1 < num_arena_pages ? 2 : 1;
+    const Buffer* arena = &arenas.emplace_back(instance, first << arena_page_bits,
+                                               count << arena_page_bits, MemoryType::Sparse);
+    for (u64 owned = first; owned < first + count; ++owned) {
+        address_space[owned] = arena;
+    }
+    return arena;
+}
+
+const Buffer* BufferCache::BridgeArena(u64 first_block, u64 last_block) {
+    const u64 end_block = last_block + 1;
+    auto it = std::ranges::find_if(bridges, [&](const Bridge& bridge) {
+        const u64 base = bridge.arena->cpu_addr >> block_shift;
+        return base <= first_block &&
+               end_block <= base + (bridge.arena->size_bytes >> block_shift);
+    });
+    if (it == bridges.end()) {
+        // Centred on the boundary between the two owners (the pages on both sides), or moved
+        // over the request when the driver's limit makes it narrower than two pages.
+        const u64 max_blocks = std::min<u64>(u64{2} << blocks_per_arena_page_shift,
+                                             instance.GetMaxBufferSize() >> block_shift);
+        ASSERT_MSG(end_block - first_block <= max_blocks,
+                   "A {} MiB buffer is over the driver's buffer size limit",
+                   ((end_block - first_block) << block_shift) >> 20);
+        const u64 boundary = (last_block >> blocks_per_arena_page_shift)
+                             << blocks_per_arena_page_shift;
+        const u64 lowest = end_block > max_blocks ? end_block - max_blocks : 0;
+        const u64 base = std::clamp(boundary - max_blocks / 2, lowest, first_block);
+        const Buffer* arena = &arenas.emplace_back(instance, base << block_shift,
+                                                   max_blocks << block_shift, MemoryType::Sparse);
+        it = bridges.insert(bridges.end(), Bridge{arena, 0, 0});
+        std::printf("Buffer cache: bridge arena over 0x%llx-0x%llx for buffers across 0x%llx\n",
+                    (unsigned long long)(base << block_shift),
+                    (unsigned long long)((base + max_blocks) << block_shift),
+                    (unsigned long long)(boundary << block_shift));
+    }
+    // The window grows over the request, in 8 MiB steps: binding the resident ranges it gains
+    // costs a few binds, where replacing the arenas bound everything.
+    Bridge& bridge = *it;
+    const u64 base = bridge.arena->cpu_addr >> block_shift;
+    const u64 limit = base + (bridge.arena->size_bytes >> block_shift);
+    const u64 step = std::max<u64>(8_MB >> block_shift, 1);
+    const u64 lo = std::max(base, Common::AlignDown(first_block, step));
+    const u64 hi = std::min(limit, Common::AlignUp(end_block, step));
+    if (bridge.lo == bridge.hi) {
+        MirrorIntoBridge(bridge, lo, hi);
+        bridge.lo = lo;
+        bridge.hi = hi;
+    }
+    if (lo < bridge.lo) {
+        MirrorIntoBridge(bridge, lo, bridge.lo);
+        bridge.lo = lo;
+    }
+    if (bridge.hi < hi) {
+        MirrorIntoBridge(bridge, bridge.hi, hi);
+        bridge.hi = hi;
+    }
+    return bridge.arena;
+}
+
+template <typename Func>
+void BufferCache::ForEachArenaBinding(u64 start, u64 end, Func&& func) const {
+    for (u64 block = start; block < end;) {
+        const Buffer* owner = address_space[block >> blocks_per_arena_page_shift];
+        u64 run_end = block;
+        do {
+            run_end = std::min<u64>(
+                end, ((run_end >> blocks_per_arena_page_shift) + 1) << blocks_per_arena_page_shift);
+        } while (run_end < end && address_space[run_end >> blocks_per_arena_page_shift] == owner);
+        if (owner) {
+            func(owner, block, run_end);
         }
-        return address_space[first_page];
+        block = run_end;
     }
-
-    LOG_WARNING(Render, "Migrating arena");
-
-    // bbport: the new arena spans both old ones when that fits the driver's buffer limit, else
-    // only the request's two pages; pages outside it keep their arenas, which stay bound. (Two
-    // arenas of two pages made one of four, over the limit.)
-    u64 first_addr = first_page << arena_page_bits;
-    u64 end_addr = (last_page + 1) << arena_page_bits;
-    for (const Buffer* arena : {first_arena, last_arena}) {
-        if (arena) {
-            first_addr = std::min<u64>(first_addr, arena->cpu_addr);
-            end_addr = std::max<u64>(end_addr, arena->cpu_addr + arena->size_bytes);
+    for (const Bridge& bridge : bridges) {
+        const u64 a = std::max(start, bridge.lo);
+        const u64 b = std::min(end, bridge.hi);
+        if (a < b) {
+            func(bridge.arena, a, b);
         }
     }
-    if (end_addr - first_addr > instance.GetMaxBufferSize()) {
-        first_addr = first_page << arena_page_bits;
-        end_addr = (last_page + 1) << arena_page_bits;
-    }
+}
 
-    const u64 base_block = first_addr >> block_shift;
-    const u64 end_block = end_addr >> block_shift;
-    auto* new_arena =
-        &arenas.emplace_back(instance, first_addr, end_addr - first_addr, MemoryType::Sparse);
-    auto* bind = BindsForArena(new_arena);
-    resident_ranges.ForEachInRange(base_block, end_block, [&](const Backing& backing) {
-        const u64 start = std::max(base_block, backing.start);
-        const u64 end = std::min(end_block, backing.end);
-        bind->binds.push_back(vk::SparseMemoryBind{
-            .resourceOffset = (start - base_block) << block_shift,
+void BufferCache::BindBacking(const Backing& backing, bool owners) {
+    ForEachArenaBinding(backing.start, backing.end, [&](const Buffer* arena, u64 start, u64 end) {
+        if (!owners && address_space[start >> blocks_per_arena_page_shift] == arena) {
+            return;
+        }
+        BindsForArena(arena)->binds.push_back(vk::SparseMemoryBind{
+            .resourceOffset = (start << block_shift) - arena->cpu_addr,
             .size = (end - start) << block_shift,
             .memory = backing.memory,
             .memoryOffset = backing.offset + ((start - backing.start) << block_shift),
         });
     });
-
-    for (u64 page = first_addr >> arena_page_bits; page < (end_addr >> arena_page_bits); ++page) {
-        address_space[page] = new_arena;
-    }
-    return new_arena;
 }
 
-void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_block) {
+void BufferCache::MirrorIntoBridge(const Bridge& bridge, u64 start, u64 end) {
+    auto* bind = BindsForArena(bridge.arena);
+    resident_ranges.ForEachInRange(start, end, [&](const Backing& backing) {
+        const u64 a = std::max(start, backing.start);
+        const u64 b = std::min(end, backing.end);
+        bind->binds.push_back(vk::SparseMemoryBind{
+            .resourceOffset = (a << block_shift) - bridge.arena->cpu_addr,
+            .size = (b - a) << block_shift,
+            .memory = backing.memory,
+            .memoryOffset = backing.offset + ((a - backing.start) << block_shift),
+        });
+    });
+}
+
+void BufferCache::EnsureResident(u64 first_block, u64 last_block) {
     // bbport: a range retired but not released yet is still bound to its memory (the
     // submission that retired it may still run): it takes that memory back. Binding new memory
     // would change what the running submission reads.
     boost::container::small_vector<Backing, 4> restored;
     for (size_t i = 0; i < retired_ranges.size();) {
         const RetiredRange& retired = retired_ranges[i];
-        if (retired.arena == arena && retired.backing.start <= last_block &&
-            first_block < retired.backing.end) {
+        if (retired.backing.start <= last_block && first_block < retired.backing.end) {
             restored.push_back(retired.backing);
             resident_ranges.Add(retired.backing);
             retired_ranges.erase(retired_ranges.begin() + i);
@@ -567,12 +627,13 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
 
     auto* bda_addrs = reinterpret_cast<vk::DeviceAddress*>(staging.mapped);
     u64 offset = staging.offset;
-    // Page-table entries for blocks [start, end), now backed.
+    // Page-table entries for blocks [start, end), now backed: into the owners, which hold every
+    // resident block (a bridge only those near its boundary).
     const auto write_entries = [&](u64 start, u64 end) {
-        const u64 resource_offset = (start << block_shift) - arena->cpu_addr;
-        for (u64 block = 0; block < end - start; ++block) {
+        for (u64 block = start; block < end; ++block) {
+            const Buffer* owner = address_space[block >> blocks_per_arena_page_shift];
             *(bda_addrs++) =
-                arena->BufferDeviceAddress() + resource_offset + (block << block_shift);
+                owner->BufferDeviceAddress() + ((block << block_shift) - owner->cpu_addr);
         }
         const u64 copy_size = (end - start) * sizeof(vk::DeviceAddress);
         copies.emplace_back(offset, start * sizeof(vk::DeviceAddress), copy_size);
@@ -580,11 +641,16 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         arena_resident_bytes.fetch_add((end - start) << block_shift, std::memory_order_relaxed);
     };
     for (const Backing& backing : restored) {
+        // A bridge whose window grew over it while it was retired lacks its binding.
+        BindBacking(backing, false);
         write_entries(backing.start, backing.end);
     }
     for (const auto& range : bind_ranges) {
-        // Released earlier in this submission: its unbind must not follow this bind.
-        TrimPendingUnbinds(arena, range.start, range.end);
+        // Released earlier in this submission: its unbinds must not follow these binds.
+        ForEachArenaBinding(range.start, range.end,
+                            [this](const Buffer* arena, u64 start, u64 end) {
+                                TrimPendingUnbinds(arena, start, end);
+                            });
         // Free blocks come in runs: bind the range piece by piece.
         for (u64 start = range.start; start < range.end;) {
             const ArenaPiece piece = AllocateArenaPiece(range.end - start);
@@ -600,12 +666,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
             LOG_INFO(Render, "Making range start={}, end={} resident", backing.start,
                      backing.end);
 
-            BindsForArena(arena)->binds.emplace_back(vk::SparseMemoryBind{
-                .resourceOffset = (backing.start << block_shift) - arena->cpu_addr,
-                .size = piece.blocks << block_shift,
-                .memory = piece.memory,
-                .memoryOffset = piece.offset,
-            });
+            BindBacking(backing, true);
             write_entries(backing.start, backing.end);
             start = backing.end;
         }
@@ -710,7 +771,7 @@ bool BufferCache::PrefersSystemMemory() const {
 bool BufferCache::IsSystemBacking(vk::DeviceMemory memory, u64 offset) const {
     for (const ArenaChunk& chunk : arena_chunks) {
         if (chunk.memory == memory && offset >= chunk.offset &&
-            offset < chunk.offset + chunk.size) {
+            offset < chunk.offset + ARENA_CHUNK_SIZE) {
             return chunk.system;
         }
     }
@@ -727,14 +788,14 @@ std::optional<BufferCache::ArenaPiece> BufferCache::TakeFreeBlocks(u64 blocks, b
         }
         // First free run, at most `blocks` long.
         u32 first = 0;
-        for (u32 word = 0; word * 64 < chunk.blocks; ++word) {
+        for (u32 word = 0; word * 64 < chunk_blocks; ++word) {
             if (chunk.used[word] != ~u64{0}) {
                 first = word * 64 + std::countr_one(chunk.used[word]);
                 break;
             }
         }
         u32 length = 0;
-        while (first + length < chunk.blocks && length < blocks &&
+        while (first + length < chunk_blocks && length < blocks &&
                !((chunk.used[(first + length) >> 6] >> ((first + length) & 63)) & 1)) {
             ++length;
         }
@@ -756,14 +817,8 @@ BufferCache::ArenaPiece BufferCache::AllocateArenaPiece(u64 blocks) {
         return *TakeFreeBlocks(blocks, false);
     }
     // VRAM short: a chunk may still fit in space VMA already holds, which costs the heap nothing.
-    // Evictions leave that space in pieces of all sizes: smaller chunks take what 8 MiB misses.
-    if (system_first) {
-        const u64 min_size = std::max<u64>(MIN_ARENA_CHUNK_SIZE, block_size);
-        for (u64 size = ARENA_CHUNK_SIZE; size >= min_size; size >>= 1) {
-            if (AllocateArenaChunk(false, true, size)) {
-                return *TakeFreeBlocks(blocks, false);
-            }
-        }
+    if (system_first && AllocateArenaChunk(false, true)) {
+        return *TakeFreeBlocks(blocks, false);
     }
     if (const auto piece = TakeFreeBlocks(blocks, true)) {
         return *piece;
@@ -774,6 +829,12 @@ BufferCache::ArenaPiece BufferCache::AllocateArenaPiece(u64 blocks) {
     // System memory refused too: VRAM past the headroom mark beats failing.
     if (system_first && AllocateArenaChunk(false)) {
         return *TakeFreeBlocks(blocks, false);
+    }
+    // bbport: refused at the driver's budget: idle staging, then the VRAM reserve make room.
+    for (u32 attempt = 0; attempt < 4 && HandleOutOfMemory(); ++attempt) {
+        if (AllocateArenaChunk(false)) {
+            return *TakeFreeBlocks(blocks, false);
+        }
     }
     if (EmergencyReclaim()) {
         if (const auto piece = TakeFreeBlocks(blocks, false)) {
@@ -794,41 +855,38 @@ BufferCache::ArenaPiece BufferCache::AllocateArenaPiece(u64 blocks) {
     return {};
 }
 
-bool BufferCache::AllocateArenaChunk(bool system, bool existing_blocks, u64 size) {
+bool BufferCache::AllocateArenaChunk(bool system, bool existing_blocks) {
     const u32 type = system ? arena_fallback_memory_type_index : arena_memory_type_index;
     VmaAllocation allocation{};
     VmaAllocationInfo info{};
-    if (!AllocateChunkMemory(instance.GetAllocator(), type, size, block_size, allocation, info,
-                             existing_blocks)) {
+    if (!AllocateChunkMemory(instance.GetAllocator(), type, ARENA_CHUNK_SIZE, block_size,
+                             allocation, info, existing_blocks)) {
         if (!existing_blocks) {
             LOG_WARNING(Render_Vulkan, "Buffer arena chunk in {} memory failed; {}",
                         system ? "system" : "video", instance.DescribeMemory());
         }
         return false;
     }
-    AdoptArenaChunk(allocation, info.deviceMemory, info.offset, system, size);
+    AdoptArenaChunk(allocation, info.deviceMemory, info.offset, system);
     return true;
 }
 
 void BufferCache::AdoptArenaChunk(VmaAllocation allocation, vk::DeviceMemory memory, u64 offset,
-                                  bool system, u64 size) {
+                                  bool system) {
     ArenaChunk& chunk = arena_chunks.emplace_back();
     chunk.allocation = allocation;
     chunk.memory = memory;
     chunk.offset = offset;
-    chunk.size = size;
-    chunk.blocks = static_cast<u32>(size >> block_shift);
     chunk.system = system;
-    chunk.free_blocks = chunk.blocks;
-    // Bits past a smaller chunk's end read as used.
-    SetBits(chunk.used, chunk.blocks, MAX_CHUNK_WORDS * 64 - chunk.blocks, true);
+    chunk.free_blocks = chunk_blocks;
     chunk_hint = arena_chunks.size() - 1;
     const u32 count = arena_chunk_count.fetch_add(1, std::memory_order_relaxed) + 1;
     BbHitch::arena_chunks.fetch_add(1, std::memory_order_relaxed);
-    arena_chunk_bytes.fetch_add(size, std::memory_order_relaxed);
+    arena_chunk_bytes.fetch_add(ARENA_CHUNK_SIZE, std::memory_order_relaxed);
     if (system) {
         const u64 system_bytes =
-            arena_system_bytes.fetch_add(size, std::memory_order_relaxed) + size;
+            arena_system_bytes.fetch_add(ARENA_CHUNK_SIZE, std::memory_order_relaxed) +
+            ARENA_CHUNK_SIZE;
         LOG_WARNING(Render_Vulkan,
                     "VRAM near the budget: buffer arena chunk {} in system memory ({} MiB "
                     "there); device usage {} of {} MiB budget",
@@ -842,11 +900,11 @@ void BufferCache::FreeArenaPiece(vk::DeviceMemory memory, u64 offset, u64 blocks
     while (blocks != 0) {
         const auto it = std::ranges::find_if(arena_chunks, [&](const ArenaChunk& chunk) {
             return chunk.memory == memory && offset >= chunk.offset &&
-                   offset < chunk.offset + chunk.size;
+                   offset < chunk.offset + ARENA_CHUNK_SIZE;
         });
         ASSERT_MSG(it != arena_chunks.end(), "Freed arena memory belongs to no chunk");
         const u32 first = static_cast<u32>((offset - it->offset) >> block_shift);
-        const u32 count = static_cast<u32>(std::min<u64>(blocks, it->blocks - first));
+        const u32 count = static_cast<u32>(std::min<u64>(blocks, chunk_blocks - first));
         SetBits(it->used, first, count, false);
         it->free_blocks += count;
         it->unbind_pending = true;
@@ -863,7 +921,7 @@ void BufferCache::ReleaseEmptyChunks(bool pressured) {
     bool kept_spare = pressured;
     for (size_t i = arena_chunks.size(); i-- > 0;) {
         ArenaChunk& chunk = arena_chunks[i];
-        if (chunk.free_blocks != chunk.blocks || chunk.unbind_pending) {
+        if (chunk.free_blocks != chunk_blocks || chunk.unbind_pending) {
             continue;
         }
         if (!chunk.system && !kept_spare) {
@@ -882,9 +940,9 @@ void BufferCache::ReleaseEmptyChunks(bool pressured) {
         }
         vmaFreeMemory(instance.GetAllocator(), chunk.allocation);
         arena_chunk_count.fetch_sub(1, std::memory_order_relaxed);
-        arena_chunk_bytes.fetch_sub(chunk.size, std::memory_order_relaxed);
+        arena_chunk_bytes.fetch_sub(ARENA_CHUNK_SIZE, std::memory_order_relaxed);
         if (chunk.system) {
-            arena_system_bytes.fetch_sub(chunk.size, std::memory_order_relaxed);
+            arena_system_bytes.fetch_sub(ARENA_CHUNK_SIZE, std::memory_order_relaxed);
         }
         ++reclaim_stats.released_chunks;
         arena_chunks.erase(arena_chunks.begin() + i);
@@ -900,8 +958,7 @@ void BufferCache::RetireRange(const Backing& backing, u64 tick) {
                        blocks * sizeof(vk::DeviceAddress), 0);
     // The next binding uploads the guest data again.
     memory_tracker->MarkRegionAsCpuModified(backing.start << block_shift, blocks << block_shift);
-    retired_ranges.push_back({address_space[backing.start >> blocks_per_arena_page_shift], tick,
-                              backing});
+    retired_ranges.push_back({tick, backing});
     arena_resident_bytes.fetch_sub(blocks << block_shift, std::memory_order_relaxed);
 }
 
@@ -920,20 +977,18 @@ void BufferCache::ReleaseRetiredRanges() {
         keep.Add({retired_ranges[i].backing.start, retired_ranges[i].backing.end});
     }
     for (size_t i = 0; i < done; ++i) {
-        const RetiredRange& retired = retired_ranges[i];
-        const Backing& backing = retired.backing;
-        ArenaBinds* unbinds = nullptr;
+        const Backing& backing = retired_ranges[i].backing;
         resident_ranges.ForEachGap(backing.start, backing.end, [&](u64 start, u64 end) {
             keep.ForEachGap(start, end, [&](u64 a, u64 b) {
-                if (!unbinds) {
-                    auto it = std::ranges::find(pending_unbinds, retired.arena, &ArenaBinds::arena);
-                    unbinds = it != pending_unbinds.end()
-                                  ? std::addressof(*it)
-                                  : &pending_unbinds.emplace_back(retired.arena);
-                }
-                unbinds->binds.push_back(vk::SparseMemoryBind{
-                    .resourceOffset = (a << block_shift) - retired.arena->cpu_addr,
-                    .size = (b - a) << block_shift,
+                // From the owner and every bridge mapping it.
+                ForEachArenaBinding(a, b, [&](const Buffer* arena, u64 x, u64 y) {
+                    auto it = std::ranges::find(pending_unbinds, arena, &ArenaBinds::arena);
+                    ArenaBinds& unbinds =
+                        it != pending_unbinds.end() ? *it : pending_unbinds.emplace_back(arena);
+                    unbinds.binds.push_back(vk::SparseMemoryBind{
+                        .resourceOffset = (x << block_shift) - arena->cpu_addr,
+                        .size = (y - x) << block_shift,
+                    });
                 });
             });
         });
@@ -964,10 +1019,7 @@ u64 BufferCache::RetireRanges(u64 max_bytes, std::optional<bool> system, u64 tic
                 !memory_tracker->IsRegionGpuModified(block << block_shift, size)) {
                 const Backing piece = backing.SubRange(block, end);
                 Backing* last = picks.empty() ? nullptr : &picks.back();
-                // One retirement per run within an arena (its unbind names one arena).
-                if (last && last->end == piece.start && last->CanMergeWith(piece) &&
-                    (last->start >> blocks_per_arena_page_shift) ==
-                        (piece.start >> blocks_per_arena_page_shift)) {
+                if (last && last->end == piece.start && last->CanMergeWith(piece)) {
                     last->end = piece.end;
                 } else {
                     picks.push_back(piece);

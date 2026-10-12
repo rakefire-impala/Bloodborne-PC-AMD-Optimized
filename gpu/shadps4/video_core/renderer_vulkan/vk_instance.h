@@ -106,6 +106,12 @@ public:
         return features.samplerAnisotropy;
     }
 
+    /// bbport: sparse buffers may share memory consistently (a bridge arena maps the memory of
+    /// the arenas on both sides of its boundary).
+    bool IsSparseAliasingSupported() const {
+        return features.sparseResidencyAliased;
+    }
+
     /// Returns true if depth bounds testing is supported
     bool IsDepthBoundsSupported() const {
         return features.depthBounds;

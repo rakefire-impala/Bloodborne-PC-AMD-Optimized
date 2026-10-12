@@ -179,9 +179,16 @@ private:
         return &pending_binds.emplace_back(arena);
     }
 
+    /// bbport: the arena for blocks [first_block, last_block]: their pages' owner, or a bridge
+    /// when the pages have different owners.
     const Buffer* GetArena(u64 first_block, u64 last_block);
+    /// The arena owning `page`, created over its aligned pair of pages when two pages fit the
+    /// driver's buffer limit. It holds every resident block of its pages, and the page table
+    /// points into it.
+    const Buffer* OwnerArena(u64 page);
+    const Buffer* BridgeArena(u64 first_block, u64 last_block);
 
-    void EnsureResident(const Buffer* arena, u64 first_block, u64 last_block);
+    void EnsureResident(u64 first_block, u64 last_block);
 
     void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size);
 
@@ -240,6 +247,29 @@ private:
     };
     IntervalList<Backing> resident_ranges;
 
+    /// bbport: arenas stay within the driver's buffer limit (2 GiB on an RX 5500M, a pair of
+    /// 1 GiB pages). A buffer across two owners comes from a bridge: an arena over both sides
+    /// of their boundary, mirroring the bindings of a window around it that grows with the
+    /// requests. Bloodborne's GPU memory crosses two boundaries between pairs (0x1080000000,
+    /// 0x1100000000). Before, such a buffer replaced both sides' arenas by one over both, of up
+    /// to 4 GiB, binding every resident range again (1401-1893 binds, then a ~600 ms frame);
+    /// smeared or heavily blurred textures followed in three RX 5500M runs that did so.
+    struct Bridge {
+        const Buffer* arena;
+        u64 lo, hi; ///< blocks [lo, hi) mirrored: those resident are bound in it too
+    };
+    std::vector<Bridge> bridges;
+    bool arena_pairs{};
+    /// Calls func(arena, start, end) for each arena binding of blocks [start, end): the owners'
+    /// (one call per run of pages with the same owner) and those of bridges covering them.
+    template <typename Func>
+    void ForEachArenaBinding(u64 start, u64 end, Func&& func) const;
+    /// Queues the binds of `backing` into the arenas mapping its blocks (bridges only when
+    /// `owners` is false: the owners still hold it).
+    void BindBacking(const Backing& backing, bool owners);
+    /// Binds the resident blocks of [start, end) into `bridge` (its window grows over them).
+    void MirrorIntoBridge(const Bridge& bridge, u64 start, u64 end);
+
     u32 arena_memory_type_index{};
     /// bbport: system-memory type for arena blocks when VRAM runs out, ~0u if none fits.
     u32 arena_fallback_memory_type_index = ~0u;
@@ -255,18 +285,12 @@ private:
     /// it, new memory and the guest data again. A shader reading a retired range through the
     /// page table faults, and the fault binds it. Unbinds and binds share each submission's one
     /// batch, which waits for nothing.
-    /// Near the budget, chunks of 4, 2 and 1 MiB take the smaller holes in VMA's blocks before
-    /// system memory does: approaching a boss, an RX 5500M put 280 MiB of arena data in system
-    /// memory while 150-275 MiB sat free in VRAM in pieces under 8 MiB.
     static constexpr u64 ARENA_CHUNK_SIZE = 8_MB;
-    static constexpr u64 MIN_ARENA_CHUNK_SIZE = 1_MB;
     static constexpr u32 MAX_CHUNK_WORDS = (ARENA_CHUNK_SIZE / MIN_BLOCK_SIZE) / 64;
     struct ArenaChunk {
         VmaAllocation allocation{};
         vk::DeviceMemory memory{};
         u64 offset{}; ///< of the chunk inside `memory` (a VMA block)
-        u64 size{};   ///< ARENA_CHUNK_SIZE, or less when cut to fit a hole in a VMA block
-        u32 blocks{};
         bool system{};
         u32 free_blocks{};
         bool unbind_pending{}; ///< holds freed pieces whose unbind is not submitted yet
@@ -285,10 +309,9 @@ private:
     /// memory and an emergency reclaim all fail.
     ArenaPiece AllocateArenaPiece(u64 blocks);
     std::optional<ArenaPiece> TakeFreeBlocks(u64 blocks, bool system);
-    bool AllocateArenaChunk(bool system, bool existing_blocks = false,
-                            u64 size = ARENA_CHUNK_SIZE);
+    bool AllocateArenaChunk(bool system, bool existing_blocks = false);
     void AdoptArenaChunk(VmaAllocation allocation, vk::DeviceMemory memory, u64 offset,
-                         bool system, u64 size = ARENA_CHUNK_SIZE);
+                         bool system);
     void FreeArenaPiece(vk::DeviceMemory memory, u64 offset, u64 blocks);
     void ReleaseEmptyChunks(bool pressured);
     bool PrefersSystemMemory() const;
@@ -297,7 +320,6 @@ private:
     /// A range retired at `tick` (the submission that last may use it), released once that
     /// submission completes.
     struct RetiredRange {
-        const Buffer* arena;
         u64 tick;
         Backing backing;
     };
