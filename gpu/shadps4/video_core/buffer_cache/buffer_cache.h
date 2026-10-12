@@ -100,8 +100,9 @@ public:
         return arena_system_bytes.load(std::memory_order_relaxed);
     }
     /// bbport: arena upkeep since the last call (pressure report): bytes retired because no
-    /// draw used them, bytes moved from system memory back to VRAM, chunks returned to VMA,
-    /// and allocations that only succeeded after an emergency reclaim.
+    /// draw used them, unused bytes retired from system memory while VRAM had room (their next
+    /// use lands in VRAM), chunks returned to VMA, and allocations that only succeeded after an
+    /// emergency reclaim.
     struct ArenaReclaimStats {
         u64 reclaimed_bytes = 0;
         u64 migrated_bytes = 0;
@@ -123,8 +124,8 @@ public:
     };
     /// bbport: once per submission, before its flush: releases ranges retired earlier whose
     /// submission completed, returns empty chunks to VMA, allocates the next VRAM chunk ahead
-    /// of need, and under memory pressure retires ranges no draw used for seconds (with VRAM to
-    /// spare, hot ranges in system memory instead, so they come back in VRAM).
+    /// of need, and retires ranges no draw used for seconds: under memory pressure, or in
+    /// system memory while VRAM has room.
     void TickArenas(const MemoryLevels& levels);
 
     /// bbport: a shader read [address, address + size) through the page table (fault path).
@@ -247,9 +248,11 @@ private:
     /// evicted images leave there), each with a bitmap of used blocks: VRAM first, system memory
     /// past 97% of the budget. Under memory pressure, ranges no draw used for seconds are
     /// retired: their page-table entries are cleared at the end of the submission, and once it
-    /// completes their memory is unbound and reused. The next binding of a retired range gets
-    /// new memory and the guest data again; a shader reading it through the page table faults,
-    /// and the fault binds it.
+    /// completes their memory is unbound and reused. Bound again before that, a range takes back
+    /// the memory it still holds (new memory would change under the running submission); after
+    /// it, new memory and the guest data again. A shader reading a retired range through the
+    /// page table faults, and the fault binds it. Unbinds and binds share each submission's one
+    /// batch, which waits for nothing.
     static constexpr u64 ARENA_CHUNK_SIZE = 32_MB;
     static constexpr u32 MAX_CHUNK_WORDS = (ARENA_CHUNK_SIZE / MIN_BLOCK_SIZE) / 64;
     struct ArenaChunk {
@@ -290,17 +293,17 @@ private:
         Backing backing;
     };
     std::vector<RetiredRange> retired_ranges;
-    std::vector<ArenaBinds> pending_unbinds; ///< submitted ahead of pending_binds
-    u64 bind_wait_tick{}; ///< pending binds replace a retired range this submission may use
+    std::vector<ArenaBinds> pending_unbinds; ///< submitted in the batch with pending_binds
     u64 last_memory_signal{};
     void RetireRange(const Backing& backing, u64 tick);
     void ReleaseRetiredRanges();
+    /// Drops pending unbinds of [start, end) blocks of `arena`: about to be bound again.
+    void TrimPendingUnbinds(const Buffer* arena, u64 start, u64 end);
     /// Retires up to `max_bytes` of resident ranges that `pick(unit_last_use)` accepts, those
     /// backed by `system` memory if given. Returns the bytes retired.
     template <typename Pick>
     u64 RetireRanges(u64 max_bytes, std::optional<bool> system, u64 tick, Pick&& pick);
     bool EmergencyReclaim();
-    u64 SubmitArenaBindBatch(std::vector<ArenaBinds>& batch, u64 wait_work_tick);
 
     /// Last use per 1 MiB of guest address space: the display frame (BbStats::gpu_frames) of
     /// its last binding, or-ed with FAULTED_UNIT once a shader read it through the page table.

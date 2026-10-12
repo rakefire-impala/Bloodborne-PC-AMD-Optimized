@@ -1,15 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <limits>
+#include <cstdio>
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_semaphore.h"
 
 #include "common/assert.h"
 
 namespace Vulkan {
-
-constexpr u64 WAIT_TIMEOUT = std::numeric_limits<u64>::max();
 
 Semaphore::Semaphore(const Instance& instance_) : instance{instance_} {
     const vk::StructureChain semaphore_chain = {
@@ -62,7 +60,21 @@ void Semaphore::Wait(u64 tick) {
         .pValues = &tick,
     };
 
-    while (instance.GetDevice().waitSemaphores(&wait_info, WAIT_TIMEOUT) != vk::Result::eSuccess) {
+    // bbport: in 2 s steps, so a GPU that stops advancing (a freeze rather than a crash) says so.
+    constexpr u64 StepNs = 2'000'000'000;
+    for (u32 seconds = 2;; seconds += 2) {
+        const vk::Result result = instance.GetDevice().waitSemaphores(&wait_info, StepNs);
+        if (result == vk::Result::eSuccess) {
+            break;
+        }
+        ASSERT_MSG(result == vk::Result::eTimeout, "Waiting for the GPU failed: {}",
+                   vk::to_string(result));
+        const auto [counter_result, counter] =
+            instance.GetDevice().getSemaphoreCounterValue(*semaphore);
+        std::printf("GPU wait: semaphore %p has not reached %llu after %u s (at %llu)\n",
+                    static_cast<const void*>(this), static_cast<unsigned long long>(tick), seconds,
+                    static_cast<unsigned long long>(counter));
+        std::fflush(stdout);
     }
     Refresh();
 }

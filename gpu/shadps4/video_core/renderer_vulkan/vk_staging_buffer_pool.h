@@ -55,8 +55,10 @@ public:
         vram_pressure = pressured;
     }
 
-    /// bbport: device-local staging held now (rings and dedicated buffers).
+    /// bbport: device-local staging held now, and how much of it is in ring blocks (the rest
+    /// is dedicated buffers for requests larger than a block).
     [[nodiscard]] u64 DeviceLocalBytes() const;
+    [[nodiscard]] u64 DeviceLocalRingBytes() const;
 
 private:
     struct Block {

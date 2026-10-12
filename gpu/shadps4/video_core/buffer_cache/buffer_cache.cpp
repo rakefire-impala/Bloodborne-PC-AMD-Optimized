@@ -505,26 +505,36 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
 }
 
 void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_block) {
+    // bbport: a range retired but not released yet is still bound to its memory (the
+    // submission that retired it may still run): it takes that memory back. Binding new memory
+    // would change what the running submission reads.
+    boost::container::small_vector<Backing, 4> restored;
+    for (size_t i = 0; i < retired_ranges.size();) {
+        const RetiredRange& retired = retired_ranges[i];
+        if (retired.arena == arena && retired.backing.start <= last_block &&
+            first_block < retired.backing.end) {
+            restored.push_back(retired.backing);
+            resident_ranges.Add(retired.backing);
+            retired_ranges.erase(retired_ranges.begin() + i);
+        } else {
+            ++i;
+        }
+    }
+
     u32 resident_blocks{};
     IntervalList bind_ranges;
     resident_ranges.ForEachGap(first_block, last_block + 1, [&](u64 start, u64 end) {
         resident_blocks += end - start;
         bind_ranges.Add({start, end});
     });
+    for (const Backing& backing : restored) {
+        resident_blocks += backing.end - backing.start;
+    }
 
-    if (bind_ranges.Empty()) {
+    if (bind_ranges.Empty() && restored.empty()) {
         return;
     }
     BbStats::Timer timer{BbStats::t_resident};
-
-    // bbport: binding a range retired at a submission the GPU may still run would swap its
-    // memory under that submission: these binds wait for it.
-    for (const RetiredRange& retired : retired_ranges) {
-        if (retired.backing.start <= last_block && first_block < retired.backing.end &&
-            retired.tick > bind_wait_tick && !scheduler.IsFree(retired.tick)) {
-            bind_wait_tick = retired.tick;
-        }
-    }
 
     boost::container::small_vector<vk::BufferCopy, 8> copies;
     const auto staging =
@@ -532,7 +542,24 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
 
     auto* bda_addrs = reinterpret_cast<vk::DeviceAddress*>(staging.mapped);
     u64 offset = staging.offset;
+    // Page-table entries for blocks [start, end), now backed.
+    const auto write_entries = [&](u64 start, u64 end) {
+        const u64 resource_offset = (start << block_shift) - arena->cpu_addr;
+        for (u64 block = 0; block < end - start; ++block) {
+            *(bda_addrs++) =
+                arena->BufferDeviceAddress() + resource_offset + (block << block_shift);
+        }
+        const u64 copy_size = (end - start) * sizeof(vk::DeviceAddress);
+        copies.emplace_back(offset, start * sizeof(vk::DeviceAddress), copy_size);
+        offset += copy_size;
+        arena_resident_bytes.fetch_add((end - start) << block_shift, std::memory_order_relaxed);
+    };
+    for (const Backing& backing : restored) {
+        write_entries(backing.start, backing.end);
+    }
     for (const auto& range : bind_ranges) {
+        // Released earlier in this submission: its unbind must not follow this bind.
+        TrimPendingUnbinds(arena, range.start, range.end);
         // Free blocks come in runs: bind the range piece by piece.
         for (u64 start = range.start; start < range.end;) {
             const ArenaPiece piece = AllocateArenaPiece(range.end - start);
@@ -546,27 +573,47 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
             LOG_INFO(Render, "Making range start={}, end={} resident", backing.start,
                      backing.end);
 
-            ArenaBinds* binds = BindsForArena(arena);
-            const auto& bind = binds->binds.emplace_back(vk::SparseMemoryBind{
+            BindsForArena(arena)->binds.emplace_back(vk::SparseMemoryBind{
                 .resourceOffset = (backing.start << block_shift) - arena->cpu_addr,
                 .size = piece.blocks << block_shift,
                 .memory = piece.memory,
                 .memoryOffset = piece.offset,
             });
-            arena_resident_bytes.fetch_add(bind.size, std::memory_order_relaxed);
-
-            for (u64 block = 0; block < bind.size; block += block_size) {
-                *(bda_addrs++) = arena->BufferDeviceAddress() + bind.resourceOffset + block;
-            }
-            const u64 copy_size = piece.blocks * sizeof(vk::DeviceAddress);
-            copies.emplace_back(offset, backing.start * sizeof(vk::DeviceAddress), copy_size);
-            offset += copy_size;
+            write_entries(backing.start, backing.end);
             start = backing.end;
         }
     }
 
     staging.Flush();
     runtime.CopyBuffer(staging.buffer, bda_pagetable_buffer.get(), copies);
+}
+
+void BufferCache::TrimPendingUnbinds(const Buffer* arena, u64 start, u64 end) {
+    const auto it = std::ranges::find(pending_unbinds, arena, &ArenaBinds::arena);
+    if (it == pending_unbinds.end()) {
+        return;
+    }
+    const u64 lo = (start << block_shift) - arena->cpu_addr;
+    const u64 hi = (end << block_shift) - arena->cpu_addr;
+    auto& binds = it->binds;
+    for (size_t i = 0; i < binds.size();) {
+        const u64 a = binds[i].resourceOffset;
+        const u64 b = a + binds[i].size;
+        if (b <= lo || hi <= a) {
+            ++i;
+            continue;
+        }
+        // Keep the parts outside [lo, hi).
+        if (hi < b) {
+            binds.push_back(vk::SparseMemoryBind{.resourceOffset = hi, .size = b - hi});
+        }
+        if (a < lo) {
+            binds[i].size = lo - a;
+            ++i;
+        } else {
+            binds.erase(binds.begin() + i);
+        }
+    }
 }
 
 namespace {
@@ -961,9 +1008,9 @@ void BufferCache::TickArenas(const MemoryLevels& levels) {
         reclaim_stats.reclaimed_bytes += retired;
         return;
     }
-    // VRAM to spare and ranges in system memory: retire those in use (and long unused ones), so
-    // their next binding lands in VRAM. Ranges read through the page table stay: a fault would
-    // cost those shaders a frame of zeros.
+    // VRAM to spare and ranges in system memory: retire those unused for ~10 s, so their chunks
+    // empty out and their next binding lands in VRAM. (Ranges in use are left alone: taken back
+    // before release, they would only return to the same memory.)
     const u64 system_bytes = arena_system_bytes.load(std::memory_order_relaxed);
     const u64 headroom_mark = levels.budget / 100 * 85;
     if (system_bytes == 0 || levels.used + ARENA_CHUNK_SIZE >= headroom_mark ||
@@ -973,7 +1020,7 @@ void BufferCache::TickArenas(const MemoryLevels& levels) {
     last_migrate_frame = frame;
     const u64 max_bytes = std::min<u64>(32_MB, headroom_mark - levels.used - ARENA_CHUNK_SIZE);
     reclaim_stats.migrated_bytes += RetireRanges(max_bytes, true, tick, [&](u32 entry) {
-        return !(entry & FAULTED_UNIT) && (age(entry) <= 30 || age(entry) >= 300);
+        return !(entry & FAULTED_UNIT) && age(entry) >= 300;
     });
 }
 
@@ -1175,76 +1222,68 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
     return true;
 }
 
-u64 BufferCache::SubmitArenaBindBatch(std::vector<ArenaBinds>& batch, u64 wait_work_tick) {
-    std::vector<vk::SparseBufferMemoryBindInfo> buffer_binds;
-    buffer_binds.reserve(batch.size());
-    for (const auto& binds : batch) {
-        buffer_binds.emplace_back(vk::SparseBufferMemoryBindInfo{
-            .buffer = binds.arena->Handle(),
-            .bindCount = static_cast<u32>(binds.binds.size()),
-            .pBinds = binds.binds.data(),
-        });
+void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
+    if (pending_binds.empty() && pending_unbinds.empty()) {
+        // Pieces freed without needing an unbind (bound again since) have nothing to wait for.
+        for (ArenaChunk& chunk : arena_chunks) {
+            if (chunk.unbind_pending) {
+                chunk.unbind_pending = false;
+                chunk.unbind_tick = last_memory_signal;
+            }
+        }
+        return;
     }
 
-    // bbport: batches run in order (each waits for the previous one): an unbind lands before
-    // a bind that reuses its memory, and the signals stay monotonic when a batch also waits for
-    // a submission that still uses memory it rebinds. That wait never names the submission
-    // being made now (it waits for these binds).
-    std::array<vk::Semaphore, 2> wait_semas;
-    std::array<u64, 2> wait_ticks;
-    u32 num_waits = 0;
-    if (last_memory_signal != 0) {
-        wait_semas[num_waits] = memory_semaphore.Handle();
-        wait_ticks[num_waits++] = last_memory_signal;
+    // bbport: unbinds of released ranges travel in the same batch as the binds, which may reuse
+    // their memory for other ranges (never the same range: TrimPendingUnbinds), so the batch
+    // needs no ordering against another one and waits for nothing.
+    std::vector<vk::SparseBufferMemoryBindInfo> buffer_binds;
+    buffer_binds.reserve(pending_unbinds.size() + pending_binds.size());
+    for (const auto* list : {&pending_unbinds, &pending_binds}) {
+        for (const auto& binds : *list) {
+            if (binds.binds.empty()) {
+                continue;
+            }
+            buffer_binds.emplace_back(vk::SparseBufferMemoryBindInfo{
+                .buffer = binds.arena->Handle(),
+                .bindCount = static_cast<u32>(binds.binds.size()),
+                .pBinds = binds.binds.data(),
+            });
+        }
     }
-    if (wait_work_tick != 0 && wait_work_tick + 1 < scheduler.CurrentTick() &&
-        !scheduler.IsFree(wait_work_tick)) {
-        wait_semas[num_waits] = scheduler.GetWorkSemaphore()->Handle();
-        wait_ticks[num_waits++] = wait_work_tick;
-    }
+
     const u64 signal_tick = memory_semaphore.NextTick();
     const auto signal_sema = memory_semaphore.Handle();
 
     const vk::TimelineSemaphoreSubmitInfo timeline_si = {
-        .waitSemaphoreValueCount = num_waits,
-        .pWaitSemaphoreValues = wait_ticks.data(),
         .signalSemaphoreValueCount = 1u,
         .pSignalSemaphoreValues = &signal_tick,
     };
+
     const vk::BindSparseInfo sparse_info = {
         .pNext = &timeline_si,
-        .waitSemaphoreCount = num_waits,
-        .pWaitSemaphores = wait_semas.data(),
         .bufferBindCount = static_cast<u32>(buffer_binds.size()),
         .pBufferBinds = buffer_binds.data(),
         .signalSemaphoreCount = 1u,
         .pSignalSemaphores = &signal_sema,
     };
+
+    info.AddWait(signal_sema, signal_tick);
     auto submit_result = instance.GetGraphicsQueue().bindSparse(sparse_info);
-    ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
+    // bbport: any failure, not just a lost device. The submission waits for this batch's signal,
+    // which a failed batch never gives: the GPU would wait forever (a freeze, not a crash).
+    ASSERT_MSG(submit_result == vk::Result::eSuccess, "Sparse binding failed: {}; {}",
+               vk::to_string(submit_result), instance.DescribeMemory());
 
-    batch.clear();
-    last_memory_signal = signal_tick;
-    return signal_tick;
-}
-
-void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
-    // Unbinds of released ranges first; chunks whose freed pieces needed none are done too.
-    const bool unbinding = !pending_unbinds.empty();
-    const u64 unbind_tick = unbinding ? SubmitArenaBindBatch(pending_unbinds, 0) : last_memory_signal;
     for (ArenaChunk& chunk : arena_chunks) {
         if (chunk.unbind_pending) {
             chunk.unbind_pending = false;
-            chunk.unbind_tick = unbind_tick;
+            chunk.unbind_tick = signal_tick;
         }
     }
-    const bool binding = !pending_binds.empty();
-    if (binding) {
-        SubmitArenaBindBatch(pending_binds, std::exchange(bind_wait_tick, 0));
-    }
-    if (unbinding || binding) {
-        info.AddWait(memory_semaphore.Handle(), last_memory_signal);
-    }
+    last_memory_signal = signal_tick;
+    pending_binds.clear();
+    pending_unbinds.clear();
 }
 
 } // namespace VideoCore

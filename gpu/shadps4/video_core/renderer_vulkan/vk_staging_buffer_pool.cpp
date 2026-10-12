@@ -76,8 +76,13 @@ StagingBufferRef StagingBufferPool::RequestFromRing(Ring& ring, u64 size, u64 al
                                                     MemoryType type) {
     Block* best{};
     u64 best_offset{};
+    // bbport: device-local requests take the first block with room, not the next one after the
+    // last used. Rotating through every block kept the 38 a texture-streaming burst created all
+    // in use, so none went idle and 608 MiB of a 4 GB GPU's VRAM stayed staging; packed at the
+    // front, the blocks the burst added go idle and are trimmed.
+    const size_t first = type == MemoryType::DeviceLocal ? 0 : ring.current;
     for (size_t i = 0; i < ring.blocks.size(); ++i) {
-        const size_t index = (ring.current + i) % ring.blocks.size();
+        const size_t index = (first + i) % ring.blocks.size();
         Block* block = &ring.blocks[index];
         if (const auto offset = block->buffer->Reserve(size, alignment, false)) {
             ring.current = index;
@@ -181,11 +186,16 @@ u64 StagingBufferPool::IdleFrames(MemoryType type, u64 host_frames) const {
     return vram_pressure ? DEVICE_LOCAL_PRESSURED_IDLE_FRAMES : DEVICE_LOCAL_IDLE_FRAMES;
 }
 
-u64 StagingBufferPool::DeviceLocalBytes() const {
+u64 StagingBufferPool::DeviceLocalRingBytes() const {
     u64 bytes = 0;
     for (const Block& block : rings[u32(MemoryType::DeviceLocal)].blocks) {
         bytes += block.buffer->SizeBytes();
     }
+    return bytes;
+}
+
+u64 StagingBufferPool::DeviceLocalBytes() const {
+    u64 bytes = DeviceLocalRingBytes();
     for (const LargeBuffer& entry : large_caches[u32(MemoryType::DeviceLocal)]) {
         bytes += entry.buffer->SizeBytes();
     }

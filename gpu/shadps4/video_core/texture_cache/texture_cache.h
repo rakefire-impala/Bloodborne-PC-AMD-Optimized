@@ -424,7 +424,6 @@ private:
     u64 gc_passes = 0, gc_passes_quota = 0;
     u64 gc_written_tiled = 0, gc_written_bytes = 0, gc_unevictable = 0;
     u64 gc_budget = 0;        ///< bbport: the live budget the thresholds follow (0: none)
-    bool gc_draining = false; ///< bbport: evicting down to the drain mark
     std::chrono::steady_clock::time_point gc_report_time{};
     u64 trigger_gc_memory = 0;
     u64 pressure_gc_memory = 0;

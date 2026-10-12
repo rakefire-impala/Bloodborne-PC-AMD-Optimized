@@ -1082,7 +1082,6 @@ void TextureCache::GarbageCollectImages() {
     runtime.GetStagingPool().SetVramPressure(gc_budget != 0 &&
                                              total_used_memory >= pressure_gc_memory);
     if (total_used_memory < trigger_gc_memory) {
-        gc_draining = false;
         return;
     }
     std::scoped_lock lock{mutex};
@@ -1091,30 +1090,19 @@ void TextureCache::GarbageCollectImages() {
     u64 ticks_to_destroy = 0;
     size_t num_deletions = 0;
 
-    // bbport: once usage reaches the pressure mark the collector drains to as far below it as
-    // the critical mark is above (90% -> 85% by default), then rests until usage climbs back.
-    // Holding usage just under the mark evicted a few images on every submission instead, and
-    // the game streamed them straight back in.
-    const u64 drain_mark =
-        pressure_gc_memory - std::min(pressure_gc_memory, critical_gc_memory - pressure_gc_memory);
     // Images queued for write-back still hold their memory until the batch completes.
     u64 pending_bytes = 0;
     const auto used = [&] { return total_used_memory - std::min(total_used_memory, pending_bytes); };
     const auto configure = [&](bool allow_aggressive) {
-        if (used() >= pressure_gc_memory) {
-            gc_draining = true;
-        } else if (used() < drain_mark) {
-            gc_draining = false;
-        }
-        pressured = gc_draining;
+        pressured = used() >= pressure_gc_memory;
         aggresive = allow_aggressive && used() >= critical_gc_memory;
-        // bbport: minimum ages in submissions (~30 a second): the more pressure, the younger an
-        // image may be evicted. Unpressured passes only trim what has been idle for ~10 s, so
-        // turning the camera back does not re-upload what just left the view. (Upstream had the
-        // order reversed: the aggressive pass could evict less than the pressured one.)
-        ticks_to_destroy = aggresive ? 30 : pressured ? 90 : 300;
+        // Minimum ages in submissions (~30 a second). The aggressive pass runs after the
+        // pressured one and takes more images, but only old ones (~5 s): evicting images used a
+        // second ago (tried on an RX 5500M) re-uploaded them at once and stuttered badly.
+        // bbport: unpressured passes trim only what has been idle for ~10 s (was ~0.5 s).
+        ticks_to_destroy = aggresive ? 160 : pressured ? 80 : 300;
         ticks_to_destroy = std::min(ticks_to_destroy, gc_tick);
-        num_deletions = aggresive ? 64 : pressured ? 32 : 8;
+        num_deletions = aggresive ? 40 : pressured ? 20 : 10;
     };
     // bbport: skipped images do not use up num_deletions. They stay at the head of the LRU
     // list, so charging them let ~20 tiny tiled render targets stop every pass before any
@@ -1122,8 +1110,7 @@ void TextureCache::GarbageCollectImages() {
     // bounds the cost of walking past them on every submission.
     static constexpr u32 MaxSkipsPerPass = 1024;
     // GPU-written images are written back to guest memory in one batch per pass, behind a single
-    // wait for the GPU, up to this much: the wait grows with it, and re-tiling stages each
-    // image through VRAM, which is short when this runs.
+    // wait for the GPU (was one wait per image), up to this much: the wait grows with it.
     static constexpr u64 MaxWriteBackPerPass = 32_MB;
     u32 skips = 0;
     bool stopped_by_quota = false;
@@ -1172,10 +1159,9 @@ void TextureCache::GarbageCollectImages() {
                 aggresive = false;
                 return false;
             }
-            if (pressured && used() < drain_mark) {
+            if (pressured && used() < pressure_gc_memory) {
                 num_deletions >>= 1;
                 pressured = false;
-                gc_draining = false;
             }
         }
         return false;
@@ -1218,23 +1204,22 @@ void TextureCache::GarbageCollectImages() {
     // bbport: evictions under memory pressure, at most every 5 s (BB_FRAME_STATS or not).
     // "ended at quota" counts passes stopped by num_deletions, the skip cap or the write-back
     // cap rather than by running out of images older than ticks_to_destroy.
-    if (pressured || gc_draining || gc_downloads != 0) {
+    if (pressured || gc_downloads != 0) {
         const auto now = std::chrono::steady_clock::now();
         if (now - gc_report_time >= std::chrono::seconds(5)) {
             const auto vma = instance.GetVmaHeapStats();
             const auto arena = buffer_cache.TakeArenaReclaimStats();
             std::printf(
-                "Texture cache: memory pressure, %llu of %llu MiB (drain to %llu, critical %llu, "
-                "driver usage %llu, budget %llu): %llu images evicted (%llu MiB), %llu written "
-                "back (%llu tiled, %llu MiB), %llu unevictable skipped (%llu MiB, %llu moved to "
-                "the back), %llu skipped unpressured; %llu of %llu passes ended at quota since "
-                "the last report; buffer arenas %llu MiB resident in %u chunks (%llu MiB in "
-                "system memory), %llu MiB reclaimed, %llu MiB moved to VRAM, %u chunks "
-                "released, %u emergency reclaims; staging %llu MiB in VRAM; %u VMA memory "
-                "blocks, %llu MiB free inside them; %s\n",
+                "Texture cache: memory pressure, %llu of %llu MiB (critical %llu, driver usage "
+                "%llu, budget %llu): %llu images evicted (%llu MiB), %llu written back (%llu "
+                "tiled, %llu MiB), %llu unevictable skipped (%llu MiB, %llu moved to the back), "
+                "%llu skipped unpressured; %llu of %llu passes ended at quota since the last "
+                "report; buffer arenas %llu MiB resident in %u chunks (%llu MiB in system "
+                "memory), %llu MiB reclaimed, %llu MiB out of system memory, %u chunks released, "
+                "%u emergency reclaims; staging %llu MiB in VRAM (%llu in ring blocks); %u VMA "
+                "memory blocks, %llu MiB free inside them; %s\n",
                 (unsigned long long)(total_used_memory >> 20),
                 (unsigned long long)(pressure_gc_memory >> 20),
-                (unsigned long long)(drain_mark >> 20),
                 (unsigned long long)(critical_gc_memory >> 20),
                 (unsigned long long)(instance.CanReportMemoryUsage()
                                          ? instance.GetDeviceMemoryUsage() >> 20
@@ -1254,6 +1239,7 @@ void TextureCache::GarbageCollectImages() {
                 (unsigned long long)(arena.migrated_bytes >> 20), arena.released_chunks,
                 arena.emergencies,
                 (unsigned long long)(runtime.GetStagingPool().DeviceLocalBytes() >> 20),
+                (unsigned long long)(runtime.GetStagingPool().DeviceLocalRingBytes() >> 20),
                 vma.blocks, (unsigned long long)(vma.free_bytes >> 20),
                 instance.DescribeMemory().c_str());
             gc_report_time = now;
@@ -1273,11 +1259,13 @@ bool TextureCache::CanWriteBack(const Image& image) const {
     if (!info.IsTiled()) {
         return true;
     }
-    // bbport: tiled images are re-tiled by the tile manager's compute tiler (the one texel
-    // buffers aliasing images already use). BB_GC_TILED_WRITEBACK=0 keeps them resident instead.
+    // bbport: BB_GC_TILED_WRITEBACK=1 re-tiles them with the tile manager's compute tiler (the
+    // one texel buffers aliasing images use) so they can be evicted. Off by default: on an
+    // RX 5500M it evicted render targets the game kept reusing (150 MiB written back per 5 s,
+    // each pass waiting for the GPU), which stuttered more than keeping them.
     static const bool tiled_write_back = [] {
         const char* env = std::getenv("BB_GC_TILED_WRITEBACK");
-        return !env || env[0] != '0';
+        return env && env[0] == '1';
     }();
     switch (info.num_bits) {
     case 8:
