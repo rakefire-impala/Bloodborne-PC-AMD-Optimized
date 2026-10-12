@@ -116,8 +116,11 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     VmaAllocationInfo alloc_info{};
     VkResult result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_ci, &unsafe_image,
                                      &allocation, &alloc_info);
-    ASSERT_MSG(result == VK_SUCCESS, "Failed allocating image with error {}",
-               vk::to_string(vk::Result{result}));
+    ASSERT_MSG(result == VK_SUCCESS,
+               "Failed allocating image with error {} ({}x{}x{}, {} mips, {} layers, {})",
+               vk::to_string(vk::Result{result}), image_ci.extent.width, image_ci.extent.height,
+               image_ci.extent.depth, image_ci.mipLevels, image_ci.arrayLayers,
+               vk::to_string(image_ci.format));
     image = vk::Image{unsafe_image};
     size_bytes = alloc_info.size;
 }
