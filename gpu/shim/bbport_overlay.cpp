@@ -17,6 +17,7 @@
 #include "../bbcheats.h"
 #include "imgui.h"
 #include "imgui_impl_vulkan.h"
+#include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -54,6 +55,7 @@ namespace {
 
 std::mutex imgui_mutex; // the ImGui context: window thread (input) and present thread
 bool initialized = false;
+const Vulkan::Instance* vk_instance_ptr = nullptr; // for the font atlas's VRAM check
 std::atomic<bool> menu_open{false};
 bool l3_down = false, r3_down = false;
 bool dirty = false; // settings changed while open: saved on close
@@ -1148,6 +1150,12 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     info.QueueFamily = instance.GetGraphicsQueueFamilyIndex();
     info.Queue = instance.GetGraphicsQueue();
     info.DescriptorPoolSize = 16;
+    // ImGui ignores Vulkan errors without this; a refused allocation then crashed in the driver.
+    info.CheckVkResultFn = [](VkResult err) {
+        if (err != VK_SUCCESS) {
+            std::printf("Overlay: Vulkan error %d in the ImGui backend\n", int(err));
+        }
+    };
     info.MinImageCount = std::max(image_count, 2u);
     info.ImageCount = std::max(image_count, 2u);
     info.UseDynamicRendering = true;
@@ -1161,6 +1169,7 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
         ImGui::DestroyContext();
         return;
     }
+    vk_instance_ptr = &instance;
     initialized = true;
     std::printf("Overlay: menu ready (Insert or L3+R3)\n");
 }
@@ -1292,6 +1301,30 @@ void SetTextEntry(bool active, const std::string& prompt, const std::string& tex
     text_entry_text = text;
 }
 
+// bbport: a menu page with text not shown yet grows the font atlas, and the ImGui backend
+// allocates the new texture with vkAllocateMemory itself. With VRAM at the driver's budget AMD
+// refuses it, and binding the missing memory crashed in amdvlk64 (RX 5500M, opening the
+// Advanced tab at 2241 of 2241 MiB). Room comes first from the out-of-memory handler (idle
+// staging, then the VRAM reserve).
+void MakeRoomForTextures(const ImDrawData& draw_data) {
+    if (!vk_instance_ptr || !draw_data.Textures || !vk_instance_ptr->CanReportMemoryUsage()) {
+        return;
+    }
+    u64 bytes = 0;
+    for (const ImTextureData* tex : *draw_data.Textures) {
+        if (tex->Status == ImTextureStatus_WantCreate) {
+            bytes += u64(tex->Width) * u64(tex->Height) * 4;
+        }
+    }
+    if (bytes == 0) {
+        return;
+    }
+    const auto levels = vk_instance_ptr->GetMemoryLevels();
+    if (levels.budget != 0 && levels.usage + bytes + (u64{16} << 20) > levels.budget) {
+        VideoCore::HandleOutOfMemory();
+    }
+}
+
 void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     // Present interval for the FPS readout (measured also while nothing is drawn).
     const auto now = std::chrono::steady_clock::now();
@@ -1344,6 +1377,7 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     {
         // Font atlas uploads submit to the graphics queue themselves.
         std::scoped_lock submit_lock{Vulkan::Scheduler::submit_mutex};
+        MakeRoomForTextures(*ImGui::GetDrawData());
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmdbuf);
     }
     cmdbuf.endRendering();
