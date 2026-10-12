@@ -462,6 +462,22 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
     const auto* last_arena = address_space[last_page];
     if (first_arena == last_arena) {
         if (!first_arena) {
+            // bbport: a new arena covers the aligned pair of pages around the request when both
+            // are free and two pages fit the driver's buffer limit. Bloodborne's GPU memory
+            // spans 0x10xxxxxxxx and 0x11xxxxxxxx: with an arena per page, the first buffer
+            // across 0x1100000000 migrated them, binding every resident range again (1401
+            // sparse binds, a 583 ms frame on an RX 5500M at a boss approach).
+            const u64 pair_page = first_page & ~u64{1};
+            if (last_page <= pair_page + 1 && pair_page + 1 < num_arena_pages &&
+                (u64{2} << arena_page_bits) <= instance.GetMaxBufferSize() &&
+                !address_space[pair_page] && !address_space[pair_page + 1]) {
+                const auto* new_arena =
+                    &arenas.emplace_back(instance, pair_page << arena_page_bits,
+                                         u64{2} << arena_page_bits, MemoryType::Sparse);
+                address_space[pair_page] = new_arena;
+                address_space[pair_page + 1] = new_arena;
+                return new_arena;
+            }
             const u64 base_block = Common::AlignDownPow2<u64>(first_block, blocks_per_arena_page);
             const u64 num_pages = last_page - first_page + 1;
             const auto* new_arena =
@@ -475,14 +491,26 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
 
     LOG_WARNING(Render, "Migrating arena");
 
-    const u64 first_addr = first_arena ? first_arena->cpu_addr : (first_page << arena_page_bits);
-    const u64 first_size = first_arena ? first_arena->size_bytes : arena_page_size;
-    const u64 last_size = last_arena ? last_arena->size_bytes : arena_page_size;
+    // bbport: the new arena spans both old ones when that fits the driver's buffer limit, else
+    // only the request's two pages; pages outside it keep their arenas, which stay bound. (Two
+    // arenas of two pages made one of four, over the limit.)
+    u64 first_addr = first_page << arena_page_bits;
+    u64 end_addr = (last_page + 1) << arena_page_bits;
+    for (const Buffer* arena : {first_arena, last_arena}) {
+        if (arena) {
+            first_addr = std::min<u64>(first_addr, arena->cpu_addr);
+            end_addr = std::max<u64>(end_addr, arena->cpu_addr + arena->size_bytes);
+        }
+    }
+    if (end_addr - first_addr > instance.GetMaxBufferSize()) {
+        first_addr = first_page << arena_page_bits;
+        end_addr = (last_page + 1) << arena_page_bits;
+    }
 
     const u64 base_block = first_addr >> block_shift;
-    const u64 total_size = first_size + last_size;
-    const u64 end_block = (first_addr + total_size) >> block_shift;
-    auto* new_arena = &arenas.emplace_back(instance, first_addr, total_size, MemoryType::Sparse);
+    const u64 end_block = end_addr >> block_shift;
+    auto* new_arena =
+        &arenas.emplace_back(instance, first_addr, end_addr - first_addr, MemoryType::Sparse);
     auto* bind = BindsForArena(new_arena);
     resident_ranges.ForEachInRange(base_block, end_block, [&](const Backing& backing) {
         const u64 start = std::max(base_block, backing.start);
@@ -495,13 +523,8 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
         });
     });
 
-    u64 base_page = first_addr >> arena_page_bits;
-    for (u32 page = 0; page < (first_size >> arena_page_bits); ++page) {
-        address_space[base_page + page] = new_arena;
-    }
-    base_page = last_page;
-    for (u32 page = 0; page < (last_size >> arena_page_bits); ++page) {
-        address_space[base_page + page] = new_arena;
+    for (u64 page = first_addr >> arena_page_bits; page < (end_addr >> arena_page_bits); ++page) {
+        address_space[page] = new_arena;
     }
     return new_arena;
 }
@@ -687,7 +710,7 @@ bool BufferCache::PrefersSystemMemory() const {
 bool BufferCache::IsSystemBacking(vk::DeviceMemory memory, u64 offset) const {
     for (const ArenaChunk& chunk : arena_chunks) {
         if (chunk.memory == memory && offset >= chunk.offset &&
-            offset < chunk.offset + ARENA_CHUNK_SIZE) {
+            offset < chunk.offset + chunk.size) {
             return chunk.system;
         }
     }
@@ -704,14 +727,14 @@ std::optional<BufferCache::ArenaPiece> BufferCache::TakeFreeBlocks(u64 blocks, b
         }
         // First free run, at most `blocks` long.
         u32 first = 0;
-        for (u32 word = 0; word * 64 < chunk_blocks; ++word) {
+        for (u32 word = 0; word * 64 < chunk.blocks; ++word) {
             if (chunk.used[word] != ~u64{0}) {
                 first = word * 64 + std::countr_one(chunk.used[word]);
                 break;
             }
         }
         u32 length = 0;
-        while (first + length < chunk_blocks && length < blocks &&
+        while (first + length < chunk.blocks && length < blocks &&
                !((chunk.used[(first + length) >> 6] >> ((first + length) & 63)) & 1)) {
             ++length;
         }
@@ -733,8 +756,14 @@ BufferCache::ArenaPiece BufferCache::AllocateArenaPiece(u64 blocks) {
         return *TakeFreeBlocks(blocks, false);
     }
     // VRAM short: a chunk may still fit in space VMA already holds, which costs the heap nothing.
-    if (system_first && AllocateArenaChunk(false, true)) {
-        return *TakeFreeBlocks(blocks, false);
+    // Evictions leave that space in pieces of all sizes: smaller chunks take what 8 MiB misses.
+    if (system_first) {
+        const u64 min_size = std::max<u64>(MIN_ARENA_CHUNK_SIZE, block_size);
+        for (u64 size = ARENA_CHUNK_SIZE; size >= min_size; size >>= 1) {
+            if (AllocateArenaChunk(false, true, size)) {
+                return *TakeFreeBlocks(blocks, false);
+            }
+        }
     }
     if (const auto piece = TakeFreeBlocks(blocks, true)) {
         return *piece;
@@ -765,38 +794,41 @@ BufferCache::ArenaPiece BufferCache::AllocateArenaPiece(u64 blocks) {
     return {};
 }
 
-bool BufferCache::AllocateArenaChunk(bool system, bool existing_blocks) {
+bool BufferCache::AllocateArenaChunk(bool system, bool existing_blocks, u64 size) {
     const u32 type = system ? arena_fallback_memory_type_index : arena_memory_type_index;
     VmaAllocation allocation{};
     VmaAllocationInfo info{};
-    if (!AllocateChunkMemory(instance.GetAllocator(), type, ARENA_CHUNK_SIZE, block_size,
-                             allocation, info, existing_blocks)) {
+    if (!AllocateChunkMemory(instance.GetAllocator(), type, size, block_size, allocation, info,
+                             existing_blocks)) {
         if (!existing_blocks) {
             LOG_WARNING(Render_Vulkan, "Buffer arena chunk in {} memory failed; {}",
                         system ? "system" : "video", instance.DescribeMemory());
         }
         return false;
     }
-    AdoptArenaChunk(allocation, info.deviceMemory, info.offset, system);
+    AdoptArenaChunk(allocation, info.deviceMemory, info.offset, system, size);
     return true;
 }
 
 void BufferCache::AdoptArenaChunk(VmaAllocation allocation, vk::DeviceMemory memory, u64 offset,
-                                  bool system) {
+                                  bool system, u64 size) {
     ArenaChunk& chunk = arena_chunks.emplace_back();
     chunk.allocation = allocation;
     chunk.memory = memory;
     chunk.offset = offset;
+    chunk.size = size;
+    chunk.blocks = static_cast<u32>(size >> block_shift);
     chunk.system = system;
-    chunk.free_blocks = chunk_blocks;
+    chunk.free_blocks = chunk.blocks;
+    // Bits past a smaller chunk's end read as used.
+    SetBits(chunk.used, chunk.blocks, MAX_CHUNK_WORDS * 64 - chunk.blocks, true);
     chunk_hint = arena_chunks.size() - 1;
     const u32 count = arena_chunk_count.fetch_add(1, std::memory_order_relaxed) + 1;
     BbHitch::arena_chunks.fetch_add(1, std::memory_order_relaxed);
-    arena_chunk_bytes.fetch_add(ARENA_CHUNK_SIZE, std::memory_order_relaxed);
+    arena_chunk_bytes.fetch_add(size, std::memory_order_relaxed);
     if (system) {
         const u64 system_bytes =
-            arena_system_bytes.fetch_add(ARENA_CHUNK_SIZE, std::memory_order_relaxed) +
-            ARENA_CHUNK_SIZE;
+            arena_system_bytes.fetch_add(size, std::memory_order_relaxed) + size;
         LOG_WARNING(Render_Vulkan,
                     "VRAM near the budget: buffer arena chunk {} in system memory ({} MiB "
                     "there); device usage {} of {} MiB budget",
@@ -810,11 +842,11 @@ void BufferCache::FreeArenaPiece(vk::DeviceMemory memory, u64 offset, u64 blocks
     while (blocks != 0) {
         const auto it = std::ranges::find_if(arena_chunks, [&](const ArenaChunk& chunk) {
             return chunk.memory == memory && offset >= chunk.offset &&
-                   offset < chunk.offset + ARENA_CHUNK_SIZE;
+                   offset < chunk.offset + chunk.size;
         });
         ASSERT_MSG(it != arena_chunks.end(), "Freed arena memory belongs to no chunk");
         const u32 first = static_cast<u32>((offset - it->offset) >> block_shift);
-        const u32 count = static_cast<u32>(std::min<u64>(blocks, chunk_blocks - first));
+        const u32 count = static_cast<u32>(std::min<u64>(blocks, it->blocks - first));
         SetBits(it->used, first, count, false);
         it->free_blocks += count;
         it->unbind_pending = true;
@@ -831,7 +863,7 @@ void BufferCache::ReleaseEmptyChunks(bool pressured) {
     bool kept_spare = pressured;
     for (size_t i = arena_chunks.size(); i-- > 0;) {
         ArenaChunk& chunk = arena_chunks[i];
-        if (chunk.free_blocks != chunk_blocks || chunk.unbind_pending) {
+        if (chunk.free_blocks != chunk.blocks || chunk.unbind_pending) {
             continue;
         }
         if (!chunk.system && !kept_spare) {
@@ -850,9 +882,9 @@ void BufferCache::ReleaseEmptyChunks(bool pressured) {
         }
         vmaFreeMemory(instance.GetAllocator(), chunk.allocation);
         arena_chunk_count.fetch_sub(1, std::memory_order_relaxed);
-        arena_chunk_bytes.fetch_sub(ARENA_CHUNK_SIZE, std::memory_order_relaxed);
+        arena_chunk_bytes.fetch_sub(chunk.size, std::memory_order_relaxed);
         if (chunk.system) {
-            arena_system_bytes.fetch_sub(ARENA_CHUNK_SIZE, std::memory_order_relaxed);
+            arena_system_bytes.fetch_sub(chunk.size, std::memory_order_relaxed);
         }
         ++reclaim_stats.released_chunks;
         arena_chunks.erase(arena_chunks.begin() + i);

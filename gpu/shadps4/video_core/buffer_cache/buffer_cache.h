@@ -255,12 +255,18 @@ private:
     /// it, new memory and the guest data again. A shader reading a retired range through the
     /// page table faults, and the fault binds it. Unbinds and binds share each submission's one
     /// batch, which waits for nothing.
+    /// Near the budget, chunks of 4, 2 and 1 MiB take the smaller holes in VMA's blocks before
+    /// system memory does: approaching a boss, an RX 5500M put 280 MiB of arena data in system
+    /// memory while 150-275 MiB sat free in VRAM in pieces under 8 MiB.
     static constexpr u64 ARENA_CHUNK_SIZE = 8_MB;
+    static constexpr u64 MIN_ARENA_CHUNK_SIZE = 1_MB;
     static constexpr u32 MAX_CHUNK_WORDS = (ARENA_CHUNK_SIZE / MIN_BLOCK_SIZE) / 64;
     struct ArenaChunk {
         VmaAllocation allocation{};
         vk::DeviceMemory memory{};
         u64 offset{}; ///< of the chunk inside `memory` (a VMA block)
+        u64 size{};   ///< ARENA_CHUNK_SIZE, or less when cut to fit a hole in a VMA block
+        u32 blocks{};
         bool system{};
         u32 free_blocks{};
         bool unbind_pending{}; ///< holds freed pieces whose unbind is not submitted yet
@@ -279,9 +285,10 @@ private:
     /// memory and an emergency reclaim all fail.
     ArenaPiece AllocateArenaPiece(u64 blocks);
     std::optional<ArenaPiece> TakeFreeBlocks(u64 blocks, bool system);
-    bool AllocateArenaChunk(bool system, bool existing_blocks = false);
+    bool AllocateArenaChunk(bool system, bool existing_blocks = false,
+                            u64 size = ARENA_CHUNK_SIZE);
     void AdoptArenaChunk(VmaAllocation allocation, vk::DeviceMemory memory, u64 offset,
-                         bool system);
+                         bool system, u64 size = ARENA_CHUNK_SIZE);
     void FreeArenaPiece(vk::DeviceMemory memory, u64 offset, u64 blocks);
     void ReleaseEmptyChunks(bool pressured);
     bool PrefersSystemMemory() const;
