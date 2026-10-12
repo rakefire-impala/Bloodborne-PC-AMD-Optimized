@@ -106,11 +106,20 @@ void UniqueImage::Destroy() {
 void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     this->image_ci = image_ci;
     ASSERT(!image);
+    // bbport: images live in VRAM only (VideoCore::ImageMemoryTypeBits on discrete GPUs). VMA
+    // knows the driver's budget, and with VRAM at it, it placed new images in system memory
+    // without a word: textures and render targets the GPU then read and drew over PCIe (a
+    // 485 ms GPU frame on an RX 5500M) while heavily blurred, smeared textures covered the
+    // screen. At the budget, idle staging is released first; then the image goes into VRAM over
+    // the budget, as before VMA knew it (Windows pages out what it must); system memory is the
+    // last resort and is reported.
+    const u32 vram_types = VideoCore::ImageMemoryTypeBits();
     const VmaAllocationCreateInfo alloc_ci = {
         .flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT,
         .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
         .requiredFlags = 0,
         .preferredFlags = 0,
+        .memoryTypeBits = vram_types,
         .pool = VK_NULL_HANDLE,
         .pUserData = nullptr,
     };
@@ -118,27 +127,40 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     const VkImageCreateInfo image_ci_unsafe = static_cast<VkImageCreateInfo>(image_ci);
     VkImage unsafe_image{};
     VmaAllocationInfo alloc_info{};
+    const auto out_of_memory = [](VkResult r) {
+        return r == VK_ERROR_OUT_OF_DEVICE_MEMORY || r == VK_ERROR_OUT_OF_HOST_MEMORY;
+    };
     VkResult result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_ci, &unsafe_image,
                                      &allocation, &alloc_info);
-    if ((result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) &&
-        VideoCore::HandleOutOfMemory()) {
+    if (out_of_memory(result) && VideoCore::HandleOutOfMemory()) {
         result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_ci, &unsafe_image, &allocation,
                                 &alloc_info);
     }
-    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) {
-        // bbport: VRAM full (a 4 GB GPU at its budget): any memory type the image allows, over
-        // VMA's budget estimate if need be. Slower to sample than failing outright.
+    if (out_of_memory(result) && vram_types != 0) {
+        VmaAllocationCreateInfo over_budget_ci = alloc_ci;
+        over_budget_ci.flags &= ~VmaAllocationCreateFlags(VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT);
+        result = vmaCreateImage(allocator, &image_ci_unsafe, &over_budget_ci, &unsafe_image,
+                                &allocation, &alloc_info);
+        static std::atomic<u32> reported{0};
+        if (result == VK_SUCCESS && reported.fetch_add(1, std::memory_order_relaxed) < 8) {
+            std::printf("Image memory: VRAM at its budget, %ux%u image placed in VRAM over it\n",
+                        image_ci.extent.width, image_ci.extent.height);
+        }
+    }
+    if (out_of_memory(result)) {
+        // Last resort: any memory type the image allows, system memory included.
         VmaAllocationCreateInfo fallback_ci = alloc_ci;
         fallback_ci.flags = 0;
         fallback_ci.usage = VMA_MEMORY_USAGE_AUTO;
+        fallback_ci.memoryTypeBits = 0;
         result = vmaCreateImage(allocator, &image_ci_unsafe, &fallback_ci, &unsafe_image,
                                 &allocation, &alloc_info);
         static std::atomic<u32> reported{0};
         BbHitch::vram_fallbacks.fetch_add(1, std::memory_order_relaxed);
         if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
-            std::printf("Image memory: VRAM full, %ux%u image placed %s\n", image_ci.extent.width,
-                        image_ci.extent.height,
-                        result == VK_SUCCESS ? "in any memory type it allows" : "nowhere");
+            std::printf("Image memory: VRAM refused a %ux%u image; placed %s\n",
+                        image_ci.extent.width, image_ci.extent.height,
+                        result == VK_SUCCESS ? "in system memory" : "nowhere");
         }
     }
     ASSERT_MSG(result == VK_SUCCESS,

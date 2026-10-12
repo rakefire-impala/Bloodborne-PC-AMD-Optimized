@@ -26,6 +26,18 @@ void SetOutOfMemoryHandler(std::function<bool()> handler) {
     out_of_memory_handler = std::move(handler);
 }
 
+namespace {
+std::atomic<u32> image_memory_type_bits{0};
+} // namespace
+
+void SetImageMemoryTypeBits(u32 bits) {
+    image_memory_type_bits.store(bits, std::memory_order_relaxed);
+}
+
+u32 ImageMemoryTypeBits() {
+    return image_memory_type_bits.load(std::memory_order_relaxed);
+}
+
 bool HandleOutOfMemory() {
     // Not reentrant: the handler's own frees never allocate, but a failure inside the staging
     // pool's allocation must not trim that pool while it is mid-request.

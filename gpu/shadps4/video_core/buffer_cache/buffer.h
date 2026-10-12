@@ -34,6 +34,11 @@ namespace VideoCore {
 void SetOutOfMemoryHandler(std::function<bool()> handler);
 bool HandleOutOfMemory();
 
+/// bbport: memory types images may use first (UniqueImage::Create): the main VRAM heap's types
+/// that the CPU cannot map, on discrete GPUs; 0 (any type) elsewhere. Set once at startup.
+void SetImageMemoryTypeBits(u32 bits);
+u32 ImageMemoryTypeBits();
+
 /// Hints and requirements for the backing memory type of a commit
 enum class MemoryType : u8 {
     DeviceLocal,  ///< Requests device local buffer.

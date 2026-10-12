@@ -108,6 +108,31 @@ Runtime::Runtime(const Instance& instance_, Scheduler& scheduler_)
 
     // bbport: a buffer or image VRAM refuses first gets the idle staging back.
     VideoCore::SetOutOfMemoryHandler([this] { return staging_pool.ReleaseIdle() != 0; });
+
+    // bbport: images go to the largest device-local heap, in types the CPU cannot map (not the
+    // small CPU-visible VRAM window, not system memory). Integrated GPUs keep every type: their
+    // device-local heap can be a small carve-out of system memory.
+    if (!instance.IsIntegrated()) {
+        const auto& props = instance.GetMemoryProperties();
+        u32 largest_heap = 0;
+        for (u32 i = 0; i < props.memoryHeapCount; ++i) {
+            if ((props.memoryHeaps[i].flags & vk::MemoryHeapFlagBits::eDeviceLocal) &&
+                props.memoryHeaps[i].size > props.memoryHeaps[largest_heap].size) {
+                largest_heap = i;
+            }
+        }
+        u32 bits = 0;
+        for (u32 i = 0; i < props.memoryTypeCount; ++i) {
+            const auto flags = props.memoryTypes[i].propertyFlags;
+            if (props.memoryTypes[i].heapIndex == largest_heap &&
+                (flags & vk::MemoryPropertyFlagBits::eDeviceLocal) &&
+                !(flags & (vk::MemoryPropertyFlagBits::eHostVisible |
+                           vk::MemoryPropertyFlagBits::eDeviceCoherentAMD))) {
+                bits |= 1u << i;
+            }
+        }
+        VideoCore::SetImageMemoryTypeBits(bits);
+    }
 }
 
 Runtime::~Runtime() {
