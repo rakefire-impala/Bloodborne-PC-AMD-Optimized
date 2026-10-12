@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include "bbport_hitch.h"
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -366,6 +367,11 @@ struct CompileTimer {
                                    std::chrono::steady_clock::now() - start)
                                    .count());
         ++g_bb_compiles;
+        BbHitch::compiles.fetch_add(1, std::memory_order_relaxed);
+        BbHitch::compile_ns.fetch_add(u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                          std::chrono::steady_clock::now() - start)
+                                          .count()),
+                                      std::memory_order_relaxed);
     }
 };
 } // namespace

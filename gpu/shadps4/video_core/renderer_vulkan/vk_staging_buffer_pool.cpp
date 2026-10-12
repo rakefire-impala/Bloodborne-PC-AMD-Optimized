@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "bbport_toggles.h"
+#include "bbport_hitch.h"
 #include <algorithm>
 #include <bit>
 #include <cstdlib>
@@ -104,6 +105,7 @@ StagingBufferRef StagingBufferPool::RequestFromRing(Ring& ring, u64 size, u64 al
     }
 
     if (!best) {
+        BbHitch::staging_blocks.fetch_add(1, std::memory_order_relaxed);
         best = &ring.blocks.emplace_back(Block{
             .buffer =
                 std::make_unique<VideoCore::StreamBuffer>(instance, scheduler, type, BLOCK_SIZE),
@@ -145,6 +147,7 @@ StagingBufferRef StagingBufferPool::RequestLarge(u64 size, MemoryType type, bool
     }
 
     if (!best) {
+        BbHitch::staging_blocks.fetch_add(1, std::memory_order_relaxed);
         best = &cache.emplace_back(LargeBuffer{
             .buffer = std::make_unique<VideoCore::Buffer>(instance, 0, RoundAllocationSize(size),
                                                           type, "StagingBufferPool:Dedicated"),

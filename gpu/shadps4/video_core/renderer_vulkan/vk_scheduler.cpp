@@ -15,6 +15,7 @@
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "bbport_toggles.h"
 #include "bbport_watchdog.h"
+#include "bbport_hitch.h"
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/thread.h"
@@ -218,6 +219,7 @@ void Scheduler::WaitHostCopies() {
     const BbWatch::ScopedStage stage{"waiting for guest memory copies"};
     if (host_copies_done.load(std::memory_order_acquire) < host_copies_issued) {
         BbStats::WaitTimer timer{BbStats::host_copies_wait_ns};
+        BbHitch::Timer hitch_timer{BbHitch::copy_wait_ns};
         BbStats::host_copy_waits.fetch_add(1, std::memory_order_relaxed);
         KickRecording(true);
         while (host_copies_done.load(std::memory_order_acquire) < host_copies_issued) {
@@ -350,6 +352,7 @@ void Scheduler::Wait(u64 tick) {
         Flush(info);
     }
     BbStats::WaitTimer timer{BbStats::tick_wait_ns};
+    BbHitch::Timer hitch_timer{BbHitch::gpu_wait_ns};
     work_semaphore.Wait(tick);
 }
 

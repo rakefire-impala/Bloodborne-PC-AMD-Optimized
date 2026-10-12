@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include "bbport_hitch.h"
 #include <cstdio>
 #include <numeric>
 
@@ -141,6 +142,7 @@ void UniqueBuffer::Create(vk::BufferCreateInfo& buffer_ci, MemoryType mem_type,
             result = vmaCreateBuffer(allocator, &buffer_ci_unsafe, &fallback_ci, &unsafe_buffer,
                                      &allocation, out_alloc_info);
             static std::atomic<u32> reported{0};
+        BbHitch::vram_fallbacks.fetch_add(1, std::memory_order_relaxed);
             if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
                 std::printf("Buffer memory: VRAM full, %llu MiB buffer placed %s\n",
                             static_cast<unsigned long long>(buffer_ci.size >> 20),

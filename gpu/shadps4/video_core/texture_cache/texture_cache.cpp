@@ -4,6 +4,7 @@
 #include <xxhash.h>
 
 #include "bbport_toggles.h"
+#include "bbport_hitch.h"
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/div_ceil.h"
@@ -1158,6 +1159,8 @@ void TextureCache::GarbageCollectImages() {
             --num_deletions;
             ++gc_evictions;
             gc_evicted_bytes += image.info.guest_size;
+            BbHitch::evictions.fetch_add(1, std::memory_order_relaxed);
+            BbHitch::evicted_bytes.fetch_add(image.info.guest_size, std::memory_order_relaxed);
             FreeImage(image_id);
         }
         if (used() < critical_gc_memory) {
@@ -1364,6 +1367,8 @@ void TextureCache::WriteBackAndFree(std::span<const ImageId> images) {
         ++gc_evictions;
         gc_evicted_bytes += image.info.guest_size;
         gc_written_bytes += sizes[i];
+        BbHitch::evictions.fetch_add(1, std::memory_order_relaxed);
+        BbHitch::evicted_bytes.fetch_add(image.info.guest_size, std::memory_order_relaxed);
         FreeImage(image_id);
     }
 }

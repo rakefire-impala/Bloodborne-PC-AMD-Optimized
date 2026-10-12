@@ -13,6 +13,7 @@
 #include "bbport_copy.h"
 #include "bbport_toggles.h"
 #include "bbport_watchdog.h"
+#include "bbport_hitch.h"
 #include "common/alignment.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -135,6 +136,17 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     chunk_blocks = static_cast<u32>(ARENA_CHUNK_SIZE >> block_shift);
     ASSERT_MSG(chunk_blocks <= MAX_CHUNK_WORDS * 64, "Arena chunk of {} blocks", chunk_blocks);
     unit_last_use.assign(u64{1} << (ADDRESS_SPACE_BITS - UNIT_SHIFT), 0);
+
+    // bbport: VRAM arena chunks get their own VMA blocks. Never freed with reclaim off, chunks
+    // spread across the texture blocks pinned every one of them: evicting textures could not
+    // empty a block, so the driver's usage stayed at the budget with 200-400 MiB free inside
+    // the blocks, and new chunks went to system memory (368 MiB on an RX 5500M).
+    const VmaPoolCreateInfo pool_info = {
+        .memoryTypeIndex = arena_memory_type_index,
+    };
+    if (vmaCreatePool(instance.GetAllocator(), &pool_info, &arena_pool) != VK_SUCCESS) {
+        arena_pool = {};
+    }
     prefetch_thread = std::thread([this] { PrefetchLoop(); });
 }
 
@@ -150,6 +162,9 @@ BufferCache::~BufferCache() {
     }
     for (const ArenaChunk& chunk : arena_chunks) {
         vmaFreeMemory(instance.GetAllocator(), chunk.allocation);
+    }
+    if (arena_pool) {
+        vmaDestroyPool(instance.GetAllocator(), arena_pool);
     }
 }
 
@@ -620,9 +635,9 @@ void BufferCache::TrimPendingUnbinds(const Buffer* arena, u64 start, u64 end) {
 }
 
 namespace {
-/// bbport: one arena chunk of `type` from VMA (worker thread or recording thread), only from
-/// space VMA already holds when `existing_blocks`.
-bool AllocateChunkMemory(VmaAllocator allocator, u32 type, u64 size, u64 alignment,
+/// bbport: one arena chunk of `type` from VMA (worker thread or recording thread), from `pool`
+/// (null: VMA's default blocks), only from space VMA already holds when `existing_blocks`.
+bool AllocateChunkMemory(VmaAllocator allocator, VmaPool pool, u32 type, u64 size, u64 alignment,
                          VmaAllocation& allocation, VmaAllocationInfo& info,
                          bool existing_blocks = false) {
     const VkMemoryRequirements requirements = {
@@ -633,6 +648,7 @@ bool AllocateChunkMemory(VmaAllocator allocator, u32 type, u64 size, u64 alignme
     const VmaAllocationCreateInfo create_info = {
         .flags = existing_blocks ? VMA_ALLOCATION_CREATE_NEVER_ALLOCATE_BIT : 0u,
         .memoryTypeBits = 1u << type,
+        .pool = pool,
     };
     return vmaAllocateMemory(allocator, &requirements, &create_info, &allocation, &info) ==
            VK_SUCCESS;
@@ -768,8 +784,16 @@ bool BufferCache::AllocateArenaChunk(bool system, bool existing_blocks) {
     const u32 type = system ? arena_fallback_memory_type_index : arena_memory_type_index;
     VmaAllocation allocation{};
     VmaAllocationInfo info{};
-    if (!AllocateChunkMemory(instance.GetAllocator(), type, ARENA_CHUNK_SIZE, block_size,
-                             allocation, info, existing_blocks)) {
+    // VRAM chunks come from the arena pool. Short of VRAM, space already held counts: the
+    // pool's, then holes evictions left in the texture blocks.
+    const VmaPool pool = system ? VmaPool{} : arena_pool;
+    const bool ok =
+        AllocateChunkMemory(instance.GetAllocator(), pool, type, ARENA_CHUNK_SIZE, block_size,
+                            allocation, info, existing_blocks) ||
+        (existing_blocks && pool &&
+         AllocateChunkMemory(instance.GetAllocator(), VmaPool{}, type, ARENA_CHUNK_SIZE,
+                             block_size, allocation, info, true));
+    if (!ok) {
         if (!existing_blocks) {
             LOG_WARNING(Render_Vulkan, "Buffer arena chunk in {} memory failed; {}",
                         system ? "system" : "video", instance.DescribeMemory());
@@ -790,6 +814,7 @@ void BufferCache::AdoptArenaChunk(VmaAllocation allocation, vk::DeviceMemory mem
     chunk.free_blocks = chunk_blocks;
     chunk_hint = arena_chunks.size() - 1;
     const u32 count = arena_chunk_count.fetch_add(1, std::memory_order_relaxed) + 1;
+    BbHitch::arena_chunks.fetch_add(1, std::memory_order_relaxed);
     arena_chunk_bytes.fetch_add(ARENA_CHUNK_SIZE, std::memory_order_relaxed);
     if (system) {
         const u64 system_bytes =
@@ -1089,8 +1114,9 @@ void BufferCache::PrefetchLoop() {
         lock.unlock();
         VmaAllocation allocation{};
         VmaAllocationInfo info{};
-        const bool ok = AllocateChunkMemory(instance.GetAllocator(), arena_memory_type_index,
-                                            ARENA_CHUNK_SIZE, block_size, allocation, info);
+        const bool ok =
+            AllocateChunkMemory(instance.GetAllocator(), arena_pool, arena_memory_type_index,
+                                ARENA_CHUNK_SIZE, block_size, allocation, info);
         lock.lock();
         if (ok) {
             prefetch.allocation = allocation;
@@ -1305,6 +1331,7 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
                 .bindCount = static_cast<u32>(binds.binds.size()),
                 .pBinds = binds.binds.data(),
             });
+            BbHitch::sparse_binds.fetch_add(binds.binds.size(), std::memory_order_relaxed);
         }
     }
 

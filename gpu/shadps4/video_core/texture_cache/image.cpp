@@ -3,6 +3,7 @@
 
 #include "bbport_toggles.h"
 #include <atomic>
+#include "bbport_hitch.h"
 #include <cstdio>
 #include <ranges>
 #include "common/assert.h"
@@ -133,6 +134,7 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
         result = vmaCreateImage(allocator, &image_ci_unsafe, &fallback_ci, &unsafe_image,
                                 &allocation, &alloc_info);
         static std::atomic<u32> reported{0};
+        BbHitch::vram_fallbacks.fetch_add(1, std::memory_order_relaxed);
         if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
             std::printf("Image memory: VRAM full, %ux%u image placed %s\n", image_ci.extent.width,
                         image_ci.extent.height,
