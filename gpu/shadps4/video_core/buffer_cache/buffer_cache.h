@@ -20,8 +20,6 @@
 #include "video_core/buffer_cache/range_set.h"
 #include "video_core/renderer_vulkan/vk_semaphore.h"
 
-VK_DEFINE_HANDLE(VmaPool)
-
 namespace AmdGpu {
 struct Liverpool;
 }
@@ -270,7 +268,6 @@ private:
         std::array<u64, MAX_CHUNK_WORDS> used{};
     };
     std::vector<ArenaChunk> arena_chunks;
-    VmaPool arena_pool{}; ///< VMA blocks of the VRAM chunks (null: VMA's default blocks)
     u32 chunk_blocks{};
     size_t chunk_hint{};
     struct ArenaPiece {

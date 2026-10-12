@@ -304,9 +304,10 @@ void VideoOutDriver::Flip(const Request& req) {
     Vulkan::FrameCapture::OnFlip(req.index >= 0 ? req.port->buffer_slots[req.index].address_left
                                                 : 0);
 
-    // bbport: a "Hitch:" line for every flip slower than BB_HITCH_MS (50 ms by default, 0 turns
-    // it off), with what happened since the previous flip; at most 6 lines every 5 s, so a
-    // loading screen does not flood the log.
+    // bbport: a "Hitch:" entry for every flip slower than BB_HITCH_MS (50 ms by default, 0 turns
+    // it off), with what happened since the previous flip; at most 6 every 5 s, so a loading
+    // screen does not flood the log. Only queued here: the buffer cache's watchdog thread
+    // prints them, so the flip path does no console I/O.
     {
         using Clock = std::chrono::steady_clock;
         static const double threshold_ms = [] {
@@ -328,40 +329,35 @@ void VideoOutDriver::Flip(const Request& req) {
         };
         static Counters last = sample();
         static Clock::time_point last_flip = Clock::now(), window = last_flip;
-        static u32 printed = 0, suppressed = 0;
+        static u32 recorded = 0;
         const auto now = Clock::now();
         const Counters cur = sample();
         const double ms = std::chrono::duration<double, std::milli>(now - last_flip).count();
         if (threshold_ms > 0.0 && ms > threshold_ms) {
             if (now - window >= std::chrono::seconds(5)) {
-                if (suppressed != 0) {
-                    std::printf("Hitch: %u more slow frames not shown\n", suppressed);
-                }
                 window = now;
-                printed = suppressed = 0;
+                recorded = 0;
             }
-            if (printed < 6) {
-                ++printed;
-                std::printf(
-                    "Hitch: %.0f ms frame; %.1f MB image uploads (%llu new images), %.1f MB buffer "
-                    "uploads; %llu images evicted (%.1f MB); %llu shader compiles (%.1f ms); "
-                    "waited %.1f ms for the GPU, %.1f ms for guest copies; %llu arena chunks, "
-                    "%llu sparse binds, %llu staging allocations, %llu VRAM fallbacks\n",
-                    ms, (cur.image_bytes - last.image_bytes) / 1e6,
-                    static_cast<unsigned long long>(cur.images - last.images),
-                    (cur.buffer_bytes - last.buffer_bytes) / 1e6,
-                    static_cast<unsigned long long>(cur.evictions - last.evictions),
-                    (cur.evicted_bytes - last.evicted_bytes) / 1e6,
-                    static_cast<unsigned long long>(cur.compiles - last.compiles),
-                    (cur.compile_ns - last.compile_ns) / 1e6,
-                    (cur.gpu_wait_ns - last.gpu_wait_ns) / 1e6,
-                    (cur.copy_wait_ns - last.copy_wait_ns) / 1e6,
-                    static_cast<unsigned long long>(cur.arena_chunks - last.arena_chunks),
-                    static_cast<unsigned long long>(cur.sparse_binds - last.sparse_binds),
-                    static_cast<unsigned long long>(cur.staging_blocks - last.staging_blocks),
-                    static_cast<unsigned long long>(cur.fallbacks - last.fallbacks));
+            if (recorded < 6) {
+                ++recorded;
+                BbHitch::Push({
+                    .frame_ms = ms,
+                    .image_mb = (cur.image_bytes - last.image_bytes) / 1e6,
+                    .buffer_mb = (cur.buffer_bytes - last.buffer_bytes) / 1e6,
+                    .evicted_mb = (cur.evicted_bytes - last.evicted_bytes) / 1e6,
+                    .compile_ms = (cur.compile_ns - last.compile_ns) / 1e6,
+                    .gpu_wait_ms = (cur.gpu_wait_ns - last.gpu_wait_ns) / 1e6,
+                    .copy_wait_ms = (cur.copy_wait_ns - last.copy_wait_ns) / 1e6,
+                    .new_images = cur.images - last.images,
+                    .evictions = cur.evictions - last.evictions,
+                    .compiles = cur.compiles - last.compiles,
+                    .arena_chunks = cur.arena_chunks - last.arena_chunks,
+                    .sparse_binds = cur.sparse_binds - last.sparse_binds,
+                    .staging = cur.staging_blocks - last.staging_blocks,
+                    .fallbacks = cur.fallbacks - last.fallbacks,
+                });
             } else {
-                ++suppressed;
+                BbHitch::Skip();
             }
         }
         last = cur;

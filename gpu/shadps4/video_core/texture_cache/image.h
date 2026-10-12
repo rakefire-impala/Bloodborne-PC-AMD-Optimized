@@ -160,6 +160,11 @@ public:
     /// bbport: gc tick of the last LRU touch; skips the LRU list (a cache miss) when current.
     mutable u64 lru_touched_tick = ~0ULL;
     u64 tick_accessed_last{};
+    /// bbport: consecutive display frames the image was uploaded again (RefreshImage), the
+    /// frame of the last upload, and whether it was reported for doing so every frame.
+    u32 refresh_streak = 0;
+    u64 last_refresh_frame = ~0ULL;
+    bool refresh_reported = false;
     ImageId depth_id{};
     u64 depth_uid{};
     u64 image_uid{};

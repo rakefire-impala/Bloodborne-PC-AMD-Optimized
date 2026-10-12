@@ -811,6 +811,34 @@ void TextureCache::RefreshImage(Image& image) {
     const bool is_gpu_dirty = True(image.flags & ImageFlagBits::GpuDirty);
 
     BbStats::image_upload_bytes.fetch_add(image.info.guest_size, std::memory_order_relaxed);
+    // bbport: an image uploaded again on every frame costs bandwidth and, when the GPU also
+    // renders into it, flips between both contents (an RX 5500M run re-uploaded ~9.4 MB, a
+    // full-screen image's worth, per frame with blurred textures flickering everywhere). Named
+    // once, with what made it dirty, after 60 frames in a row.
+    {
+        const u64 frame = BbStats::gpu_frames.load(std::memory_order_relaxed);
+        if (image.last_refresh_frame != frame) {
+            image.refresh_streak =
+                image.last_refresh_frame + 1 == frame ? image.refresh_streak + 1 : 1;
+            image.last_refresh_frame = frame;
+        }
+        if (image.refresh_streak == 60 && !image.refresh_reported) {
+            image.refresh_reported = true;
+            std::printf("Texture cache: image at %#llx (%ux%u, %llu KiB, %s, %s%s%s%s) uploaded "
+                        "again on 60 frames in a row; dirty from %s%s%s\n",
+                        static_cast<unsigned long long>(image.info.guest_address),
+                        image.info.size.width, image.info.size.height,
+                        static_cast<unsigned long long>(image.info.guest_size >> 10),
+                        vk::to_string(image.info.pixel_format).c_str(),
+                        image.info.IsTiled() ? "tiled" : "linear",
+                        image.usage.render_target ? ", render target" : "",
+                        image.usage.depth_target ? ", depth target" : "",
+                        is_gpu_modified ? ", GPU-written" : "",
+                        is_gpu_dirty ? "GPU writes through buffers " : "",
+                        True(image.flags & ImageFlagBits::CpuDirty) ? "CPU writes " : "",
+                        True(image.flags & ImageFlagBits::MaybeCpuDirty) ? "CPU writes nearby" : "");
+        }
+    }
     boost::container::small_vector<vk::BufferImageCopy, 14> image_copies;
     for (u32 m = 0; m < num_mips; m++) {
         const u32 width = std::max(image.info.size.width >> m, 1u);
