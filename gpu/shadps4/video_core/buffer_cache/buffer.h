@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -25,6 +26,13 @@ VK_DEFINE_HANDLE(VmaAllocator)
 struct VmaAllocationInfo;
 
 namespace VideoCore {
+
+/// bbport: called when VRAM refuses a buffer or image, before it is retried and then placed in
+/// system memory: frees memory nobody needs now (idle staging) and returns whether it freed any.
+/// On AMD's Windows driver a heap at its budget refuses even system-memory allocations, so
+/// freeing first is what lets the fallback succeed. Set once at startup.
+void SetOutOfMemoryHandler(std::function<bool()> handler);
+bool HandleOutOfMemory();
 
 /// Hints and requirements for the backing memory type of a commit
 enum class MemoryType : u8 {

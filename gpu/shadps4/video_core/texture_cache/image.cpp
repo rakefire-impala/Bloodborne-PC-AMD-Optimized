@@ -11,6 +11,7 @@
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/texture_cache/blit_helper.h"
+#include "video_core/buffer_cache/buffer.h"
 #include "video_core/texture_cache/image.h"
 
 #include <vk_mem_alloc.h>
@@ -118,6 +119,11 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     VmaAllocationInfo alloc_info{};
     VkResult result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_ci, &unsafe_image,
                                      &allocation, &alloc_info);
+    if ((result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) &&
+        VideoCore::HandleOutOfMemory()) {
+        result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_ci, &unsafe_image, &allocation,
+                                &alloc_info);
+    }
     if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) {
         // bbport: VRAM full (a 4 GB GPU at its budget): any memory type the image allows, over
         // VMA's budget estimate if need be. Slower to sample than failing outright.

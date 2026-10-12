@@ -25,7 +25,7 @@ class Scheduler;
 class Runtime {
 public:
     explicit Runtime(const Instance& instance, Scheduler& scheduler);
-    ~Runtime() = default;
+    ~Runtime();
 
     Scheduler& GetScheduler() {
         return scheduler;

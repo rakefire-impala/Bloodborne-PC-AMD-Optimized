@@ -244,16 +244,18 @@ private:
     /// bbport: system-memory type for arena blocks when VRAM runs out, ~0u if none fits.
     u32 arena_fallback_memory_type_index = ~0u;
 
-    /// bbport: arena blocks come from 32 MiB VMA chunks (sharing VMA's blocks, and the space
+    /// bbport: arena blocks come from 8 MiB VMA chunks (sharing VMA's blocks, and the space
     /// evicted images leave there), each with a bitmap of used blocks: VRAM first, system memory
-    /// past 97% of the budget. Under memory pressure, ranges no draw used for seconds are
+    /// past 97% of the budget. 8 MiB fits the holes evictions leave in VMA blocks: with 32 MiB
+    /// chunks, an RX 5500M put 288 MiB of vertex data in system memory while 80 MiB sat free in
+    /// VRAM in smaller pieces. Under memory pressure, ranges no draw used for seconds are
     /// retired: their page-table entries are cleared at the end of the submission, and once it
     /// completes their memory is unbound and reused. Bound again before that, a range takes back
     /// the memory it still holds (new memory would change under the running submission); after
     /// it, new memory and the guest data again. A shader reading a retired range through the
     /// page table faults, and the fault binds it. Unbinds and binds share each submission's one
     /// batch, which waits for nothing.
-    static constexpr u64 ARENA_CHUNK_SIZE = 32_MB;
+    static constexpr u64 ARENA_CHUNK_SIZE = 8_MB;
     static constexpr u32 MAX_CHUNK_WORDS = (ARENA_CHUNK_SIZE / MIN_BLOCK_SIZE) / 64;
     struct ArenaChunk {
         VmaAllocation allocation{};
@@ -316,8 +318,8 @@ private:
     ArenaReclaimStats reclaim_stats;
 
     /// Allocates the next VRAM chunk on a worker thread before the current ones fill up: a new
-    /// VMA block is a 32-256 MiB driver allocation the OS clears first, which hitched the
-    /// recording thread when the game streamed in a new area.
+    /// VMA block is a driver allocation the OS clears first, which hitched the recording thread
+    /// when the game streamed in a new area.
     struct ChunkPrefetch {
         std::mutex mutex;
         std::condition_variable cv;

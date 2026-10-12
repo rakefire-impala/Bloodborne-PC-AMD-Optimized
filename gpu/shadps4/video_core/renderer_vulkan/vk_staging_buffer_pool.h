@@ -54,6 +54,11 @@ public:
     [[nodiscard]] u64 DeviceLocalBytes() const;
     [[nodiscard]] u64 DeviceLocalRingBytes() const;
 
+    /// bbport: out-of-memory relief (VideoCore::SetOutOfMemoryHandler): releases device-local
+    /// ring blocks but one and every dedicated buffer no pending submission uses, waiting for
+    /// submitted work first if none is free. Returns the bytes released.
+    u64 ReleaseIdle();
+
 private:
     struct Block {
         std::unique_ptr<VideoCore::StreamBuffer> buffer;
@@ -79,9 +84,9 @@ private:
                                      VideoCore::MemoryType type);
     StagingBufferRef RequestLarge(u64 size, VideoCore::MemoryType type, bool deferred);
 
-    void TrimRing(Ring& ring, VideoCore::MemoryType type);
-    void TrimLarge(std::vector<LargeBuffer>& cache, VideoCore::MemoryType type);
-    u64 IdleFrames(VideoCore::MemoryType type, u64 host_frames) const;
+    /// Release blocks beyond `keep` unused for `idle_frames` and free on the GPU; bytes freed.
+    u64 TrimRing(Ring& ring, u64 keep, u64 idle_frames);
+    u64 TrimLarge(std::vector<LargeBuffer>& cache, u64 idle_frames);
 
     void PublishStats() const;
 

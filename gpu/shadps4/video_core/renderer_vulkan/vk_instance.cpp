@@ -716,10 +716,33 @@ void Instance::CreateAllocator() {
         .vkGetDeviceProcAddr = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceProcAddr,
     };
 
+    // bbport: low-VRAM tuning (RX 5500M, 4 GB):
+    // - VMA sees the driver's budget (VK_EXT_memory_budget) instead of estimating 80% of the
+    //   heap (3059 MiB when Windows allowed 2387): it no longer asks for blocks the driver then
+    //   refuses, places within-budget allocations in other memory when VRAM is full, and frees
+    //   empty blocks once the budget is exceeded. A heap at its budget made AMD's driver refuse
+    //   even system-memory allocations.
+    // - On GPUs with at most 6 GiB, 64 MiB blocks instead of 256 MiB: evicted images empty whole
+    //   blocks far more often, which returns memory to the driver instead of leaving it
+    //   scattered inside blocks (614 MiB of it while the heap read full), and the one empty
+    //   block VMA keeps is smaller.
+    VmaAllocatorCreateFlags flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+    if (supports_memory_budget) {
+        flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
+    }
+    const auto memory_props = physical_device.getMemoryProperties();
+    vk::DeviceSize largest_local_heap = 0;
+    for (u32 i = 0; i < memory_props.memoryHeapCount; ++i) {
+        if (memory_props.memoryHeaps[i].flags & vk::MemoryHeapFlagBits::eDeviceLocal) {
+            largest_local_heap = std::max(largest_local_heap, memory_props.memoryHeaps[i].size);
+        }
+    }
+    const bool small_vram = !IsIntegrated() && largest_local_heap <= 6_GB;
     const VmaAllocatorCreateInfo allocator_info = {
-        .flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,
+        .flags = flags,
         .physicalDevice = physical_device,
         .device = *device,
+        .preferredLargeHeapBlockSize = small_vram ? 64_MB : 0,
         .pVulkanFunctions = &functions,
         .instance = *instance,
         .vulkanApiVersion = TargetVulkanApiVersion,
@@ -899,6 +922,12 @@ Instance::VmaHeapStats Instance::GetVmaHeapStats() const {
             budgets[heap].statistics.blockBytes - budgets[heap].statistics.allocationBytes;
     }
     return stats;
+}
+
+void Instance::RefreshAllocatorBudget(u32 frame) const {
+    if (supports_memory_budget) {
+        vmaSetCurrentFrameIndex(allocator, frame);
+    }
 }
 
 Instance::MemoryLevels Instance::GetMemoryLevels() const {

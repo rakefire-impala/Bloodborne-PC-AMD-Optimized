@@ -105,6 +105,13 @@ Runtime::Runtime(const Instance& instance_, Scheduler& scheduler_)
     memory_barrier.dstStageMask = vk::PipelineStageFlagBits2::eAllCommands;
     memory_barrier.dstAccessMask =
         vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
+
+    // bbport: a buffer or image VRAM refuses first gets the idle staging back.
+    VideoCore::SetOutOfMemoryHandler([this] { return staging_pool.ReleaseIdle() != 0; });
+}
+
+Runtime::~Runtime() {
+    VideoCore::SetOutOfMemoryHandler({});
 }
 
 void Runtime::TickFrame() {
@@ -511,9 +518,23 @@ void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
             CopyImage(src, dst);
         } else {
             // Perform depth from/to color copy using the intermediate copy buffer.
-            static constexpr size_t COPY_BUFFER_SIZE = 128_MB;
-            const auto copy_ref =
-                staging_pool.Request(COPY_BUFFER_SIZE, VideoCore::MemoryType::DeviceLocal);
+            // bbport: sized to the copy (CopyImageWithBuffer copies the first level of every
+            // layer, tightly packed) instead of a fixed 128 MiB: a 1080p depth buffer needs
+            // 8 MiB, which the staging ring serves, where 128 MiB took a dedicated VRAM buffer.
+            const vk::BufferImageCopy extent = {
+                .imageSubresource{
+                    .mipLevel = 0,
+                    .baseArrayLayer = 0,
+                    .layerCount = std::min(src->info.resources.layers, dst->info.resources.layers),
+                },
+                .imageExtent = {src->info.size.width, src->info.size.height,
+                                src->info.size.depth},
+            };
+            const u64 copy_size = std::max(BufferImageCopySize(extent, src->info.pixel_format),
+                                           BufferImageCopySize(extent, dst->info.pixel_format));
+            // 256-byte offsets suit every texel size of the copies.
+            const auto copy_ref = staging_pool.Request(copy_size, VideoCore::MemoryType::DeviceLocal,
+                                                       256);
             CopyImageWithBuffer(src, dst, copy_ref.buffer, copy_ref.offset);
         }
     } else if (src->info.num_samples == 1 && dst->info.num_samples > 1 &&

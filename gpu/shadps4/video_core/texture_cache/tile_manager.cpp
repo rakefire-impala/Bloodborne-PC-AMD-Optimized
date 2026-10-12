@@ -23,10 +23,15 @@
 #include "video_core/host_shaders/tiling_micro_8_comp.h"
 #include "video_core/host_shaders/tiling_micro_96_comp.h"
 
+#include <tuple>
 #include <magic_enum/magic_enum.hpp>
+#include "common/alignment.h"
 #include <vk_mem_alloc.h>
 
 namespace VideoCore {
+
+/// bbport: VRAM scratch for the tiling shaders' linear side (TakeScratch).
+static constexpr u64 SCRATCH_SIZE = 64_MB;
 
 struct TilingInfo {
     u32 bank_swizzle;
@@ -82,9 +87,43 @@ TileManager::TileManager(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     ASSERT_MSG(layout_result == vk::Result::eSuccess, "Failed to create pipeline layout: {}",
                vk::to_string(layout_result));
     pl_layout = std::move(layout);
+
+    scratch = std::make_unique<Buffer>(instance, 0, SCRATCH_SIZE, MemoryType::DeviceLocal,
+                                       "Tiling Scratch");
 }
 
 TileManager::~TileManager() = default;
+
+// bbport: detiled texture data went to staging-pool blocks that stay reserved until their
+// submission completes, so loading an area (hundreds of textures in one submission) took
+// ~600 MiB of VRAM at once: on a 4 GB GPU that pushed buffers into system memory and, at a
+// lamp warp, failed a 16 MiB allocation with VRAM full. The linear data lives only from the
+// tiling dispatch to the copy right after it, so one scratch serves the whole submission:
+// writes start over at its beginning when it is full, behind the barriers that already order
+// each use (FlushBarriers before every dispatch flushes the copy reads of the last round). A
+// new submission starts with a barrier on the copies and compute work submitted before it.
+std::optional<std::pair<const Buffer*, u64>> TileManager::TakeScratch(u64 size) {
+    if (!scratch || size > scratch->SizeBytes()) {
+        return std::nullopt;
+    }
+    const u64 tick = scheduler.CurrentTick();
+    if (tick != scratch_tick) {
+        scratch_tick = tick;
+        scratch_offset = 0;
+        runtime.AccessBuffer(scratch.get(), 0, scratch->SizeBytes(),
+                             vk::PipelineStageFlagBits2::eCopy |
+                                 vk::PipelineStageFlagBits2::eComputeShader,
+                             vk::AccessFlagBits2::eTransferWrite |
+                                 vk::AccessFlagBits2::eShaderWrite);
+    }
+    const u64 align = std::max<u64>(instance.StorageMinAlignment(), 256);
+    u64 offset = Common::AlignUp(scratch_offset, align);
+    if (offset + size > scratch->SizeBytes()) {
+        offset = 0;
+    }
+    scratch_offset = offset + size;
+    return std::pair<const Buffer*, u64>{scratch.get(), offset};
+}
 
 vk::Pipeline TileManager::GetTilingPipeline(const ImageInfo& info, bool is_tiler) {
     const TilingKey key{
@@ -249,7 +288,16 @@ std::pair<const Buffer*, u64> TileManager::DetileImage(const VideoCore::Buffer* 
         .range = sizeof(params),
     };
 
-    const auto staging = runtime.GetStagingPool().Request(info.guest_size, MemoryType::DeviceLocal);
+    const Buffer* linear_buffer{};
+    u64 linear_offset{};
+    if (const auto scratch_range = TakeScratch(info.guest_size)) {
+        std::tie(linear_buffer, linear_offset) = *scratch_range;
+    } else {
+        const auto staging =
+            runtime.GetStagingPool().Request(info.guest_size, MemoryType::DeviceLocal);
+        linear_buffer = staging.buffer;
+        linear_offset = staging.offset;
+    }
 
     scheduler.EndRendering();
     runtime.FlushBarriers();
@@ -260,8 +308,8 @@ std::pair<const Buffer*, u64> TileManager::DetileImage(const VideoCore::Buffer* 
         .range = info.guest_size,
     };
     const vk::DescriptorBufferInfo linear_buffer_info{
-        .buffer = staging.buffer->Handle(),
-        .offset = staging.offset,
+        .buffer = linear_buffer->Handle(),
+        .offset = linear_offset,
         .range = info.guest_size,
     };
     const auto dim_x = static_cast<u32>((info.guest_size / (info.num_bits / 8)) / 64);
@@ -269,11 +317,11 @@ std::pair<const Buffer*, u64> TileManager::DetileImage(const VideoCore::Buffer* 
     RecordTilingDispatch(GetTilingPipeline(info, false), tiled_buffer_info, linear_buffer_info,
                          params_buffer_info, dim_x);
 
-    runtime.AccessBuffer(staging.buffer, staging.offset, info.guest_size,
+    runtime.AccessBuffer(linear_buffer, linear_offset, info.guest_size,
                          vk::PipelineStageFlagBits2::eComputeShader,
                          vk::AccessFlagBits2::eShaderWrite);
 
-    return {staging.buffer, staging.offset};
+    return {linear_buffer, linear_offset};
 }
 
 void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buffer_copies,
@@ -306,12 +354,21 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
         .range = sizeof(params),
     };
 
-    const auto staging = runtime.GetStagingPool().Request(info.guest_size, MemoryType::DeviceLocal);
+    const Buffer* linear_buffer{};
+    u64 linear_offset{};
+    if (const auto scratch_range = TakeScratch(info.guest_size)) {
+        std::tie(linear_buffer, linear_offset) = *scratch_range;
+    } else {
+        const auto staging =
+            runtime.GetStagingPool().Request(info.guest_size, MemoryType::DeviceLocal);
+        linear_buffer = staging.buffer;
+        linear_offset = staging.offset;
+    }
     for (auto& copy : buffer_copies) {
-        copy.bufferOffset += staging.offset;
+        copy.bufferOffset += linear_offset;
     }
 
-    runtime.DownloadImage(&in_image, staging.buffer, buffer_copies);
+    runtime.DownloadImage(&in_image, linear_buffer, buffer_copies);
     runtime.FlushBarriers();
 
     const vk::DescriptorBufferInfo tiled_buffer_info{
@@ -320,14 +377,18 @@ void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buff
         .range = info.guest_size,
     };
     const vk::DescriptorBufferInfo linear_buffer_info{
-        .buffer = staging.buffer->Handle(),
-        .offset = staging.offset,
+        .buffer = linear_buffer->Handle(),
+        .offset = linear_offset,
         .range = info.guest_size,
     };
     const auto dim_x = static_cast<u32>((info.guest_size / (info.num_bits / 8)) / 64);
     // bbport: recorded with copies of the descriptor infos (threaded recording).
     RecordTilingDispatch(GetTilingPipeline(info, true), tiled_buffer_info, linear_buffer_info,
                          params_buffer_info, dim_x);
+    // The read is recorded so a later write to this scratch range waits for it.
+    runtime.AccessBuffer(linear_buffer, linear_offset, info.guest_size,
+                         vk::PipelineStageFlagBits2::eComputeShader,
+                         vk::AccessFlagBits2::eShaderRead);
 
     runtime.AccessBuffer(out_buffer, out_offset, info.guest_size,
                          vk::PipelineStageFlagBits2::eComputeShader,

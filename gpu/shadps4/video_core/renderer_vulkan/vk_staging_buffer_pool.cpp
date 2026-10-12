@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <bit>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 
 #include "common/alignment.h"
@@ -30,13 +31,12 @@ constexpr u64 LARGE_IDLE_FRAMES = 3000;
 constexpr u64 PREWARM_BLOCKS = 8;
 constexpr u64 LARGE_MIN_GRANULARITY = 64_KB;
 constexpr u64 BLOCK_SIZE = 16_MB;
-// bbport: device-local staging (detiling output, copies between images) is VRAM taken from
-// textures and arenas on 4 GB cards. An area transition needs ~600 MiB of it at once; each
-// block is its own driver allocation (16 MiB, cleared by the OS), so a ring trimmed to a few
-// blocks re-grew at every transition (hitches) and, trimmed within a second of VRAM pressure,
-// met a full heap there (crash). It keeps 12 blocks (192 MiB; it kept 512 MiB before) and
-// releases blocks beyond them after ~1 minute (1800 submissions) unused.
-constexpr u64 DEVICE_LOCAL_KEEP_BLOCKS = 12;
+// bbport: device-local staging is VRAM taken from textures and arenas on 4 GB cards. Detiled
+// texture data, which took ~600 MiB of it whenever an area loaded, now goes through the tile
+// manager's scratch; what is left (copies between images, oversized images) is small. The ring
+// keeps two blocks and releases others after ~1 minute (1800 submissions) unused: each block is
+// its own 16 MiB driver allocation, so releasing them sooner only made them come back.
+constexpr u64 DEVICE_LOCAL_KEEP_BLOCKS = 2;
 constexpr u64 DEVICE_LOCAL_IDLE_FRAMES = 1800;
 
 u64 RoundAllocationSize(u64 size) {
@@ -184,17 +184,35 @@ void StagingBufferPool::FreeDeferred(const StagingBufferRef& ref) {
 void StagingBufferPool::TickFrame() {
     ++frame;
     for (size_t i = 0; i < NUM_TYPES; ++i) {
-        TrimRing(rings[i], MemoryType(i));
-        TrimLarge(large_caches[i], MemoryType(i));
+        const bool device_local = MemoryType(i) == MemoryType::DeviceLocal;
+        TrimRing(rings[i], device_local ? DEVICE_LOCAL_KEEP_BLOCKS : keep_blocks,
+                 device_local ? DEVICE_LOCAL_IDLE_FRAMES : RING_IDLE_FRAMES);
+        TrimLarge(large_caches[i], device_local ? DEVICE_LOCAL_IDLE_FRAMES : LARGE_IDLE_FRAMES);
     }
     PublishStats();
 }
 
-u64 StagingBufferPool::IdleFrames(MemoryType type, u64 host_frames) const {
-    if (type != MemoryType::DeviceLocal) {
-        return host_frames;
+u64 StagingBufferPool::ReleaseIdle() {
+    // Device-local ring blocks but one, and every dedicated buffer, that no pending submission
+    // uses. The host upload ring stays: it is populated at startup and slow to populate again.
+    const auto release = [this] {
+        u64 freed = TrimRing(rings[u32(MemoryType::DeviceLocal)], 1, 0);
+        for (auto& cache : large_caches) {
+            freed += TrimLarge(cache, 0);
+        }
+        return freed;
+    };
+    u64 freed = release();
+    if (freed == 0 && scheduler.CurrentTick() > 1) {
+        // What the submitted work holds is free once it completes.
+        scheduler.WaitSubmitted();
+        freed = release();
     }
-    return DEVICE_LOCAL_IDLE_FRAMES;
+    if (freed != 0) {
+        std::printf("Staging: VRAM refused an allocation; released %llu MiB of idle staging\n",
+                    static_cast<unsigned long long>(freed >> 20));
+    }
+    return freed;
 }
 
 u64 StagingBufferPool::DeviceLocalRingBytes() const {
@@ -213,16 +231,16 @@ u64 StagingBufferPool::DeviceLocalBytes() const {
     return bytes;
 }
 
-void StagingBufferPool::TrimRing(Ring& ring, MemoryType type) {
+u64 StagingBufferPool::TrimRing(Ring& ring, u64 keep, u64 idle_frames) {
     auto& blocks = ring.blocks;
-    const u64 keep = type == MemoryType::DeviceLocal ? DEVICE_LOCAL_KEEP_BLOCKS : keep_blocks;
-    const u64 idle_frames = IdleFrames(type, RING_IDLE_FRAMES);
+    u64 freed = 0;
     for (size_t i = blocks.size(); i-- > 0;) {
         const Block& block = blocks[i];
         if (blocks.size() <= keep || frame - block.last_used_frame < idle_frames ||
             !scheduler.IsFree(block.buffer->LastTick())) {
             continue;
         }
+        freed += block.buffer->SizeBytes();
         blocks.erase(blocks.begin() + i);
         if (i < ring.current) {
             --ring.current;
@@ -233,14 +251,18 @@ void StagingBufferPool::TrimRing(Ring& ring, MemoryType type) {
     if (ring.current >= blocks.size()) {
         ring.current = 0;
     }
+    return freed;
 }
 
-void StagingBufferPool::TrimLarge(std::vector<LargeBuffer>& cache, MemoryType type) {
-    const u64 idle_frames = IdleFrames(type, LARGE_IDLE_FRAMES);
-    std::erase_if(cache, [this, idle_frames](const LargeBuffer& entry) {
-        return !entry.held && frame - entry.last_used_frame >= idle_frames &&
-               scheduler.IsFree(entry.tick);
+u64 StagingBufferPool::TrimLarge(std::vector<LargeBuffer>& cache, u64 idle_frames) {
+    u64 freed = 0;
+    std::erase_if(cache, [this, idle_frames, &freed](const LargeBuffer& entry) {
+        const bool idle = !entry.held && frame - entry.last_used_frame >= idle_frames &&
+                          scheduler.IsFree(entry.tick);
+        freed += idle ? entry.buffer->SizeBytes() : 0;
+        return idle;
     });
+    return freed;
 }
 
 void StagingBufferPool::PublishStats() const {

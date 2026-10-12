@@ -1417,6 +1417,7 @@ void Rasterizer::OnSubmit() {
     BbWatch::Stage("submission: image downloads");
     texture_cache.ProcessDownloadImages();
     BbWatch::Stage("submission: texture GC");
+    instance.RefreshAllocatorBudget(static_cast<u32>(BbWatch::submissions.load()));
     texture_cache.RunGarbageCollector();
     // bbport: last before the flush, so ranges it retires are not bound again before it.
     BbWatch::Stage("submission: buffer arenas");

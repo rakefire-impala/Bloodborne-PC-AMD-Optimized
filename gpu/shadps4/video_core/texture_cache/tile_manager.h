@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <memory>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 #include <boost/container_hash/hash.hpp>
@@ -59,6 +61,10 @@ private:
 
     vk::Pipeline GetTilingPipeline(const ImageInfo& info, bool is_tiler);
 
+    /// bbport: `size` bytes of the VRAM scratch for linear data the tiling shaders write or
+    /// read, nullopt when it is too small (the staging pool serves those).
+    std::optional<std::pair<const Buffer*, u64>> TakeScratch(u64 size);
+
 private:
     const Vulkan::Instance& instance;
     Vulkan::Scheduler& scheduler;
@@ -67,6 +73,10 @@ private:
     vk::UniqueDescriptorSetLayout desc_layout;
     vk::UniquePipelineLayout pl_layout;
     std::unordered_map<TilingKey, vk::UniquePipeline, TilingKey::Hash> tiling_pipelines;
+    /// bbport: reused within each submission (see TakeScratch).
+    std::unique_ptr<Buffer> scratch;
+    u64 scratch_offset{};
+    u64 scratch_tick{};
 };
 
 } // namespace VideoCore

@@ -517,6 +517,10 @@ public:
     };
     [[nodiscard]] MemoryLevels GetMemoryLevels() const;
 
+    /// bbport: once per submission: VMA reads the driver's budget again (otherwise every 30
+    /// allocations), so a budget Windows lowered in between is not overrun.
+    void RefreshAllocatorBudget(u32 frame) const;
+
     /// bbport: usage minus the space free inside VMA blocks (GetMemoryLevels). Freed images and
     /// buffers return their space to blocks that stay allocated, so the driver's figure does
     /// not fall with them; this one does, and new VMA allocations can reuse that space.

@@ -16,6 +16,27 @@
 
 namespace VideoCore {
 
+namespace {
+std::function<bool()> out_of_memory_handler;
+thread_local bool handling_out_of_memory = false;
+} // namespace
+
+void SetOutOfMemoryHandler(std::function<bool()> handler) {
+    out_of_memory_handler = std::move(handler);
+}
+
+bool HandleOutOfMemory() {
+    // Not reentrant: the handler's own frees never allocate, but a failure inside the staging
+    // pool's allocation must not trim that pool while it is mid-request.
+    if (!out_of_memory_handler || handling_out_of_memory) {
+        return false;
+    }
+    handling_out_of_memory = true;
+    const bool freed = out_of_memory_handler();
+    handling_out_of_memory = false;
+    return freed;
+}
+
 std::string_view BufferTypeName(MemoryType type) {
     switch (type) {
     case MemoryType::HostUncached:
@@ -103,6 +124,11 @@ void UniqueBuffer::Create(vk::BufferCreateInfo& buffer_ci, MemoryType mem_type,
         VkBuffer unsafe_buffer{};
         VkResult result = vmaCreateBuffer(allocator, &buffer_ci_unsafe, &alloc_ci, &unsafe_buffer,
                                           &allocation, out_alloc_info);
+        if ((result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) &&
+            HandleOutOfMemory()) {
+            result = vmaCreateBuffer(allocator, &buffer_ci_unsafe, &alloc_ci, &unsafe_buffer,
+                                     &allocation, out_alloc_info);
+        }
         if ((result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) &&
             (mem_type == MemoryType::DeviceLocal || mem_type == MemoryType::Stream)) {
             // bbport: VRAM full (a 4 GB GPU at its budget; a 16 MiB staging block needed during
