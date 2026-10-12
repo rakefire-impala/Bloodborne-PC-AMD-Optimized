@@ -4,6 +4,7 @@
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
 #include "bbport_toggles.h"
+#include "bbport_watchdog.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "common/debug.h"
 #include "core/debug_state.h"
@@ -912,6 +913,7 @@ bool Rasterizer::FilterDrawPasses() const {
 
 void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* prepared) {
     RENDERER_TRACE;
+    BbWatch::Stage("draw");
     BbStats::draws.fetch_add(1, std::memory_order_relaxed);
 
     // bbport: with the draw pipeline this thread only selects the pipeline and hands the draw
@@ -1270,6 +1272,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
 
 void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
+    BbWatch::Stage("dispatch");
     BbStats::dispatches.fetch_add(1, std::memory_order_relaxed);
     // bbport: like draws, handed to the draw recording thread after the pipeline selection.
     const bool pipelined = UseDrawPipe() && !BbToggle::Disabled(BbToggle::PipelinedDispatch);
@@ -1404,21 +1407,29 @@ void Rasterizer::Finish() {
 }
 
 void Rasterizer::OnSubmit() {
+    BbWatch::Stage("submission: draining the draw pipe");
     DrainDrawPipe();
     if (fault_process_pending) {
         fault_process_pending = false;
+        BbWatch::Stage("submission: fault buffer");
         buffer_cache.ProcessFaultBuffer();
     }
+    BbWatch::Stage("submission: image downloads");
     texture_cache.ProcessDownloadImages();
+    BbWatch::Stage("submission: texture GC");
     texture_cache.RunGarbageCollector();
     // bbport: last before the flush, so ranges it retires are not bound again before it.
+    BbWatch::Stage("submission: buffer arenas");
     buffer_cache.TickArenas({
         .used = texture_cache.GetUsedMemory(),
         .budget = texture_cache.GetMemoryBudget(),
         .pressure = texture_cache.GetPressureMark(),
         .critical = texture_cache.GetCriticalMark(),
     });
+    BbWatch::Stage("submission: staging trim");
     runtime.TickFrame();
+    BbWatch::Stage("submission: flush");
+    BbWatch::submissions.fetch_add(1, std::memory_order_relaxed);
 }
 
 const PreparedStage* Rasterizer::FindPreparedStage(const Shader::Info& stage) const {

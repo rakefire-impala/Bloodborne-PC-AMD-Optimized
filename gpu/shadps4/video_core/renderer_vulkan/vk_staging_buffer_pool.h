@@ -64,6 +64,7 @@ private:
     struct Block {
         std::unique_ptr<VideoCore::StreamBuffer> buffer;
         u64 last_used_frame;
+        u64 failed_tick = 0; ///< bbport: submission in which a reservation last failed
     };
 
     struct Ring {

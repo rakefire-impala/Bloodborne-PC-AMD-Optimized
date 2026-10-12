@@ -14,6 +14,7 @@
 #include "bbport_copy.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "bbport_toggles.h"
+#include "bbport_watchdog.h"
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/thread.h"
@@ -204,6 +205,7 @@ void Scheduler::WaitDeferredSignals() {
         return;
     }
     BbStats::WaitTimer timer{BbStats::host_copies_wait_ns};
+    const BbWatch::ScopedStage stage{"waiting for deferred guest signals"};
     KickRecording(true);
     while (deferred_signals_done->load(std::memory_order_acquire) < issued) {
         // Helps the copy threads the signals wait for.
@@ -213,6 +215,7 @@ void Scheduler::WaitDeferredSignals() {
 }
 
 void Scheduler::WaitHostCopies() {
+    const BbWatch::ScopedStage stage{"waiting for guest memory copies"};
     if (host_copies_done.load(std::memory_order_acquire) < host_copies_issued) {
         BbStats::WaitTimer timer{BbStats::host_copies_wait_ns};
         BbStats::host_copy_waits.fetch_add(1, std::memory_order_relaxed);
@@ -340,6 +343,7 @@ void Scheduler::WaitSubmitted() {
 }
 
 void Scheduler::Wait(u64 tick) {
+    const BbWatch::ScopedStage stage{"waiting for the GPU"};
     if (tick >= work_semaphore.CurrentTick()) {
         // Make sure we are not waiting for the current tick without signalling
         SubmitInfo info{};

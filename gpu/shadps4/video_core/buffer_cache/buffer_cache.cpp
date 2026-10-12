@@ -12,6 +12,7 @@
 #include <magic_enum/magic_enum.hpp>
 #include "bbport_copy.h"
 #include "bbport_toggles.h"
+#include "bbport_watchdog.h"
 #include "common/alignment.h"
 #include "core/memory.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -563,6 +564,8 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         // Free blocks come in runs: bind the range piece by piece.
         for (u64 start = range.start; start < range.end;) {
             const ArenaPiece piece = AllocateArenaPiece(range.end - start);
+            // A bitmap out of step with its free count would loop here forever.
+            ASSERT_MSG(piece.blocks != 0, "Empty buffer arena piece");
             Backing backing;
             backing.start = start;
             backing.end = start + piece.blocks;
@@ -716,6 +719,7 @@ BufferCache::ArenaPiece BufferCache::AllocateArenaPiece(u64 blocks) {
     if (const auto piece = TakeFreeBlocks(blocks, false)) {
         return *piece;
     }
+    const BbWatch::ScopedStage stage{"allocating a buffer arena chunk"};
     const bool system_first = PrefersSystemMemory();
     if (!system_first && (AdoptPrefetchedChunk(true) || AllocateArenaChunk(false))) {
         return *TakeFreeBlocks(blocks, false);
@@ -978,7 +982,17 @@ void BufferCache::TickArenas(const MemoryLevels& levels) {
             prefetch.cv.notify_all();
         }
     }
-    if (levels.budget == 0) {
+    // bbport: retiring ranges no draw bound for a while is opt-in (BB_ARENA_RECLAIM=1). Shaders
+    // also read guest memory through the page table (ReadConst: constants and resource
+    // descriptors) without binding it, which leaves no trace here: on an RX 5500M a previous
+    // area's ranges looked unused, were retired, and looking back at it smeared its textures
+    // (descriptors read from cleared entries). Without it, only an allocation VRAM, system
+    // memory and VMA all refuse reclaims (EmergencyReclaim), instead of failing.
+    static const bool reclaim = [] {
+        const char* env = std::getenv("BB_ARENA_RECLAIM");
+        return env && env[0] == '1';
+    }();
+    if (levels.budget == 0 || !reclaim) {
         return;
     }
 
@@ -1025,11 +1039,39 @@ void BufferCache::TickArenas(const MemoryLevels& levels) {
 }
 
 void BufferCache::PrefetchLoop() {
+    // bbport: also the freeze watchdog. When the GPU thread has made no submission for 5 s it
+    // prints the stage that thread last entered (BbWatch), every 5 s while it stays stuck.
+    using Clock = std::chrono::steady_clock;
+    u64 last_count = 0;
+    auto last_change = Clock::now();
+    s64 reported = 0;
     std::unique_lock lock{prefetch.mutex};
     while (true) {
-        prefetch.cv.wait(lock, [this] { return prefetch.stop || prefetch.requested; });
+        prefetch.cv.wait_for(lock, std::chrono::seconds(1),
+                             [this] { return prefetch.stop || prefetch.requested; });
         if (prefetch.stop) {
             return;
+        }
+        if (!prefetch.requested) {
+            const u64 count = BbWatch::submissions.load(std::memory_order_relaxed);
+            const auto now = Clock::now();
+            if (count != last_count) {
+                last_count = count;
+                last_change = now;
+                reported = 0;
+                continue;
+            }
+            const s64 stalled =
+                std::chrono::duration_cast<std::chrono::seconds>(now - last_change).count();
+            if (count != 0 && stalled >= 5 && stalled >= reported + 5) {
+                reported = stalled;
+                std::printf("Watchdog: no GPU submission for %lld s; GPU thread stage: %s; %s\n",
+                            static_cast<long long>(stalled),
+                            BbWatch::stage.load(std::memory_order_relaxed),
+                            instance.DescribeMemory().c_str());
+                std::fflush(stdout);
+            }
+            continue;
         }
         lock.unlock();
         VmaAllocation allocation{};
@@ -1048,6 +1090,7 @@ void BufferCache::PrefetchLoop() {
 }
 
 bool BufferCache::AdoptPrefetchedChunk(bool wait) {
+    const BbWatch::ScopedStage stage{"waiting for the arena chunk worker"};
     std::unique_lock lock{prefetch.mutex};
     if (wait) {
         // One in progress finishes sooner than a new allocation would.

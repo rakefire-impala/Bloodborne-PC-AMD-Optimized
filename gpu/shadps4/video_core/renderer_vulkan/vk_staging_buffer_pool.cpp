@@ -80,16 +80,25 @@ StagingBufferRef StagingBufferPool::RequestFromRing(Ring& ring, u64 size, u64 al
     // last used. Rotating through every block kept the 38 a texture-streaming burst created all
     // in use, so none went idle and 608 MiB of a 4 GB GPU's VRAM stayed staging; packed at the
     // front, the blocks the burst added go idle and are trimmed.
-    const size_t first = type == MemoryType::DeviceLocal ? 0 : ring.current;
+    // A block that failed in this submission is skipped for the rest of it: in a streaming
+    // burst every request would otherwise retry every busy block, each retry a GPU progress
+    // query.
+    const bool packed = type == MemoryType::DeviceLocal;
+    const size_t first = packed ? 0 : ring.current;
+    const u64 tick = scheduler.CurrentTick();
     for (size_t i = 0; i < ring.blocks.size(); ++i) {
         const size_t index = (first + i) % ring.blocks.size();
         Block* block = &ring.blocks[index];
+        if (packed && block->failed_tick == tick) {
+            continue;
+        }
         if (const auto offset = block->buffer->Reserve(size, alignment, false)) {
             ring.current = index;
             best = block;
             best_offset = *offset;
             break;
         }
+        block->failed_tick = tick;
     }
 
     if (!best) {
