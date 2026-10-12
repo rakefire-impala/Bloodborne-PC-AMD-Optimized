@@ -30,6 +30,12 @@ constexpr u64 LARGE_IDLE_FRAMES = 3000;
 constexpr u64 PREWARM_BLOCKS = 8;
 constexpr u64 LARGE_MIN_GRANULARITY = 64_KB;
 constexpr u64 BLOCK_SIZE = 16_MB;
+// bbport: device-local staging (detiling input, copies between images) is VRAM taken from
+// textures and arenas on 4 GB cards, and VMA reuses the space cheaply: the ring keeps two
+// blocks, and idle blocks go after ~10 s, ~0.5 s while VRAM is short.
+constexpr u64 DEVICE_LOCAL_KEEP_BLOCKS = 2;
+constexpr u64 DEVICE_LOCAL_IDLE_FRAMES = 600;
+constexpr u64 DEVICE_LOCAL_PRESSURED_IDLE_FRAMES = 30;
 
 u64 RoundAllocationSize(u64 size) {
     const u64 step = std::max(std::bit_floor(size) / 4, LARGE_MIN_GRANULARITY);
@@ -161,20 +167,38 @@ void StagingBufferPool::FreeDeferred(const StagingBufferRef& ref) {
 
 void StagingBufferPool::TickFrame() {
     ++frame;
-    for (Ring& ring : rings) {
-        TrimRing(ring);
-    }
-    for (auto& cache : large_caches) {
-        TrimLarge(cache);
+    for (size_t i = 0; i < NUM_TYPES; ++i) {
+        TrimRing(rings[i], MemoryType(i));
+        TrimLarge(large_caches[i], MemoryType(i));
     }
     PublishStats();
 }
 
-void StagingBufferPool::TrimRing(Ring& ring) {
+u64 StagingBufferPool::IdleFrames(MemoryType type, u64 host_frames) const {
+    if (type != MemoryType::DeviceLocal) {
+        return host_frames;
+    }
+    return vram_pressure ? DEVICE_LOCAL_PRESSURED_IDLE_FRAMES : DEVICE_LOCAL_IDLE_FRAMES;
+}
+
+u64 StagingBufferPool::DeviceLocalBytes() const {
+    u64 bytes = 0;
+    for (const Block& block : rings[u32(MemoryType::DeviceLocal)].blocks) {
+        bytes += block.buffer->SizeBytes();
+    }
+    for (const LargeBuffer& entry : large_caches[u32(MemoryType::DeviceLocal)]) {
+        bytes += entry.buffer->SizeBytes();
+    }
+    return bytes;
+}
+
+void StagingBufferPool::TrimRing(Ring& ring, MemoryType type) {
     auto& blocks = ring.blocks;
+    const u64 keep = type == MemoryType::DeviceLocal ? DEVICE_LOCAL_KEEP_BLOCKS : keep_blocks;
+    const u64 idle_frames = IdleFrames(type, RING_IDLE_FRAMES);
     for (size_t i = blocks.size(); i-- > 0;) {
         const Block& block = blocks[i];
-        if (blocks.size() <= keep_blocks || frame - block.last_used_frame < RING_IDLE_FRAMES ||
+        if (blocks.size() <= keep || frame - block.last_used_frame < idle_frames ||
             !scheduler.IsFree(block.buffer->LastTick())) {
             continue;
         }
@@ -190,9 +214,10 @@ void StagingBufferPool::TrimRing(Ring& ring) {
     }
 }
 
-void StagingBufferPool::TrimLarge(std::vector<LargeBuffer>& cache) {
-    std::erase_if(cache, [this](const LargeBuffer& entry) {
-        return !entry.held && frame - entry.last_used_frame >= LARGE_IDLE_FRAMES &&
+void StagingBufferPool::TrimLarge(std::vector<LargeBuffer>& cache, MemoryType type) {
+    const u64 idle_frames = IdleFrames(type, LARGE_IDLE_FRAMES);
+    std::erase_if(cache, [this, idle_frames](const LargeBuffer& entry) {
+        return !entry.held && frame - entry.last_used_frame >= idle_frames &&
                scheduler.IsFree(entry.tick);
     });
 }

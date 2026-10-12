@@ -6,7 +6,11 @@
 #include "bbport_copy.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <deque>
+#include <mutex>
+#include <optional>
+#include <thread>
 #include <boost/container/small_vector.hpp>
 
 #include "common/interval_set.h"
@@ -81,7 +85,7 @@ public:
         return block_shift;
     }
 
-    /// bbport: memory made resident for the sparse arenas so far (never released).
+    /// bbport: memory bound to the sparse arenas now (retired ranges excluded).
     u64 GetArenaResidentBytes() const noexcept {
         return arena_resident_bytes.load(std::memory_order_relaxed);
     }
@@ -95,6 +99,38 @@ public:
     u64 GetArenaSystemBytes() const noexcept {
         return arena_system_bytes.load(std::memory_order_relaxed);
     }
+    /// bbport: arena upkeep since the last call (pressure report): bytes retired because no
+    /// draw used them, bytes moved from system memory back to VRAM, chunks returned to VMA,
+    /// and allocations that only succeeded after an emergency reclaim.
+    struct ArenaReclaimStats {
+        u64 reclaimed_bytes = 0;
+        u64 migrated_bytes = 0;
+        u32 released_chunks = 0;
+        u32 emergencies = 0;
+    };
+    ArenaReclaimStats TakeArenaReclaimStats() noexcept {
+        const ArenaReclaimStats stats = reclaim_stats;
+        reclaim_stats = {};
+        return stats;
+    }
+
+    /// bbport: VRAM levels the arena upkeep works against (from the texture cache's GC).
+    struct MemoryLevels {
+        u64 used = 0;     ///< driver usage minus the space free inside VMA blocks
+        u64 budget = 0;   ///< 0: the driver reports none (no reclaim, no migration)
+        u64 pressure = 0; ///< retire ranges unused for a while from here
+        u64 critical = 0; ///< retire sooner, page-table ranges too, from here
+    };
+    /// bbport: once per submission, before its flush: releases ranges retired earlier whose
+    /// submission completed, returns empty chunks to VMA, allocates the next VRAM chunk ahead
+    /// of need, and under memory pressure retires ranges no draw used for seconds (with VRAM to
+    /// spare, hot ranges in system memory instead, so they come back in VRAM).
+    void TickArenas(const MemoryLevels& levels);
+
+    /// bbport: a shader read [address, address + size) through the page table (fault path).
+    /// Such reads bind no descriptor and leave no trace of later use, so these ranges are
+    /// retired only under critical pressure, and never moved.
+    void NoteFaultedRange(VAddr address, u64 size);
 
     /// Invalidates any buffer in the logical page range.
     void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false);
@@ -207,29 +243,92 @@ private:
     /// bbport: system-memory type for arena blocks when VRAM runs out, ~0u if none fits.
     u32 arena_fallback_memory_type_index = ~0u;
 
-    /// bbport: arena blocks are carved from chunks instead of one allocation per gap, so a
-    /// chunk can fall back to system memory when VRAM is short. Chunks are VMA allocations
-    /// (sharing its blocks and the space evicted images free), released only on shutdown.
+    /// bbport: arena blocks come from 32 MiB VMA chunks (sharing VMA's blocks, and the space
+    /// evicted images leave there), each with a bitmap of used blocks: VRAM first, system memory
+    /// past 97% of the budget. Under memory pressure, ranges no draw used for seconds are
+    /// retired: their page-table entries are cleared at the end of the submission, and once it
+    /// completes their memory is unbound and reused. The next binding of a retired range gets
+    /// new memory and the guest data again; a shader reading it through the page table faults,
+    /// and the fault binds it.
     static constexpr u64 ARENA_CHUNK_SIZE = 32_MB;
+    static constexpr u32 MAX_CHUNK_WORDS = (ARENA_CHUNK_SIZE / MIN_BLOCK_SIZE) / 64;
     struct ArenaChunk {
+        VmaAllocation allocation{};
         vk::DeviceMemory memory{};
         u64 offset{}; ///< of the chunk inside `memory` (a VMA block)
-        u64 size{};
-        u64 used{};
         bool system{};
+        u32 free_blocks{};
+        bool unbind_pending{}; ///< holds freed pieces whose unbind is not submitted yet
+        u64 unbind_tick{};     ///< memory_semaphore tick of the last unbind from it
+        std::array<u64, MAX_CHUNK_WORDS> used{};
     };
-    ArenaChunk arena_chunk;
+    std::vector<ArenaChunk> arena_chunks;
+    u32 chunk_blocks{};
+    size_t chunk_hint{};
     struct ArenaPiece {
         vk::DeviceMemory memory;
         u64 offset;
         u64 blocks;
     };
-    /// Up to `blocks` blocks of backing from the current chunk, starting a new one if it is full.
+    /// Up to `blocks` contiguous blocks of backing, VRAM first. Asserts only when VRAM, system
+    /// memory and an emergency reclaim all fail.
     ArenaPiece AllocateArenaPiece(u64 blocks);
+    std::optional<ArenaPiece> TakeFreeBlocks(u64 blocks, bool system);
     bool AllocateArenaChunk(bool system);
-    std::vector<VmaAllocation> arena_allocations;
+    void AdoptArenaChunk(VmaAllocation allocation, vk::DeviceMemory memory, u64 offset,
+                         bool system);
+    void FreeArenaPiece(vk::DeviceMemory memory, u64 offset, u64 blocks);
+    void ReleaseEmptyChunks(bool pressured);
+    bool PrefersSystemMemory() const;
+    bool IsSystemBacking(vk::DeviceMemory memory, u64 offset) const;
 
-    std::atomic<u64> arena_resident_bytes{}; ///< bbport: never released (no unbinding)
+    /// A range retired at `tick` (the submission that last may use it), released once that
+    /// submission completes.
+    struct RetiredRange {
+        const Buffer* arena;
+        u64 tick;
+        Backing backing;
+    };
+    std::vector<RetiredRange> retired_ranges;
+    std::vector<ArenaBinds> pending_unbinds; ///< submitted ahead of pending_binds
+    u64 bind_wait_tick{}; ///< pending binds replace a retired range this submission may use
+    u64 last_memory_signal{};
+    void RetireRange(const Backing& backing, u64 tick);
+    void ReleaseRetiredRanges();
+    /// Retires up to `max_bytes` of resident ranges that `pick(unit_last_use)` accepts, those
+    /// backed by `system` memory if given. Returns the bytes retired.
+    template <typename Pick>
+    u64 RetireRanges(u64 max_bytes, std::optional<bool> system, u64 tick, Pick&& pick);
+    bool EmergencyReclaim();
+    u64 SubmitArenaBindBatch(std::vector<ArenaBinds>& batch, u64 wait_work_tick);
+
+    /// Last use per 1 MiB of guest address space: the display frame (BbStats::gpu_frames) of
+    /// its last binding, or-ed with FAULTED_UNIT once a shader read it through the page table.
+    static constexpr u32 UNIT_SHIFT = 20;
+    static constexpr u32 FAULTED_UNIT = 1u << 31;
+    std::vector<u32> unit_last_use;
+    void NoteUse(VAddr address, u64 size);
+    u64 last_reclaim_frame{};
+    u64 last_migrate_frame{};
+    ArenaReclaimStats reclaim_stats;
+
+    /// Allocates the next VRAM chunk on a worker thread before the current ones fill up: a new
+    /// VMA block is a 32-256 MiB driver allocation the OS clears first, which hitched the
+    /// recording thread when the game streamed in a new area.
+    struct ChunkPrefetch {
+        std::mutex mutex;
+        std::condition_variable cv;
+        bool requested = false, stop = false;
+        VmaAllocation allocation{}; ///< a ready chunk, adopted by the recording thread
+        vk::DeviceMemory memory{};
+        u64 offset{};
+    };
+    ChunkPrefetch prefetch;
+    std::thread prefetch_thread;
+    void PrefetchLoop();
+    bool AdoptPrefetchedChunk(bool wait);
+
+    std::atomic<u64> arena_resident_bytes{};
     std::atomic<u64> arena_chunk_bytes{}, arena_system_bytes{};
     std::atomic<u32> arena_chunk_count{};
     u32 block_size{};

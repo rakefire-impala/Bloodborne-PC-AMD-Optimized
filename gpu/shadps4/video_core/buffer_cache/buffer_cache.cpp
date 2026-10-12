@@ -130,11 +130,25 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     bda_pagetable_buffer = std::make_unique<Buffer>(
         instance, 0, bda_pagetable_size, MemoryType::DeviceLocal, "BDA Page Table Buffer");
     runtime.FillBuffer(bda_pagetable_buffer.get(), 0u, bda_pagetable_size, 0u);
+
+    chunk_blocks = static_cast<u32>(ARENA_CHUNK_SIZE >> block_shift);
+    ASSERT_MSG(chunk_blocks <= MAX_CHUNK_WORDS * 64, "Arena chunk of {} blocks", chunk_blocks);
+    unit_last_use.assign(u64{1} << (ADDRESS_SPACE_BITS - UNIT_SHIFT), 0);
+    prefetch_thread = std::thread([this] { PrefetchLoop(); });
 }
 
 BufferCache::~BufferCache() {
-    for (const VmaAllocation allocation : arena_allocations) {
-        vmaFreeMemory(instance.GetAllocator(), allocation);
+    {
+        std::scoped_lock lock{prefetch.mutex};
+        prefetch.stop = true;
+        prefetch.cv.notify_all();
+    }
+    prefetch_thread.join();
+    if (prefetch.allocation) {
+        vmaFreeMemory(instance.GetAllocator(), prefetch.allocation);
+    }
+    for (const ArenaChunk& chunk : arena_chunks) {
+        vmaFreeMemory(instance.GetAllocator(), chunk.allocation);
     }
 }
 
@@ -366,6 +380,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     const u64 first_block = device_addr >> block_shift;
     const u64 last_block = (device_addr + size - 1) >> block_shift;
     const auto* arena = GetArena(first_block, last_block);
+    NoteUse(device_addr, size);
     EnsureResident(arena, first_block, last_block);
     const u64 uploaded_before = BbStats::buffer_upload_bytes.load(std::memory_order_relaxed);
     SynchronizeMemory(arena, device_addr, size, is_written, is_texel_buffer);
@@ -502,15 +517,23 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
     }
     BbStats::Timer timer{BbStats::t_resident};
 
+    // bbport: binding a range retired at a submission the GPU may still run would swap its
+    // memory under that submission: these binds wait for it.
+    for (const RetiredRange& retired : retired_ranges) {
+        if (retired.backing.start <= last_block && first_block < retired.backing.end &&
+            retired.tick > bind_wait_tick && !scheduler.IsFree(retired.tick)) {
+            bind_wait_tick = retired.tick;
+        }
+    }
+
     boost::container::small_vector<vk::BufferCopy, 8> copies;
     const auto staging =
         staging_pool.Request(resident_blocks * sizeof(vk::DeviceAddress), MemoryType::HostUncached);
 
-    ArenaBinds* binds = BindsForArena(arena);
     auto* bda_addrs = reinterpret_cast<vk::DeviceAddress*>(staging.mapped);
     u64 offset = staging.offset;
     for (const auto& range : bind_ranges) {
-        // A range can span the end of a chunk: bind it piece by piece.
+        // Free blocks come in runs: bind the range piece by piece.
         for (u64 start = range.start; start < range.end;) {
             const ArenaPiece piece = AllocateArenaPiece(range.end - start);
             Backing backing;
@@ -523,6 +546,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
             LOG_INFO(Render, "Making range start={}, end={} resident", backing.start,
                      backing.end);
 
+            ArenaBinds* binds = BindsForArena(arena);
             const auto& bind = binds->binds.emplace_back(vk::SparseMemoryBind{
                 .resourceOffset = (backing.start << block_shift) - arena->cpu_addr,
                 .size = piece.blocks << block_shift,
@@ -545,68 +569,162 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
     runtime.CopyBuffer(staging.buffer, bda_pagetable_buffer.get(), copies);
 }
 
-BufferCache::ArenaPiece BufferCache::AllocateArenaPiece(u64 blocks) {
-    const u64 free_blocks = (arena_chunk.size - arena_chunk.used) >> block_shift;
-    if (free_blocks == 0) {
-        // bbport: arenas hold vertex, index and constant data read by every draw, so they
-        // take VRAM before images: a new chunk goes to system memory only past 97% of the live
-        // budget, above the texture cache's aggressive mark (95% by default), which then
-        // evicts images to make room. Chunks come from VMA, so they reuse the space evicted
-        // images leave in its blocks, and usage here excludes that free space as the texture
-        // cache's does. Past the budget Windows would page VRAM out instead.
-        // Checked again for every chunk, so arenas return to VRAM when the budget grows back.
-        bool system = false;
-        if (arena_fallback_memory_type_index != ~0u && instance.CanReportMemoryUsage()) {
-            const u64 budget = instance.GetDeviceMemoryBudgetNow();
-            const u64 usage = instance.GetEffectiveDeviceMemoryUsage();
-            system = budget != 0 && usage + ARENA_CHUNK_SIZE > budget / 100 * 97;
-        }
-        if (!AllocateArenaChunk(system)) {
-            // VRAM full despite the headroom check: system memory, if not tried already.
-            if (system || arena_fallback_memory_type_index == ~0u ||
-                !AllocateArenaChunk(true)) {
-                LOG_CRITICAL(Render_Vulkan,
-                             "Failed allocating a {} MiB buffer arena chunk; {} chunks ({} MiB, "
-                             "{} MiB in system memory), {} MiB resident; device usage {} of {} "
-                             "MiB budget; {} device allocations allowed; {}",
-                             ARENA_CHUNK_SIZE >> 20, GetArenaChunkCount(),
-                             GetArenaChunkBytes() >> 20, GetArenaSystemBytes() >> 20,
-                             GetArenaResidentBytes() >> 20, instance.GetDeviceMemoryUsage() >> 20,
-                             instance.GetDeviceMemoryBudgetNow() >> 20,
-                             instance.GetMaxMemoryAllocationCount(), instance.DescribeMemory());
-                ASSERT_MSG(false, "Out of memory for buffer arenas");
-            }
-        }
-    }
-    const u64 granted = std::min(blocks, (arena_chunk.size - arena_chunk.used) >> block_shift);
-    const ArenaPiece piece{arena_chunk.memory, arena_chunk.offset + arena_chunk.used, granted};
-    arena_chunk.used += granted << block_shift;
-    return piece;
-}
-
-bool BufferCache::AllocateArenaChunk(bool system) {
-    const u32 type = system ? arena_fallback_memory_type_index : arena_memory_type_index;
+namespace {
+/// bbport: one arena chunk of `type` from VMA (worker thread or recording thread).
+bool AllocateChunkMemory(VmaAllocator allocator, u32 type, u64 size, u64 alignment,
+                         VmaAllocation& allocation, VmaAllocationInfo& info) {
     const VkMemoryRequirements requirements = {
-        .size = ARENA_CHUNK_SIZE,
-        .alignment = block_size,
+        .size = size,
+        .alignment = alignment,
         .memoryTypeBits = 1u << type,
     };
     const VmaAllocationCreateInfo create_info = {
         .memoryTypeBits = 1u << type,
     };
-    VmaAllocation allocation{};
-    VmaAllocationInfo info{};
-    const auto result = vk::Result{vmaAllocateMemory(instance.GetAllocator(), &requirements,
-                                                     &create_info, &allocation, &info)};
-    if (result != vk::Result::eSuccess) {
-        LOG_WARNING(Render_Vulkan, "Buffer arena chunk in {} memory failed: {}; {}",
-                    system ? "system" : "video", vk::to_string(result),
-                    instance.DescribeMemory());
+    return vmaAllocateMemory(allocator, &requirements, &create_info, &allocation, &info) ==
+           VK_SUCCESS;
+}
+
+void SetBits(std::span<u64> words, u32 first, u32 count, bool value) {
+    for (u32 bit = first; bit < first + count; ++bit) {
+        const u64 mask = u64{1} << (bit & 63);
+        words[bit >> 6] = value ? words[bit >> 6] | mask : words[bit >> 6] & ~mask;
+    }
+}
+} // namespace
+
+void BufferCache::NoteUse(VAddr address, u64 size) {
+    const u32 frame =
+        static_cast<u32>(BbStats::gpu_frames.load(std::memory_order_relaxed)) & ~FAULTED_UNIT;
+    const u64 last = std::min<u64>((address + std::max<u64>(size, 1) - 1) >> UNIT_SHIFT,
+                                   unit_last_use.size() - 1);
+    for (u64 unit = address >> UNIT_SHIFT; unit <= last; ++unit) {
+        unit_last_use[unit] = (unit_last_use[unit] & FAULTED_UNIT) | frame;
+    }
+}
+
+void BufferCache::NoteFaultedRange(VAddr address, u64 size) {
+    NoteUse(address, size);
+    const u64 last = std::min<u64>((address + std::max<u64>(size, 1) - 1) >> UNIT_SHIFT,
+                                   unit_last_use.size() - 1);
+    for (u64 unit = address >> UNIT_SHIFT; unit <= last; ++unit) {
+        unit_last_use[unit] |= FAULTED_UNIT;
+    }
+}
+
+bool BufferCache::PrefersSystemMemory() const {
+    // bbport: arenas hold vertex, index and constant data read by every draw, so they take
+    // VRAM before images: a new chunk goes to system memory only past 97% of the live budget,
+    // above the texture cache's aggressive mark (95% by default), which then evicts images to
+    // make room. Past the budget Windows would page VRAM out instead. Checked for every chunk,
+    // so arenas return to VRAM when the budget grows back.
+    if (arena_fallback_memory_type_index == ~0u || !instance.CanReportMemoryUsage()) {
         return false;
     }
-    arena_allocations.push_back(allocation);
-    // The previous chunk is full; it stays bound until shutdown.
-    arena_chunk = {info.deviceMemory, info.offset, ARENA_CHUNK_SIZE, 0, system};
+    const u64 budget = instance.GetDeviceMemoryBudgetNow();
+    return budget != 0 &&
+           instance.GetEffectiveDeviceMemoryUsage() + ARENA_CHUNK_SIZE > budget / 100 * 97;
+}
+
+bool BufferCache::IsSystemBacking(vk::DeviceMemory memory, u64 offset) const {
+    for (const ArenaChunk& chunk : arena_chunks) {
+        if (chunk.memory == memory && offset >= chunk.offset &&
+            offset < chunk.offset + ARENA_CHUNK_SIZE) {
+            return chunk.system;
+        }
+    }
+    return false;
+}
+
+std::optional<BufferCache::ArenaPiece> BufferCache::TakeFreeBlocks(u64 blocks, bool system) {
+    const size_t count = arena_chunks.size();
+    for (size_t i = 0; i < count; ++i) {
+        const size_t index = (chunk_hint + i) % count;
+        ArenaChunk& chunk = arena_chunks[index];
+        if (chunk.system != system || chunk.free_blocks == 0) {
+            continue;
+        }
+        // First free run, at most `blocks` long.
+        u32 first = 0;
+        for (u32 word = 0; word * 64 < chunk_blocks; ++word) {
+            if (chunk.used[word] != ~u64{0}) {
+                first = word * 64 + std::countr_one(chunk.used[word]);
+                break;
+            }
+        }
+        u32 length = 0;
+        while (first + length < chunk_blocks && length < blocks &&
+               !((chunk.used[(first + length) >> 6] >> ((first + length) & 63)) & 1)) {
+            ++length;
+        }
+        SetBits(chunk.used, first, length, true);
+        chunk.free_blocks -= length;
+        chunk_hint = index;
+        return ArenaPiece{chunk.memory, chunk.offset + (u64{first} << block_shift), length};
+    }
+    return std::nullopt;
+}
+
+BufferCache::ArenaPiece BufferCache::AllocateArenaPiece(u64 blocks) {
+    if (const auto piece = TakeFreeBlocks(blocks, false)) {
+        return *piece;
+    }
+    const bool system_first = PrefersSystemMemory();
+    if (!system_first && (AdoptPrefetchedChunk(true) || AllocateArenaChunk(false))) {
+        return *TakeFreeBlocks(blocks, false);
+    }
+    if (const auto piece = TakeFreeBlocks(blocks, true)) {
+        return *piece;
+    }
+    if (arena_fallback_memory_type_index != ~0u && AllocateArenaChunk(true)) {
+        return *TakeFreeBlocks(blocks, true);
+    }
+    // System memory refused too: VRAM past the headroom mark beats failing.
+    if (system_first && AllocateArenaChunk(false)) {
+        return *TakeFreeBlocks(blocks, false);
+    }
+    if (EmergencyReclaim()) {
+        if (const auto piece = TakeFreeBlocks(blocks, false)) {
+            return *piece;
+        }
+        if (const auto piece = TakeFreeBlocks(blocks, true)) {
+            return *piece;
+        }
+    }
+    LOG_CRITICAL(Render_Vulkan,
+                 "Failed allocating a {} MiB buffer arena chunk; {} chunks ({} MiB, {} MiB in "
+                 "system memory), {} MiB resident; device usage {} of {} MiB budget; {}",
+                 ARENA_CHUNK_SIZE >> 20, GetArenaChunkCount(), GetArenaChunkBytes() >> 20,
+                 GetArenaSystemBytes() >> 20, GetArenaResidentBytes() >> 20,
+                 instance.GetDeviceMemoryUsage() >> 20, instance.GetDeviceMemoryBudgetNow() >> 20,
+                 instance.DescribeMemory());
+    ASSERT_MSG(false, "Out of memory for buffer arenas");
+    return {};
+}
+
+bool BufferCache::AllocateArenaChunk(bool system) {
+    const u32 type = system ? arena_fallback_memory_type_index : arena_memory_type_index;
+    VmaAllocation allocation{};
+    VmaAllocationInfo info{};
+    if (!AllocateChunkMemory(instance.GetAllocator(), type, ARENA_CHUNK_SIZE, block_size,
+                             allocation, info)) {
+        LOG_WARNING(Render_Vulkan, "Buffer arena chunk in {} memory failed; {}",
+                    system ? "system" : "video", instance.DescribeMemory());
+        return false;
+    }
+    AdoptArenaChunk(allocation, info.deviceMemory, info.offset, system);
+    return true;
+}
+
+void BufferCache::AdoptArenaChunk(VmaAllocation allocation, vk::DeviceMemory memory, u64 offset,
+                                  bool system) {
+    ArenaChunk& chunk = arena_chunks.emplace_back();
+    chunk.allocation = allocation;
+    chunk.memory = memory;
+    chunk.offset = offset;
+    chunk.system = system;
+    chunk.free_blocks = chunk_blocks;
+    chunk_hint = arena_chunks.size() - 1;
     const u32 count = arena_chunk_count.fetch_add(1, std::memory_order_relaxed) + 1;
     arena_chunk_bytes.fetch_add(ARENA_CHUNK_SIZE, std::memory_order_relaxed);
     if (system) {
@@ -619,6 +737,280 @@ bool BufferCache::AllocateArenaChunk(bool system) {
                     count, system_bytes >> 20, instance.GetDeviceMemoryUsage() >> 20,
                     instance.GetDeviceMemoryBudgetNow() >> 20);
     }
+}
+
+void BufferCache::FreeArenaPiece(vk::DeviceMemory memory, u64 offset, u64 blocks) {
+    // A backing merges pieces contiguous in memory, which can span adjacent chunks.
+    while (blocks != 0) {
+        const auto it = std::ranges::find_if(arena_chunks, [&](const ArenaChunk& chunk) {
+            return chunk.memory == memory && offset >= chunk.offset &&
+                   offset < chunk.offset + ARENA_CHUNK_SIZE;
+        });
+        ASSERT_MSG(it != arena_chunks.end(), "Freed arena memory belongs to no chunk");
+        const u32 first = static_cast<u32>((offset - it->offset) >> block_shift);
+        const u32 count = static_cast<u32>(std::min<u64>(blocks, chunk_blocks - first));
+        SetBits(it->used, first, count, false);
+        it->free_blocks += count;
+        it->unbind_pending = true;
+        blocks -= count;
+        offset += u64{count} << block_shift;
+    }
+}
+
+void BufferCache::ReleaseEmptyChunks(bool pressured) {
+    // Empty system-memory chunks go back at once; one empty VRAM chunk stays as the next
+    // allocation's, unless VRAM is short. A chunk goes only after the unbinds of its pieces
+    // ran, so no arena still maps it when VMA reuses the memory.
+    bool refreshed = false;
+    bool kept_spare = pressured;
+    for (size_t i = arena_chunks.size(); i-- > 0;) {
+        ArenaChunk& chunk = arena_chunks[i];
+        if (chunk.free_blocks != chunk_blocks || chunk.unbind_pending) {
+            continue;
+        }
+        if (!chunk.system && !kept_spare) {
+            kept_spare = true;
+            continue;
+        }
+        if (!memory_semaphore.IsFree(chunk.unbind_tick)) {
+            if (refreshed) {
+                continue;
+            }
+            memory_semaphore.Refresh();
+            refreshed = true;
+            if (!memory_semaphore.IsFree(chunk.unbind_tick)) {
+                continue;
+            }
+        }
+        vmaFreeMemory(instance.GetAllocator(), chunk.allocation);
+        arena_chunk_count.fetch_sub(1, std::memory_order_relaxed);
+        arena_chunk_bytes.fetch_sub(ARENA_CHUNK_SIZE, std::memory_order_relaxed);
+        if (chunk.system) {
+            arena_system_bytes.fetch_sub(ARENA_CHUNK_SIZE, std::memory_order_relaxed);
+        }
+        ++reclaim_stats.released_chunks;
+        arena_chunks.erase(arena_chunks.begin() + i);
+        chunk_hint = 0;
+    }
+}
+
+void BufferCache::RetireRange(const Backing& backing, u64 tick) {
+    const u64 blocks = backing.end - backing.start;
+    resident_ranges.Subtract(backing.start, backing.end);
+    // Shaders reading it through the page table fault from now on, and the fault binds it.
+    runtime.FillBuffer(bda_pagetable_buffer.get(), backing.start * sizeof(vk::DeviceAddress),
+                       blocks * sizeof(vk::DeviceAddress), 0);
+    // The next binding uploads the guest data again.
+    memory_tracker->MarkRegionAsCpuModified(backing.start << block_shift, blocks << block_shift);
+    retired_ranges.push_back({address_space[backing.start >> blocks_per_arena_page_shift], tick,
+                              backing});
+    arena_resident_bytes.fetch_sub(blocks << block_shift, std::memory_order_relaxed);
+}
+
+void BufferCache::ReleaseRetiredRanges() {
+    // Retired in tick order: release up to the first the GPU has not finished.
+    size_t done = 0;
+    while (done < retired_ranges.size() && scheduler.IsFree(retired_ranges[done].tick)) {
+        ++done;
+    }
+    if (done == 0) {
+        return;
+    }
+    // Parts bound again since, or retired again with other memory, keep their binding.
+    IntervalList<Interval> keep;
+    for (size_t i = done; i < retired_ranges.size(); ++i) {
+        keep.Add({retired_ranges[i].backing.start, retired_ranges[i].backing.end});
+    }
+    for (size_t i = 0; i < done; ++i) {
+        const RetiredRange& retired = retired_ranges[i];
+        const Backing& backing = retired.backing;
+        ArenaBinds* unbinds = nullptr;
+        resident_ranges.ForEachGap(backing.start, backing.end, [&](u64 start, u64 end) {
+            keep.ForEachGap(start, end, [&](u64 a, u64 b) {
+                if (!unbinds) {
+                    auto it = std::ranges::find(pending_unbinds, retired.arena, &ArenaBinds::arena);
+                    unbinds = it != pending_unbinds.end()
+                                  ? std::addressof(*it)
+                                  : &pending_unbinds.emplace_back(retired.arena);
+                }
+                unbinds->binds.push_back(vk::SparseMemoryBind{
+                    .resourceOffset = (a << block_shift) - retired.arena->cpu_addr,
+                    .size = (b - a) << block_shift,
+                });
+            });
+        });
+        FreeArenaPiece(backing.memory, backing.offset, backing.end - backing.start);
+    }
+    retired_ranges.erase(retired_ranges.begin(), retired_ranges.begin() + done);
+}
+
+template <typename Pick>
+u64 BufferCache::RetireRanges(u64 max_bytes, std::optional<bool> system, u64 tick, Pick&& pick) {
+    // Collected first: retiring edits resident_ranges.
+    boost::container::small_vector<Backing, 64> picks;
+    u64 total = 0;
+    for (const Backing& backing : resident_ranges) {
+        if (total >= max_bytes) {
+            break;
+        }
+        if (system && IsSystemBacking(backing.memory, backing.offset) != *system) {
+            continue;
+        }
+        for (u64 block = backing.start; block < backing.end && total < max_bytes;) {
+            const u64 unit = (block << block_shift) >> UNIT_SHIFT;
+            const u64 end =
+                std::min<u64>(backing.end, ((unit + 1) << UNIT_SHIFT) >> block_shift);
+            const u64 size = (end - block) << block_shift;
+            // GPU-written data would need a download first: such ranges stay.
+            if (pick(unit_last_use[unit]) &&
+                !memory_tracker->IsRegionGpuModified(block << block_shift, size)) {
+                const Backing piece = backing.SubRange(block, end);
+                Backing* last = picks.empty() ? nullptr : &picks.back();
+                // One retirement per run within an arena (its unbind names one arena).
+                if (last && last->end == piece.start && last->CanMergeWith(piece) &&
+                    (last->start >> blocks_per_arena_page_shift) ==
+                        (piece.start >> blocks_per_arena_page_shift)) {
+                    last->end = piece.end;
+                } else {
+                    picks.push_back(piece);
+                }
+                total += size;
+            }
+            block = end;
+        }
+    }
+    for (const Backing& backing : picks) {
+        RetireRange(backing, tick);
+    }
+    return total;
+}
+
+bool BufferCache::EmergencyReclaim() {
+    // bbport: VRAM, system memory and VMA all refused a chunk. Rather than fail, retire ranges
+    // not bound this frame as of the last submission, wait for it, and reuse their memory now.
+    // A shader in the submission being recorded that reads one through the page table before
+    // its entries are cleared reads unbound memory (zeros on AMD), and data a shader wrote
+    // through the page table is lost: wrong output for a while, where the alternative is a crash.
+    const u64 tick = scheduler.CurrentTick() - 1;
+    if (tick == 0) {
+        return false;
+    }
+    const u32 frame =
+        static_cast<u32>(BbStats::gpu_frames.load(std::memory_order_relaxed)) & ~FAULTED_UNIT;
+    const auto not_this_frame = [frame](u32 entry) { return (entry & ~FAULTED_UNIT) != frame; };
+    u64 retired = RetireRanges(64_MB, false, tick, not_this_frame);
+    if (retired == 0) {
+        retired = RetireRanges(64_MB, true, tick, not_this_frame);
+    }
+    if (retired == 0) {
+        return false;
+    }
+    scheduler.Wait(tick);
+    ReleaseRetiredRanges();
+    reclaim_stats.reclaimed_bytes += retired;
+    ++reclaim_stats.emergencies;
+    LOG_WARNING(Render_Vulkan, "Out of memory for buffer arenas: reclaimed {} MiB in place; {}",
+                retired >> 20, instance.DescribeMemory());
+    return true;
+}
+
+void BufferCache::TickArenas(const MemoryLevels& levels) {
+    ReleaseRetiredRanges();
+    const bool pressured = levels.budget != 0 && levels.used >= levels.pressure;
+    ReleaseEmptyChunks(pressured);
+
+    // The next VRAM chunk, allocated on the worker while half a chunk is still free.
+    u64 vram_free_blocks = 0;
+    for (const ArenaChunk& chunk : arena_chunks) {
+        vram_free_blocks += chunk.system ? 0 : chunk.free_blocks;
+    }
+    if (vram_free_blocks < chunk_blocks / 2) {
+        std::scoped_lock lock{prefetch.mutex};
+        if (!prefetch.requested && !prefetch.allocation && !PrefersSystemMemory()) {
+            prefetch.requested = true;
+            prefetch.cv.notify_all();
+        }
+    }
+    if (levels.budget == 0) {
+        return;
+    }
+
+    // Frames since the last binding; display frames, so the ages hold at any submission rate.
+    const u32 frame =
+        static_cast<u32>(BbStats::gpu_frames.load(std::memory_order_relaxed)) & ~FAULTED_UNIT;
+    const auto age = [frame](u32 entry) { return (frame - (entry & ~FAULTED_UNIT)) & ~FAULTED_UNIT; };
+    const u64 tick = scheduler.CurrentTick();
+    if (pressured) {
+        // At most once a second (30 fps), a bounded amount: reuploads stay off the frame time.
+        if (frame - last_reclaim_frame < 30) {
+            return;
+        }
+        last_reclaim_frame = frame;
+        const bool critical = levels.used >= levels.critical;
+        // ~10 s unused, ~3 s at the critical mark. Ranges read through the page table stay:
+        // their later reads leave no trace here, and a shader may also have written them
+        // through it, which the memory tracker does not see (retiring would lose that data).
+        const u32 min_age = critical ? 90 : 300;
+        const auto cold = [&](u32 entry) {
+            return !(entry & FAULTED_UNIT) && age(entry) >= min_age;
+        };
+        const u64 max_bytes = critical ? 128_MB : 64_MB;
+        // VRAM first: that is what is short. Cold ranges in system memory free its chunks.
+        u64 retired = RetireRanges(max_bytes, false, tick, cold);
+        retired += RetireRanges(max_bytes - std::min(retired, max_bytes), true, tick, cold);
+        reclaim_stats.reclaimed_bytes += retired;
+        return;
+    }
+    // VRAM to spare and ranges in system memory: retire those in use (and long unused ones), so
+    // their next binding lands in VRAM. Ranges read through the page table stay: a fault would
+    // cost those shaders a frame of zeros.
+    const u64 system_bytes = arena_system_bytes.load(std::memory_order_relaxed);
+    const u64 headroom_mark = levels.budget / 100 * 85;
+    if (system_bytes == 0 || levels.used + ARENA_CHUNK_SIZE >= headroom_mark ||
+        frame - last_migrate_frame < 60) {
+        return;
+    }
+    last_migrate_frame = frame;
+    const u64 max_bytes = std::min<u64>(32_MB, headroom_mark - levels.used - ARENA_CHUNK_SIZE);
+    reclaim_stats.migrated_bytes += RetireRanges(max_bytes, true, tick, [&](u32 entry) {
+        return !(entry & FAULTED_UNIT) && (age(entry) <= 30 || age(entry) >= 300);
+    });
+}
+
+void BufferCache::PrefetchLoop() {
+    std::unique_lock lock{prefetch.mutex};
+    while (true) {
+        prefetch.cv.wait(lock, [this] { return prefetch.stop || prefetch.requested; });
+        if (prefetch.stop) {
+            return;
+        }
+        lock.unlock();
+        VmaAllocation allocation{};
+        VmaAllocationInfo info{};
+        const bool ok = AllocateChunkMemory(instance.GetAllocator(), arena_memory_type_index,
+                                            ARENA_CHUNK_SIZE, block_size, allocation, info);
+        lock.lock();
+        if (ok) {
+            prefetch.allocation = allocation;
+            prefetch.memory = info.deviceMemory;
+            prefetch.offset = info.offset;
+        }
+        prefetch.requested = false;
+        prefetch.cv.notify_all();
+    }
+}
+
+bool BufferCache::AdoptPrefetchedChunk(bool wait) {
+    std::unique_lock lock{prefetch.mutex};
+    if (wait) {
+        // One in progress finishes sooner than a new allocation would.
+        prefetch.cv.wait(lock, [this] { return !prefetch.requested; });
+    }
+    if (!prefetch.allocation) {
+        return false;
+    }
+    AdoptArenaChunk(std::exchange(prefetch.allocation, nullptr), prefetch.memory, prefetch.offset,
+                    false);
     return true;
 }
 
@@ -783,15 +1175,10 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
     return true;
 }
 
-void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
-    if (pending_binds.empty()) {
-        return;
-    }
-
+u64 BufferCache::SubmitArenaBindBatch(std::vector<ArenaBinds>& batch, u64 wait_work_tick) {
     std::vector<vk::SparseBufferMemoryBindInfo> buffer_binds;
-    buffer_binds.reserve(pending_binds.size());
-
-    for (const auto& binds : pending_binds) {
+    buffer_binds.reserve(batch.size());
+    for (const auto& binds : batch) {
         buffer_binds.emplace_back(vk::SparseBufferMemoryBindInfo{
             .buffer = binds.arena->Handle(),
             .bindCount = static_cast<u32>(binds.binds.size()),
@@ -799,27 +1186,65 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
         });
     }
 
+    // bbport: batches run in order (each waits for the previous one): an unbind lands before
+    // a bind that reuses its memory, and the signals stay monotonic when a batch also waits for
+    // a submission that still uses memory it rebinds. That wait never names the submission
+    // being made now (it waits for these binds).
+    std::array<vk::Semaphore, 2> wait_semas;
+    std::array<u64, 2> wait_ticks;
+    u32 num_waits = 0;
+    if (last_memory_signal != 0) {
+        wait_semas[num_waits] = memory_semaphore.Handle();
+        wait_ticks[num_waits++] = last_memory_signal;
+    }
+    if (wait_work_tick != 0 && wait_work_tick + 1 < scheduler.CurrentTick() &&
+        !scheduler.IsFree(wait_work_tick)) {
+        wait_semas[num_waits] = scheduler.GetWorkSemaphore()->Handle();
+        wait_ticks[num_waits++] = wait_work_tick;
+    }
     const u64 signal_tick = memory_semaphore.NextTick();
     const auto signal_sema = memory_semaphore.Handle();
 
     const vk::TimelineSemaphoreSubmitInfo timeline_si = {
+        .waitSemaphoreValueCount = num_waits,
+        .pWaitSemaphoreValues = wait_ticks.data(),
         .signalSemaphoreValueCount = 1u,
         .pSignalSemaphoreValues = &signal_tick,
     };
-
     const vk::BindSparseInfo sparse_info = {
         .pNext = &timeline_si,
+        .waitSemaphoreCount = num_waits,
+        .pWaitSemaphores = wait_semas.data(),
         .bufferBindCount = static_cast<u32>(buffer_binds.size()),
         .pBufferBinds = buffer_binds.data(),
         .signalSemaphoreCount = 1u,
         .pSignalSemaphores = &signal_sema,
     };
-
-    info.AddWait(signal_sema, signal_tick);
     auto submit_result = instance.GetGraphicsQueue().bindSparse(sparse_info);
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
 
-    pending_binds.clear();
+    batch.clear();
+    last_memory_signal = signal_tick;
+    return signal_tick;
+}
+
+void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
+    // Unbinds of released ranges first; chunks whose freed pieces needed none are done too.
+    const bool unbinding = !pending_unbinds.empty();
+    const u64 unbind_tick = unbinding ? SubmitArenaBindBatch(pending_unbinds, 0) : last_memory_signal;
+    for (ArenaChunk& chunk : arena_chunks) {
+        if (chunk.unbind_pending) {
+            chunk.unbind_pending = false;
+            chunk.unbind_tick = unbind_tick;
+        }
+    }
+    const bool binding = !pending_binds.empty();
+    if (binding) {
+        SubmitArenaBindBatch(pending_binds, std::exchange(bind_wait_tick, 0));
+    }
+    if (unbinding || binding) {
+        info.AddWait(memory_semaphore.Handle(), last_memory_signal);
+    }
 }
 
 } // namespace VideoCore

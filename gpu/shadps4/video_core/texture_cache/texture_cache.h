@@ -285,6 +285,22 @@ public:
     /// Runs the garbage collector.
     void RunGarbageCollector();
 
+    /// bbport: VRAM levels as of the last collection, for the buffer arenas' upkeep: usage
+    /// (driver usage minus space free inside VMA blocks), the live budget (0 when the driver
+    /// reports none) and the pressure and critical marks.
+    [[nodiscard]] u64 GetUsedMemory() const noexcept {
+        return total_used_memory;
+    }
+    [[nodiscard]] u64 GetMemoryBudget() const noexcept {
+        return gc_budget;
+    }
+    [[nodiscard]] u64 GetPressureMark() const noexcept {
+        return pressure_gc_memory;
+    }
+    [[nodiscard]] u64 GetCriticalMark() const noexcept {
+        return critical_gc_memory;
+    }
+
     template <typename Func>
     void ForEachImageInRegion(VAddr cpu_addr, size_t size, Func&& func) {
         using FuncReturn = typename std::invoke_result<Func, ImageId, Image&>::type;
@@ -330,7 +346,7 @@ private:
     /// Iterate over all page indices in a range
     template <typename Func>
     static void ForEachPage(PAddr addr, size_t size, Func&& func) {
-        static constexpr bool RETURNS_BOOL = std::is_same_v<std::invoke_result<Func, u64>, bool>;
+        static constexpr bool RETURNS_BOOL = std::is_same_v<std::invoke_result_t<Func, u64>, bool>;
         const u64 page_end = (addr + size - 1) >> Traits::PageBits;
         for (u64 page = addr >> Traits::PageBits; page <= page_end; ++page) {
             if constexpr (RETURNS_BOOL) {
@@ -384,6 +400,10 @@ private:
 
     void GarbageCollectImages();
     void GarbageCollectSamplers();
+    /// bbport: whether a GPU-written image can be written back to guest memory (and so evicted).
+    bool CanWriteBack(const Image& image) const;
+    /// bbport: writes GPU-written images back to guest memory behind one GPU wait, then frees them.
+    void WriteBackAndFree(std::span<const ImageId> images);
 
 private:
     const Vulkan::Instance& instance;
@@ -402,6 +422,9 @@ private:
     u64 gc_evictions = 0, gc_evicted_bytes = 0, gc_downloads = 0; ///< bbport: pressure report
     u64 gc_skipped_tiled = 0, gc_skipped_tiled_bytes = 0, gc_skipped_unpressured = 0;
     u64 gc_passes = 0, gc_passes_quota = 0;
+    u64 gc_written_tiled = 0, gc_written_bytes = 0, gc_unevictable = 0;
+    u64 gc_budget = 0;        ///< bbport: the live budget the thresholds follow (0: none)
+    bool gc_draining = false; ///< bbport: evicting down to the drain mark
     std::chrono::steady_clock::time_point gc_report_time{};
     u64 trigger_gc_memory = 0;
     u64 pressure_gc_memory = 0;

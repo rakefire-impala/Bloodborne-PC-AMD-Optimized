@@ -1411,6 +1411,13 @@ void Rasterizer::OnSubmit() {
     }
     texture_cache.ProcessDownloadImages();
     texture_cache.RunGarbageCollector();
+    // bbport: last before the flush, so ranges it retires are not bound again before it.
+    buffer_cache.TickArenas({
+        .used = texture_cache.GetUsedMemory(),
+        .budget = texture_cache.GetMemoryBudget(),
+        .pressure = texture_cache.GetPressureMark(),
+        .critical = texture_cache.GetCriticalMark(),
+    });
     runtime.TickFrame();
 }
 

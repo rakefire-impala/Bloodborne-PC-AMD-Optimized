@@ -1072,13 +1072,17 @@ void TextureCache::GarbageCollectImages() {
             return p;
         }();
         const u64 budget = forced_budget ? forced_budget : instance.GetDeviceMemoryBudgetNow();
+        gc_budget = budget;
         if (budget != 0) {
             trigger_gc_memory = budget / 100 * percent[0];
             pressure_gc_memory = budget / 100 * percent[1];
             critical_gc_memory = budget / 100 * percent[2];
         }
     }
+    runtime.GetStagingPool().SetVramPressure(gc_budget != 0 &&
+                                             total_used_memory >= pressure_gc_memory);
     if (total_used_memory < trigger_gc_memory) {
+        gc_draining = false;
         return;
     }
     std::scoped_lock lock{mutex};
@@ -1087,20 +1091,44 @@ void TextureCache::GarbageCollectImages() {
     u64 ticks_to_destroy = 0;
     size_t num_deletions = 0;
 
+    // bbport: once usage reaches the pressure mark the collector drains to as far below it as
+    // the critical mark is above (90% -> 85% by default), then rests until usage climbs back.
+    // Holding usage just under the mark evicted a few images on every submission instead, and
+    // the game streamed them straight back in.
+    const u64 drain_mark =
+        pressure_gc_memory - std::min(pressure_gc_memory, critical_gc_memory - pressure_gc_memory);
+    // Images queued for write-back still hold their memory until the batch completes.
+    u64 pending_bytes = 0;
+    const auto used = [&] { return total_used_memory - std::min(total_used_memory, pending_bytes); };
     const auto configure = [&](bool allow_aggressive) {
-        pressured = total_used_memory >= pressure_gc_memory;
-        aggresive = allow_aggressive && total_used_memory >= critical_gc_memory;
-        ticks_to_destroy = aggresive ? 160 : pressured ? 80 : 16;
+        if (used() >= pressure_gc_memory) {
+            gc_draining = true;
+        } else if (used() < drain_mark) {
+            gc_draining = false;
+        }
+        pressured = gc_draining;
+        aggresive = allow_aggressive && used() >= critical_gc_memory;
+        // bbport: minimum ages in submissions (~30 a second): the more pressure, the younger an
+        // image may be evicted. Unpressured passes only trim what has been idle for ~10 s, so
+        // turning the camera back does not re-upload what just left the view. (Upstream had the
+        // order reversed: the aggressive pass could evict less than the pressured one.)
+        ticks_to_destroy = aggresive ? 30 : pressured ? 90 : 300;
         ticks_to_destroy = std::min(ticks_to_destroy, gc_tick);
-        num_deletions = aggresive ? 40 : pressured ? 20 : 10;
+        num_deletions = aggresive ? 64 : pressured ? 32 : 8;
     };
     // bbport: skipped images do not use up num_deletions. They stay at the head of the LRU
     // list, so charging them let ~20 tiny tiled render targets stop every pass before any
     // evictable image (RX 5500M: 0 evictions until ErrorOutOfDeviceMemory). The scan cap
     // bounds the cost of walking past them on every submission.
     static constexpr u32 MaxSkipsPerPass = 1024;
+    // GPU-written images are written back to guest memory in one batch per pass, behind a single
+    // wait for the GPU, up to this much: the wait grows with it, and re-tiling stages each
+    // image through VRAM, which is short when this runs.
+    static constexpr u64 MaxWriteBackPerPass = 32_MB;
     u32 skips = 0;
     bool stopped_by_quota = false;
+    boost::container::small_vector<ImageId, 32> write_backs;
+    boost::container::small_vector<ImageId, 64> unevictable;
     const auto clean_up = [&](ImageId image_id) {
         if (num_deletions == 0 || skips == MaxSkipsPerPass) {
             stopped_by_quota = true;
@@ -1108,12 +1136,14 @@ void TextureCache::GarbageCollectImages() {
         }
         auto& image = slot_images[image_id];
         const bool download = image.SafeToDownload();
-        const bool tiled = image.info.IsTiled();
-        if (tiled && download) {
-            // This is a workaround for now. We can't handle non-linear image downloads.
+        if (download && !CanWriteBack(image)) {
+            // Multisampled or an unsupported format: not evictable without losing GPU data.
             ++gc_skipped_tiled;
             gc_skipped_tiled_bytes += image.info.guest_size;
             ++skips;
+            if (unevictable.size() < 64) {
+                unevictable.push_back(image_id);
+            }
             return false;
         }
         if (download && !pressured) {
@@ -1121,86 +1151,225 @@ void TextureCache::GarbageCollectImages() {
             ++skips;
             return false;
         }
-        --num_deletions;
         if (download) {
-            // bbport: synchronously, while the image still protects its pages. A deferred
-            // write-back landed after FreeImage had unprotected them, over whatever the game
-            // had meanwhile stored there (e.g. its heap after unloading an area).
-            DownloadImageMemory(image_id, true);
-            ++gc_downloads;
+            if (pending_bytes + image.info.guest_size > MaxWriteBackPerPass &&
+                !write_backs.empty()) {
+                stopped_by_quota = true;
+                return true;
+            }
+            --num_deletions;
+            write_backs.push_back(image_id);
+            pending_bytes += Common::AlignUp(image.info.guest_size, 1024);
+        } else {
+            --num_deletions;
+            ++gc_evictions;
+            gc_evicted_bytes += image.info.guest_size;
+            FreeImage(image_id);
         }
-        ++gc_evictions;
-        gc_evicted_bytes += image.info.guest_size;
-        FreeImage(image_id);
-        if (total_used_memory < critical_gc_memory) {
+        if (used() < critical_gc_memory) {
             if (aggresive) {
                 num_deletions >>= 2;
                 aggresive = false;
                 return false;
             }
-            if (pressured && total_used_memory < pressure_gc_memory) {
+            if (pressured && used() < drain_mark) {
                 num_deletions >>= 1;
                 pressured = false;
+                gc_draining = false;
             }
         }
         return false;
     };
+    const auto run_pass = [&] {
+        skips = 0;
+        stopped_by_quota = false;
+        lru_cache.ForEachItemBelow(gc_tick - ticks_to_destroy, clean_up);
+        // bbport: synchronously, while the images still protect their pages. A deferred
+        // write-back landed after FreeImage had unprotected them, over whatever the game had
+        // meanwhile stored there (e.g. its heap after unloading an area).
+        WriteBackAndFree(write_backs);
+        write_backs.clear();
+        pending_bytes = 0;
+        ++gc_passes;
+        gc_passes_quota += stopped_by_quota;
+    };
 
     // Try to remove anything old enough and not high priority.
     configure(false);
-    lru_cache.ForEachItemBelow(gc_tick - ticks_to_destroy, clean_up);
-    ++gc_passes;
-    gc_passes_quota += stopped_by_quota;
+    run_pass();
 
     if (total_used_memory >= critical_gc_memory) {
         // If we are still over the critical limit, run an aggressive GC
         configure(true);
-        skips = 0;
-        stopped_by_quota = false;
-        lru_cache.ForEachItemBelow(gc_tick - ticks_to_destroy, clean_up);
-        ++gc_passes;
-        gc_passes_quota += stopped_by_quota;
+        run_pass();
     }
+    // Images nothing can evict leave the head of the list, so later passes do not walk past
+    // them again (they come back in order once they stop being GPU-written or are freed).
+    for (const ImageId image_id : unevictable) {
+        if (slot_images.is_allocated(image_id)) {
+            const Image& image = slot_images[image_id];
+            if (True(image.flags & ImageFlagBits::Registered)) {
+                TouchImage(image);
+            }
+        }
+    }
+    gc_unevictable += unevictable.size();
+
     // bbport: evictions under memory pressure, at most every 5 s (BB_FRAME_STATS or not).
-    // "ended at quota" counts passes stopped by num_deletions or the skip cap rather than by
-    // running out of images older than ticks_to_destroy.
-    if (pressured || gc_downloads != 0) {
+    // "ended at quota" counts passes stopped by num_deletions, the skip cap or the write-back
+    // cap rather than by running out of images older than ticks_to_destroy.
+    if (pressured || gc_draining || gc_downloads != 0) {
         const auto now = std::chrono::steady_clock::now();
         if (now - gc_report_time >= std::chrono::seconds(5)) {
             const auto vma = instance.GetVmaHeapStats();
-            std::printf("Texture cache: memory pressure, %llu of %llu MiB (critical %llu, "
-                        "driver usage %llu, budget %llu): %llu images evicted (%llu MiB), %llu "
-                        "written back, "
-                        "%llu tiled GPU-written skipped (%llu MiB), %llu skipped unpressured; "
-                        "%llu of %llu passes ended at quota since the last report; buffer arenas "
-                        "%llu MiB resident in %u chunks (%llu MiB in system memory); %u VMA "
-                        "memory blocks, %llu MiB free inside them; %s\n",
-                        (unsigned long long)(total_used_memory >> 20),
-                        (unsigned long long)(pressure_gc_memory >> 20),
-                        (unsigned long long)(critical_gc_memory >> 20),
-                        (unsigned long long)(instance.CanReportMemoryUsage()
-                                                 ? instance.GetDeviceMemoryUsage() >> 20
-                                                 : 0),
-                        (unsigned long long)(instance.CanReportMemoryUsage()
-                                                 ? instance.GetDeviceMemoryBudgetNow() >> 20
-                                                 : 0),
-                        (unsigned long long)gc_evictions,
-                        (unsigned long long)(gc_evicted_bytes >> 20),
-                        (unsigned long long)gc_downloads,
-                        (unsigned long long)gc_skipped_tiled,
-                        (unsigned long long)(gc_skipped_tiled_bytes >> 20),
-                        (unsigned long long)gc_skipped_unpressured,
-                        (unsigned long long)gc_passes_quota, (unsigned long long)gc_passes,
-                        (unsigned long long)(buffer_cache.GetArenaResidentBytes() >> 20),
-                        buffer_cache.GetArenaChunkCount(),
-                        (unsigned long long)(buffer_cache.GetArenaSystemBytes() >> 20),
-                        vma.blocks, (unsigned long long)(vma.free_bytes >> 20),
-                        instance.DescribeMemory().c_str());
+            const auto arena = buffer_cache.TakeArenaReclaimStats();
+            std::printf(
+                "Texture cache: memory pressure, %llu of %llu MiB (drain to %llu, critical %llu, "
+                "driver usage %llu, budget %llu): %llu images evicted (%llu MiB), %llu written "
+                "back (%llu tiled, %llu MiB), %llu unevictable skipped (%llu MiB, %llu moved to "
+                "the back), %llu skipped unpressured; %llu of %llu passes ended at quota since "
+                "the last report; buffer arenas %llu MiB resident in %u chunks (%llu MiB in "
+                "system memory), %llu MiB reclaimed, %llu MiB moved to VRAM, %u chunks "
+                "released, %u emergency reclaims; staging %llu MiB in VRAM; %u VMA memory "
+                "blocks, %llu MiB free inside them; %s\n",
+                (unsigned long long)(total_used_memory >> 20),
+                (unsigned long long)(pressure_gc_memory >> 20),
+                (unsigned long long)(drain_mark >> 20),
+                (unsigned long long)(critical_gc_memory >> 20),
+                (unsigned long long)(instance.CanReportMemoryUsage()
+                                         ? instance.GetDeviceMemoryUsage() >> 20
+                                         : 0),
+                (unsigned long long)(gc_budget >> 20), (unsigned long long)gc_evictions,
+                (unsigned long long)(gc_evicted_bytes >> 20), (unsigned long long)gc_downloads,
+                (unsigned long long)gc_written_tiled,
+                (unsigned long long)(gc_written_bytes >> 20),
+                (unsigned long long)gc_skipped_tiled,
+                (unsigned long long)(gc_skipped_tiled_bytes >> 20),
+                (unsigned long long)gc_unevictable, (unsigned long long)gc_skipped_unpressured,
+                (unsigned long long)gc_passes_quota, (unsigned long long)gc_passes,
+                (unsigned long long)(buffer_cache.GetArenaResidentBytes() >> 20),
+                buffer_cache.GetArenaChunkCount(),
+                (unsigned long long)(buffer_cache.GetArenaSystemBytes() >> 20),
+                (unsigned long long)(arena.reclaimed_bytes >> 20),
+                (unsigned long long)(arena.migrated_bytes >> 20), arena.released_chunks,
+                arena.emergencies,
+                (unsigned long long)(runtime.GetStagingPool().DeviceLocalBytes() >> 20),
+                vma.blocks, (unsigned long long)(vma.free_bytes >> 20),
+                instance.DescribeMemory().c_str());
             gc_report_time = now;
             gc_evictions = gc_evicted_bytes = gc_downloads = 0;
+            gc_written_tiled = gc_written_bytes = gc_unevictable = 0;
             gc_skipped_tiled = gc_skipped_tiled_bytes = gc_skipped_unpressured = 0;
             gc_passes = gc_passes_quota = 0;
         }
+    }
+}
+
+bool TextureCache::CanWriteBack(const Image& image) const {
+    const ImageInfo& info = image.info;
+    if (info.num_samples > 1 || info.guest_size == 0) {
+        return false; // a multisampled image cannot be copied to a buffer
+    }
+    if (!info.IsTiled()) {
+        return true;
+    }
+    // bbport: tiled images are re-tiled by the tile manager's compute tiler (the one texel
+    // buffers aliasing images already use). BB_GC_TILED_WRITEBACK=0 keeps them resident instead.
+    static const bool tiled_write_back = [] {
+        const char* env = std::getenv("BB_GC_TILED_WRITEBACK");
+        return !env || env[0] != '0';
+    }();
+    switch (info.num_bits) {
+    case 8:
+    case 16:
+    case 32:
+    case 64:
+    case 96:
+    case 128:
+        return tiled_write_back;
+    default:
+        return false;
+    }
+}
+
+void TextureCache::WriteBackAndFree(std::span<const ImageId> images) {
+    if (images.empty()) {
+        return;
+    }
+    // bbport: one staging allocation and one GPU wait for the whole batch. Each image takes
+    // its tiled guest layout (or, linear, the rows of its first level, as DownloadImageMemory).
+    const u64 align = std::max<u64>(instance.StorageMinAlignment(), 256);
+    boost::container::small_vector<u64, 32> offsets, sizes;
+    u64 total = 0;
+    for (const ImageId image_id : images) {
+        const ImageInfo& info = slot_images[image_id].info;
+        const u64 size = info.IsTiled() ? info.guest_size
+                                        : u64{info.pitch} * info.size.height * info.size.depth *
+                                              info.resources.layers * (info.num_bits / 8);
+        offsets.push_back(total);
+        sizes.push_back(std::min<u64>(size, info.guest_size));
+        total += Common::AlignUp(size, align);
+    }
+    const auto download = runtime.GetStagingPool().Request(total, MemoryType::HostCached, align);
+    for (size_t i = 0; i < images.size(); ++i) {
+        Image& image = slot_images[images[i]];
+        const ImageInfo& info = image.info;
+        const u64 offset = download.offset + offsets[i];
+        if (info.IsTiled()) {
+            boost::container::small_vector<vk::BufferImageCopy, 8> copies;
+            for (u32 mip = 0; mip < info.resources.levels; ++mip) {
+                const auto& mip_info = info.mips_layout[mip];
+                if (mip_info.offset + mip_info.size > info.guest_size) {
+                    break;
+                }
+                copies.push_back(vk::BufferImageCopy{
+                    .bufferOffset = mip_info.offset,
+                    .bufferRowLength = mip_info.pitch,
+                    .bufferImageHeight = mip_info.height,
+                    .imageSubresource{
+                        .aspectMask = image.aspect_mask & ~vk::ImageAspectFlagBits::eStencil,
+                        .mipLevel = mip,
+                        .baseArrayLayer = 0,
+                        .layerCount = info.resources.layers,
+                    },
+                    .imageOffset = {0, 0, 0},
+                    .imageExtent = {std::max(info.size.width >> mip, 1u),
+                                    std::max(info.size.height >> mip, 1u),
+                                    std::max(info.size.depth >> mip, 1u)},
+                });
+            }
+            tile_manager.TileImage(image, copies, download.buffer, offset);
+            ++gc_written_tiled;
+        } else {
+            const vk::BufferImageCopy copy = {
+                .bufferOffset = offset,
+                .bufferRowLength = info.pitch,
+                .bufferImageHeight = info.size.height,
+                .imageSubresource{
+                    .aspectMask = info.props.is_depth ? vk::ImageAspectFlagBits::eDepth
+                                                      : vk::ImageAspectFlagBits::eColor,
+                    .mipLevel = 0,
+                    .baseArrayLayer = 0,
+                    .layerCount = info.resources.layers,
+                },
+                .imageOffset = {0, 0, 0},
+                .imageExtent = {info.size.width, info.size.height, info.size.depth},
+            };
+            runtime.DownloadImage(&image, download.buffer, std::span{&copy, 1});
+        }
+    }
+    scheduler.Finish();
+    download.Invalidate();
+    for (size_t i = 0; i < images.size(); ++i) {
+        const ImageId image_id = images[i];
+        Image& image = slot_images[image_id];
+        Core::Memory::Instance()->TryWriteBacking(std::bit_cast<u8*>(image.info.guest_address),
+                                                  download.mapped + offsets[i], sizes[i]);
+        ++gc_downloads;
+        ++gc_evictions;
+        gc_evicted_bytes += image.info.guest_size;
+        gc_written_bytes += sizes[i];
+        FreeImage(image_id);
     }
 }
 
