@@ -3,7 +3,9 @@
 
 #pragma once
 
+#include <algorithm>
 #include <span>
+#include <string>
 #include <unordered_map>
 
 #include "video_core/renderer_vulkan/vk_platform.h"
@@ -430,6 +432,11 @@ public:
         return properties.limits.maxFramebufferHeight;
     }
 
+    /// bbport: the maximum number of live device memory allocations.
+    u32 GetMaxMemoryAllocationCount() const {
+        return properties.limits.maxMemoryAllocationCount;
+    }
+
     /// Returns the maximum number of samplers that can be allocated at once.
     u32 GetMaxSamplerAllocationCount() const {
         if (driver_id == vk::DriverId::eMesaKosmickrisp) {
@@ -485,6 +492,26 @@ public:
     /// bbport: the driver's current budget of the heaps GetDeviceMemoryUsage counts
     /// (VK_EXT_memory_budget: what this process can use now, other processes included).
     [[nodiscard]] u64 GetDeviceMemoryBudgetNow() const;
+
+    /// bbport: device memory objects VMA holds (blocks and dedicated allocations), and the
+    /// space inside them no allocation uses, over the heaps GetDeviceMemoryUsage counts.
+    struct VmaHeapStats {
+        u32 blocks = 0;
+        u64 free_bytes = 0;
+    };
+    [[nodiscard]] VmaHeapStats GetVmaHeapStats() const;
+
+    /// bbport: every heap's usage and budget, and the system commit charge, for messages about
+    /// allocation failures and memory pressure.
+    [[nodiscard]] std::string DescribeMemory() const;
+
+    /// bbport: GetDeviceMemoryUsage minus the space free inside VMA blocks. Freed images and
+    /// buffers return their space to blocks that stay allocated, so the driver's figure does
+    /// not fall with them; this one does, and new VMA allocations can reuse that space.
+    [[nodiscard]] u64 GetEffectiveDeviceMemoryUsage() const {
+        const u64 usage = GetDeviceMemoryUsage();
+        return usage - std::min(usage, GetVmaHeapStats().free_bytes);
+    }
 
     /// Returns the total memory budget available to the device.
     [[nodiscard]] u64 GetTotalMemoryBudget() const {

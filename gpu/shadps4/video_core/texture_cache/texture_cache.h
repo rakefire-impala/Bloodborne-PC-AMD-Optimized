@@ -399,7 +399,9 @@ private:
     tsl::robin_map<u64, Sampler> samplers;
     std::unordered_set<ImageId> download_images;
     u64 total_used_memory = 0;
-    u64 gc_evictions = 0, gc_downloads = 0; ///< bbport: pressure report
+    u64 gc_evictions = 0, gc_evicted_bytes = 0, gc_downloads = 0; ///< bbport: pressure report
+    u64 gc_skipped_tiled = 0, gc_skipped_tiled_bytes = 0, gc_skipped_unpressured = 0;
+    u64 gc_passes = 0, gc_passes_quota = 0;
     std::chrono::steady_clock::time_point gc_report_time{};
     u64 trigger_gc_memory = 0;
     u64 pressure_gc_memory = 0;

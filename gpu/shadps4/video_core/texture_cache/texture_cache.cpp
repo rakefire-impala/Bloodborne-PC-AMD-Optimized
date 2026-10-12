@@ -20,6 +20,8 @@
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/texture_cache/tile_manager.h"
 
+#include <array>
+
 namespace VideoCore {
 
 static constexpr u64 PageShift = 12;
@@ -43,6 +45,10 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
         trigger_gc_memory = 0;
         pressure_gc_memory = DEFAULT_PRESSURE_GC_MEMORY;
         critical_gc_memory = DEFAULT_CRITICAL_GC_MEMORY;
+        std::printf("Texture cache: no driver memory budget; GC counts image sizes against "
+                    "pressure %llu, critical %llu MiB\n",
+                    (unsigned long long)(pressure_gc_memory >> 20),
+                    (unsigned long long)(critical_gc_memory >> 20));
         return;
     }
 
@@ -59,6 +65,15 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
         std::max<u64>(std::min(device_local_memory - min_vacancy_critical, min_spacing_critical),
                       DEFAULT_CRITICAL_GC_MEMORY));
     trigger_gc_memory = static_cast<u64>((device_local_memory - mem_threshold) / 2);
+    std::printf("Texture cache: startup budget %llu MiB (driver now %llu, usage %llu); GC trigger "
+                "%llu, pressure %llu, critical %llu MiB\n",
+                (unsigned long long)(device_local_memory >> 20),
+                (unsigned long long)(instance.GetDeviceMemoryBudgetNow() >> 20),
+                (unsigned long long)(instance.GetDeviceMemoryUsage() >> 20),
+                (unsigned long long)(trigger_gc_memory >> 20),
+                (unsigned long long)(pressure_gc_memory >> 20),
+                (unsigned long long)(critical_gc_memory >> 20));
+    std::printf("Memory at startup: %s\n", instance.DescribeMemory().c_str());
 }
 
 TextureCache::~TextureCache() = default;
@@ -1014,7 +1029,12 @@ void TextureCache::UntrackImageTail(ImageId image_id) {
 
 void TextureCache::GarbageCollectImages() {
     if (instance.CanReportMemoryUsage()) {
-        total_used_memory = instance.GetDeviceMemoryUsage();
+        // bbport: freeing an image returns its space to a VMA block, which stays allocated, so
+        // the driver's usage did not move with evictions (RX 5500M: pinned at 2619 MiB while
+        // hundreds of images were evicted every 5 s, the aggressive pass running on every
+        // submission and the game re-uploading what it evicted). Space free inside VMA blocks
+        // is available to new images: count it as unused.
+        total_used_memory = instance.GetEffectiveDeviceMemoryUsage();
         // bbport: on integrated GPUs (Steam Deck) the usage covers system-memory heaps holding
         // much more than images (buffers backing guest memory), and the startup budget left
         // ~1 GB after its 8 GB system reserve: usage stayed above the critical mark, so the
@@ -1025,13 +1045,37 @@ void TextureCache::GarbageCollectImages() {
             const char* env = std::getenv("BB_GC_BUDGET_MB");
             return env ? std::strtoull(env, nullptr, 10) << 20 : 0;
         }();
-        if (instance.IsIntegrated() || forced_budget) {
-            const u64 budget = forced_budget ? forced_budget : instance.GetDeviceMemoryBudgetNow();
-            if (budget != 0) {
-                trigger_gc_memory = budget / 10 * 7;
-                pressure_gc_memory = budget / 100 * 85;
-                critical_gc_memory = budget / 100 * 95;
+        // Discrete GPUs too: Windows moves the budget while the game runs (3446 -> ~2700 MiB on
+        // a 4 GB RX 5500M, below the 3072 MiB critical floor, and up again when other programs
+        // release VRAM), so the thresholds follow it both ways.
+        // Collection starts at 80% and turns aggressive at 95%: at 70/85/95 the 4 GB card
+        // evicted images that were off screen for a few frames and re-uploaded them when the
+        // camera turned back (heavy stutter looking across busy scenes). Past the budget
+        // Windows pages VRAM to system memory, which stutters worse, so 95% stays the ceiling.
+        // BB_GC_PERCENT=trigger,pressure,critical overrides them (e.g. 85,92,97).
+        static const std::array<u64, 3> percent = [] {
+            std::array<u64, 3> p{80, 90, 95};
+            if (const char* env = std::getenv("BB_GC_PERCENT")) {
+                std::array<u64, 3> parsed{};
+                if (std::sscanf(env, "%llu,%llu,%llu", &parsed[0], &parsed[1], &parsed[2]) == 3 &&
+                    parsed[0] <= parsed[1] && parsed[1] <= parsed[2] && parsed[2] <= 100) {
+                    p = parsed;
+                } else {
+                    std::printf("Texture cache: ignoring BB_GC_PERCENT=%s (want "
+                                "trigger,pressure,critical in ascending order, at most 100)\n",
+                                env);
+                }
             }
+            std::printf("Texture cache: GC at %llu%% / %llu%% / %llu%% of the live budget\n",
+                        (unsigned long long)p[0], (unsigned long long)p[1],
+                        (unsigned long long)p[2]);
+            return p;
+        }();
+        const u64 budget = forced_budget ? forced_budget : instance.GetDeviceMemoryBudgetNow();
+        if (budget != 0) {
+            trigger_gc_memory = budget / 100 * percent[0];
+            pressure_gc_memory = budget / 100 * percent[1];
+            critical_gc_memory = budget / 100 * percent[2];
         }
     }
     if (total_used_memory < trigger_gc_memory) {
@@ -1050,21 +1094,34 @@ void TextureCache::GarbageCollectImages() {
         ticks_to_destroy = std::min(ticks_to_destroy, gc_tick);
         num_deletions = aggresive ? 40 : pressured ? 20 : 10;
     };
+    // bbport: skipped images do not use up num_deletions. They stay at the head of the LRU
+    // list, so charging them let ~20 tiny tiled render targets stop every pass before any
+    // evictable image (RX 5500M: 0 evictions until ErrorOutOfDeviceMemory). The scan cap
+    // bounds the cost of walking past them on every submission.
+    static constexpr u32 MaxSkipsPerPass = 1024;
+    u32 skips = 0;
+    bool stopped_by_quota = false;
     const auto clean_up = [&](ImageId image_id) {
-        if (num_deletions == 0) {
+        if (num_deletions == 0 || skips == MaxSkipsPerPass) {
+            stopped_by_quota = true;
             return true;
         }
-        --num_deletions;
         auto& image = slot_images[image_id];
         const bool download = image.SafeToDownload();
         const bool tiled = image.info.IsTiled();
         if (tiled && download) {
             // This is a workaround for now. We can't handle non-linear image downloads.
+            ++gc_skipped_tiled;
+            gc_skipped_tiled_bytes += image.info.guest_size;
+            ++skips;
             return false;
         }
         if (download && !pressured) {
+            ++gc_skipped_unpressured;
+            ++skips;
             return false;
         }
+        --num_deletions;
         if (download) {
             // bbport: synchronously, while the image still protects its pages. A deferred
             // write-back landed after FreeImage had unprotected them, over whatever the game
@@ -1073,6 +1130,7 @@ void TextureCache::GarbageCollectImages() {
             ++gc_downloads;
         }
         ++gc_evictions;
+        gc_evicted_bytes += image.info.guest_size;
         FreeImage(image_id);
         if (total_used_memory < critical_gc_memory) {
             if (aggresive) {
@@ -1091,24 +1149,57 @@ void TextureCache::GarbageCollectImages() {
     // Try to remove anything old enough and not high priority.
     configure(false);
     lru_cache.ForEachItemBelow(gc_tick - ticks_to_destroy, clean_up);
+    ++gc_passes;
+    gc_passes_quota += stopped_by_quota;
 
     if (total_used_memory >= critical_gc_memory) {
         // If we are still over the critical limit, run an aggressive GC
         configure(true);
+        skips = 0;
+        stopped_by_quota = false;
         lru_cache.ForEachItemBelow(gc_tick - ticks_to_destroy, clean_up);
+        ++gc_passes;
+        gc_passes_quota += stopped_by_quota;
     }
     // bbport: evictions under memory pressure, at most every 5 s (BB_FRAME_STATS or not).
+    // "ended at quota" counts passes stopped by num_deletions or the skip cap rather than by
+    // running out of images older than ticks_to_destroy.
     if (pressured || gc_downloads != 0) {
         const auto now = std::chrono::steady_clock::now();
         if (now - gc_report_time >= std::chrono::seconds(5)) {
-            std::printf("Texture cache: memory pressure, %llu of %llu MiB (critical %llu): "
-                        "%llu images evicted, %llu written back since the last report\n",
+            const auto vma = instance.GetVmaHeapStats();
+            std::printf("Texture cache: memory pressure, %llu of %llu MiB (critical %llu, "
+                        "driver usage %llu, budget %llu): %llu images evicted (%llu MiB), %llu "
+                        "written back, "
+                        "%llu tiled GPU-written skipped (%llu MiB), %llu skipped unpressured; "
+                        "%llu of %llu passes ended at quota since the last report; buffer arenas "
+                        "%llu MiB resident in %u chunks (%llu MiB in system memory); %u VMA "
+                        "memory blocks, %llu MiB free inside them; %s\n",
                         (unsigned long long)(total_used_memory >> 20),
                         (unsigned long long)(pressure_gc_memory >> 20),
                         (unsigned long long)(critical_gc_memory >> 20),
-                        (unsigned long long)gc_evictions, (unsigned long long)gc_downloads);
+                        (unsigned long long)(instance.CanReportMemoryUsage()
+                                                 ? instance.GetDeviceMemoryUsage() >> 20
+                                                 : 0),
+                        (unsigned long long)(instance.CanReportMemoryUsage()
+                                                 ? instance.GetDeviceMemoryBudgetNow() >> 20
+                                                 : 0),
+                        (unsigned long long)gc_evictions,
+                        (unsigned long long)(gc_evicted_bytes >> 20),
+                        (unsigned long long)gc_downloads,
+                        (unsigned long long)gc_skipped_tiled,
+                        (unsigned long long)(gc_skipped_tiled_bytes >> 20),
+                        (unsigned long long)gc_skipped_unpressured,
+                        (unsigned long long)gc_passes_quota, (unsigned long long)gc_passes,
+                        (unsigned long long)(buffer_cache.GetArenaResidentBytes() >> 20),
+                        buffer_cache.GetArenaChunkCount(),
+                        (unsigned long long)(buffer_cache.GetArenaSystemBytes() >> 20),
+                        vma.blocks, (unsigned long long)(vma.free_bytes >> 20),
+                        instance.DescribeMemory().c_str());
             gc_report_time = now;
-            gc_evictions = gc_downloads = 0;
+            gc_evictions = gc_evicted_bytes = gc_downloads = 0;
+            gc_skipped_tiled = gc_skipped_tiled_bytes = gc_skipped_unpressured = 0;
+            gc_passes = gc_passes_quota = 0;
         }
     }
 }

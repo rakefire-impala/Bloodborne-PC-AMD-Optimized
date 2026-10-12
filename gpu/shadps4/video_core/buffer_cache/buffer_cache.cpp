@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <algorithm>
 #include <bit>
+#include <cstdio>
 #include <cstdlib>
 #include <magic_enum/magic_enum.hpp>
 #include "bbport_copy.h"
@@ -92,6 +93,35 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
         FindMemoryType(instance.GetMemoryProperties(), vk::MemoryPropertyFlagBits::eDeviceLocal,
                        reqs.memoryTypeBits)
             .value();
+    const auto& memory_props = instance.GetMemoryProperties();
+    u32 system_type_bits = 0;
+    for (u32 i = 0; i < memory_props.memoryTypeCount; ++i) {
+        if (!(memory_props.memoryTypes[i].propertyFlags & vk::MemoryPropertyFlagBits::eDeviceLocal)) {
+            system_type_bits |= 1u << i;
+        }
+    }
+    arena_fallback_memory_type_index =
+        FindMemoryType(memory_props, vk::MemoryPropertyFlagBits::eHostVisible,
+                       reqs.memoryTypeBits & system_type_bits)
+            .value_or(~0u);
+    // bbport: which memory the sparse arenas may use (OOM investigation, 4 GB GPUs).
+    std::printf("Buffer cache: arena blocks of %u KiB in %llu MiB chunks, device allocations "
+                "allowed %u, memory types 0x%x, using type %u",
+                block_size >> 10, (unsigned long long)(ARENA_CHUNK_SIZE >> 20),
+                instance.GetMaxMemoryAllocationCount(), reqs.memoryTypeBits,
+                arena_memory_type_index);
+    if (arena_fallback_memory_type_index != ~0u) {
+        std::printf(", system-memory fallback type %u\n", arena_fallback_memory_type_index);
+    } else {
+        std::printf(", no system-memory fallback\n");
+    }
+    for (u32 i = 0; i < memory_props.memoryTypeCount; ++i) {
+        const auto& type = memory_props.memoryTypes[i];
+        std::printf("  memory type %u: heap %u (%llu MiB), %s%s\n", i, type.heapIndex,
+                    (unsigned long long)(memory_props.memoryHeaps[type.heapIndex].size >> 20),
+                    vk::to_string(type.propertyFlags).c_str(),
+                    ((reqs.memoryTypeBits >> i) & 1) ? ", allowed for arenas" : "");
+    }
 
     const u64 bda_pagetable_size =
         (blocks_per_arena_page * num_arena_pages) * sizeof(vk::DeviceAddress);
@@ -102,7 +132,11 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     runtime.FillBuffer(bda_pagetable_buffer.get(), 0u, bda_pagetable_size, 0u);
 }
 
-BufferCache::~BufferCache() = default;
+BufferCache::~BufferCache() {
+    for (const VmaAllocation allocation : arena_allocations) {
+        vmaFreeMemory(instance.GetAllocator(), allocation);
+    }
+}
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
     memory_tracker->InvalidateRegion(device_addr, size, [this, device_addr, size, assume_locks] {
@@ -468,48 +502,124 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
     }
     BbStats::Timer timer{BbStats::t_resident};
 
-    const vk::MemoryAllocateInfo alloc_info = {
-        .allocationSize = resident_blocks << block_shift,
-        .memoryTypeIndex = arena_memory_type_index,
-    };
-    const auto device_memory = Vulkan::Check(instance.GetDevice().allocateMemory(alloc_info));
-
     boost::container::small_vector<vk::BufferCopy, 8> copies;
     const auto staging =
         staging_pool.Request(resident_blocks * sizeof(vk::DeviceAddress), MemoryType::HostUncached);
 
-    u64 memory_offset{};
     ArenaBinds* binds = BindsForArena(arena);
     auto* bda_addrs = reinterpret_cast<vk::DeviceAddress*>(staging.mapped);
     u64 offset = staging.offset;
     for (const auto& range : bind_ranges) {
-        Backing backing;
-        backing.start = range.start;
-        backing.end = range.end;
-        backing.memory = device_memory;
-        backing.offset = memory_offset;
-        resident_ranges.Add(backing);
+        // A range can span the end of a chunk: bind it piece by piece.
+        for (u64 start = range.start; start < range.end;) {
+            const ArenaPiece piece = AllocateArenaPiece(range.end - start);
+            Backing backing;
+            backing.start = start;
+            backing.end = start + piece.blocks;
+            backing.memory = piece.memory;
+            backing.offset = piece.offset;
+            resident_ranges.Add(backing);
 
-        LOG_INFO(Render, "Making range start={}, end={} resident", backing.start, backing.end);
+            LOG_INFO(Render, "Making range start={}, end={} resident", backing.start,
+                     backing.end);
 
-        const auto& bind = binds->binds.emplace_back(vk::SparseMemoryBind{
-            .resourceOffset = (range.start << block_shift) - arena->cpu_addr,
-            .size = (range.end - range.start) << block_shift,
-            .memory = device_memory,
-            .memoryOffset = memory_offset,
-        });
-        memory_offset += bind.size;
+            const auto& bind = binds->binds.emplace_back(vk::SparseMemoryBind{
+                .resourceOffset = (backing.start << block_shift) - arena->cpu_addr,
+                .size = piece.blocks << block_shift,
+                .memory = piece.memory,
+                .memoryOffset = piece.offset,
+            });
+            arena_resident_bytes.fetch_add(bind.size, std::memory_order_relaxed);
 
-        for (u32 block = 0; block < bind.size; block += block_size) {
-            *(bda_addrs++) = arena->BufferDeviceAddress() + bind.resourceOffset + block;
+            for (u64 block = 0; block < bind.size; block += block_size) {
+                *(bda_addrs++) = arena->BufferDeviceAddress() + bind.resourceOffset + block;
+            }
+            const u64 copy_size = piece.blocks * sizeof(vk::DeviceAddress);
+            copies.emplace_back(offset, backing.start * sizeof(vk::DeviceAddress), copy_size);
+            offset += copy_size;
+            start = backing.end;
         }
-        const u64 copy_size = (backing.end - backing.start) * sizeof(vk::DeviceAddress);
-        copies.emplace_back(offset, backing.start * sizeof(vk::DeviceAddress), copy_size);
-        offset += copy_size;
     }
 
     staging.Flush();
     runtime.CopyBuffer(staging.buffer, bda_pagetable_buffer.get(), copies);
+}
+
+BufferCache::ArenaPiece BufferCache::AllocateArenaPiece(u64 blocks) {
+    const u64 free_blocks = (arena_chunk.size - arena_chunk.used) >> block_shift;
+    if (free_blocks == 0) {
+        // bbport: arenas hold vertex, index and constant data read by every draw, so they
+        // take VRAM before images: a new chunk goes to system memory only past 97% of the live
+        // budget, above the texture cache's aggressive mark (95% by default), which then
+        // evicts images to make room. Chunks come from VMA, so they reuse the space evicted
+        // images leave in its blocks, and usage here excludes that free space as the texture
+        // cache's does. Past the budget Windows would page VRAM out instead.
+        // Checked again for every chunk, so arenas return to VRAM when the budget grows back.
+        bool system = false;
+        if (arena_fallback_memory_type_index != ~0u && instance.CanReportMemoryUsage()) {
+            const u64 budget = instance.GetDeviceMemoryBudgetNow();
+            const u64 usage = instance.GetEffectiveDeviceMemoryUsage();
+            system = budget != 0 && usage + ARENA_CHUNK_SIZE > budget / 100 * 97;
+        }
+        if (!AllocateArenaChunk(system)) {
+            // VRAM full despite the headroom check: system memory, if not tried already.
+            if (system || arena_fallback_memory_type_index == ~0u ||
+                !AllocateArenaChunk(true)) {
+                LOG_CRITICAL(Render_Vulkan,
+                             "Failed allocating a {} MiB buffer arena chunk; {} chunks ({} MiB, "
+                             "{} MiB in system memory), {} MiB resident; device usage {} of {} "
+                             "MiB budget; {} device allocations allowed; {}",
+                             ARENA_CHUNK_SIZE >> 20, GetArenaChunkCount(),
+                             GetArenaChunkBytes() >> 20, GetArenaSystemBytes() >> 20,
+                             GetArenaResidentBytes() >> 20, instance.GetDeviceMemoryUsage() >> 20,
+                             instance.GetDeviceMemoryBudgetNow() >> 20,
+                             instance.GetMaxMemoryAllocationCount(), instance.DescribeMemory());
+                ASSERT_MSG(false, "Out of memory for buffer arenas");
+            }
+        }
+    }
+    const u64 granted = std::min(blocks, (arena_chunk.size - arena_chunk.used) >> block_shift);
+    const ArenaPiece piece{arena_chunk.memory, arena_chunk.offset + arena_chunk.used, granted};
+    arena_chunk.used += granted << block_shift;
+    return piece;
+}
+
+bool BufferCache::AllocateArenaChunk(bool system) {
+    const u32 type = system ? arena_fallback_memory_type_index : arena_memory_type_index;
+    const VkMemoryRequirements requirements = {
+        .size = ARENA_CHUNK_SIZE,
+        .alignment = block_size,
+        .memoryTypeBits = 1u << type,
+    };
+    const VmaAllocationCreateInfo create_info = {
+        .memoryTypeBits = 1u << type,
+    };
+    VmaAllocation allocation{};
+    VmaAllocationInfo info{};
+    const auto result = vk::Result{vmaAllocateMemory(instance.GetAllocator(), &requirements,
+                                                     &create_info, &allocation, &info)};
+    if (result != vk::Result::eSuccess) {
+        LOG_WARNING(Render_Vulkan, "Buffer arena chunk in {} memory failed: {}; {}",
+                    system ? "system" : "video", vk::to_string(result),
+                    instance.DescribeMemory());
+        return false;
+    }
+    arena_allocations.push_back(allocation);
+    // The previous chunk is full; it stays bound until shutdown.
+    arena_chunk = {info.deviceMemory, info.offset, ARENA_CHUNK_SIZE, 0, system};
+    const u32 count = arena_chunk_count.fetch_add(1, std::memory_order_relaxed) + 1;
+    arena_chunk_bytes.fetch_add(ARENA_CHUNK_SIZE, std::memory_order_relaxed);
+    if (system) {
+        const u64 system_bytes =
+            arena_system_bytes.fetch_add(ARENA_CHUNK_SIZE, std::memory_order_relaxed) +
+            ARENA_CHUNK_SIZE;
+        LOG_WARNING(Render_Vulkan,
+                    "VRAM near the budget: buffer arena chunk {} in system memory ({} MiB "
+                    "there); device usage {} of {} MiB budget",
+                    count, system_bytes >> 20, instance.GetDeviceMemoryUsage() >> 20,
+                    instance.GetDeviceMemoryBudgetNow() >> 20);
+    }
+    return true;
 }
 
 bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size,

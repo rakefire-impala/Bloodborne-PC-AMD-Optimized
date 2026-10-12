@@ -1,8 +1,10 @@
 #include "bbport_nvidia.h"
 #include "bbport_amd.h"
+#include "bbport_host_memory.h"
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
@@ -880,6 +882,40 @@ u64 Instance::GetDeviceMemoryBudgetNow() const {
         total_budget += memory_budget_props.heapBudget[heap];
     }
     return total_budget;
+}
+
+Instance::VmaHeapStats Instance::GetVmaHeapStats() const {
+    std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
+    vmaGetHeapBudgets(allocator, budgets.data());
+    VmaHeapStats stats{};
+    for (const size_t heap : valid_heaps) {
+        stats.blocks += budgets[heap].statistics.blockCount;
+        stats.free_bytes +=
+            budgets[heap].statistics.blockBytes - budgets[heap].statistics.allocationBytes;
+    }
+    return stats;
+}
+
+std::string Instance::DescribeMemory() const {
+    std::string text;
+    if (supports_memory_budget) {
+        vk::PhysicalDeviceMemoryBudgetPropertiesEXT budget{};
+        vk::PhysicalDeviceMemoryProperties2 props = {
+            .pNext = &budget,
+        };
+        physical_device.getMemoryProperties2(&props);
+        for (u32 i = 0; i < props.memoryProperties.memoryHeapCount; ++i) {
+            text += fmt::format("{}heap {} {} of {} MiB", text.empty() ? "" : ", ", i,
+                                budget.heapUsage[i] >> 20, budget.heapBudget[i] >> 20);
+        }
+    }
+    BbHostMemory::Commit commit;
+    if (BbHostMemory::GetCommit(commit)) {
+        text += fmt::format("{}system commit {} of {} MiB (this process {} MiB)",
+                            text.empty() ? "" : "; ", commit.system_used >> 20,
+                            commit.system_limit >> 20, commit.process >> 20);
+    }
+    return text;
 }
 
 vk::FormatFeatureFlags2 Instance::GetFormatFeatureFlags(vk::Format format) const {

@@ -5,6 +5,7 @@
 
 #include "bbport_copy.h"
 
+#include <atomic>
 #include <deque>
 #include <boost/container/small_vector.hpp>
 
@@ -78,6 +79,21 @@ public:
     /// Returns minimum granularity of a sparse memory bind.
     u32 GetSparsePageShift() const noexcept {
         return block_shift;
+    }
+
+    /// bbport: memory made resident for the sparse arenas so far (never released).
+    u64 GetArenaResidentBytes() const noexcept {
+        return arena_resident_bytes.load(std::memory_order_relaxed);
+    }
+    /// bbport: chunks backing the arenas: count, bytes, bytes of them in system memory.
+    u32 GetArenaChunkCount() const noexcept {
+        return arena_chunk_count.load(std::memory_order_relaxed);
+    }
+    u64 GetArenaChunkBytes() const noexcept {
+        return arena_chunk_bytes.load(std::memory_order_relaxed);
+    }
+    u64 GetArenaSystemBytes() const noexcept {
+        return arena_system_bytes.load(std::memory_order_relaxed);
     }
 
     /// Invalidates any buffer in the logical page range.
@@ -188,6 +204,34 @@ private:
     IntervalList<Backing> resident_ranges;
 
     u32 arena_memory_type_index{};
+    /// bbport: system-memory type for arena blocks when VRAM runs out, ~0u if none fits.
+    u32 arena_fallback_memory_type_index = ~0u;
+
+    /// bbport: arena blocks are carved from chunks instead of one allocation per gap, so a
+    /// chunk can fall back to system memory when VRAM is short. Chunks are VMA allocations
+    /// (sharing its blocks and the space evicted images free), released only on shutdown.
+    static constexpr u64 ARENA_CHUNK_SIZE = 32_MB;
+    struct ArenaChunk {
+        vk::DeviceMemory memory{};
+        u64 offset{}; ///< of the chunk inside `memory` (a VMA block)
+        u64 size{};
+        u64 used{};
+        bool system{};
+    };
+    ArenaChunk arena_chunk;
+    struct ArenaPiece {
+        vk::DeviceMemory memory;
+        u64 offset;
+        u64 blocks;
+    };
+    /// Up to `blocks` blocks of backing from the current chunk, starting a new one if it is full.
+    ArenaPiece AllocateArenaPiece(u64 blocks);
+    bool AllocateArenaChunk(bool system);
+    std::vector<VmaAllocation> arena_allocations;
+
+    std::atomic<u64> arena_resident_bytes{}; ///< bbport: never released (no unbinding)
+    std::atomic<u64> arena_chunk_bytes{}, arena_system_bytes{};
+    std::atomic<u32> arena_chunk_count{};
     u32 block_size{};
     u32 block_shift{};
     u32 blocks_per_arena_page{};
