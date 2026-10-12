@@ -277,7 +277,7 @@ private:
     /// memory and an emergency reclaim all fail.
     ArenaPiece AllocateArenaPiece(u64 blocks);
     std::optional<ArenaPiece> TakeFreeBlocks(u64 blocks, bool system);
-    bool AllocateArenaChunk(bool system);
+    bool AllocateArenaChunk(bool system, bool existing_blocks = false);
     void AdoptArenaChunk(VmaAllocation allocation, vk::DeviceMemory memory, u64 offset,
                          bool system);
     void FreeArenaPiece(vk::DeviceMemory memory, u64 offset, u64 blocks);

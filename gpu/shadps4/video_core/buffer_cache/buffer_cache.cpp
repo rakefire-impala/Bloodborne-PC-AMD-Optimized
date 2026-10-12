@@ -620,15 +620,18 @@ void BufferCache::TrimPendingUnbinds(const Buffer* arena, u64 start, u64 end) {
 }
 
 namespace {
-/// bbport: one arena chunk of `type` from VMA (worker thread or recording thread).
+/// bbport: one arena chunk of `type` from VMA (worker thread or recording thread), only from
+/// space VMA already holds when `existing_blocks`.
 bool AllocateChunkMemory(VmaAllocator allocator, u32 type, u64 size, u64 alignment,
-                         VmaAllocation& allocation, VmaAllocationInfo& info) {
+                         VmaAllocation& allocation, VmaAllocationInfo& info,
+                         bool existing_blocks = false) {
     const VkMemoryRequirements requirements = {
         .size = size,
         .alignment = alignment,
         .memoryTypeBits = 1u << type,
     };
     const VmaAllocationCreateInfo create_info = {
+        .flags = existing_blocks ? VMA_ALLOCATION_CREATE_NEVER_ALLOCATE_BIT : 0u,
         .memoryTypeBits = 1u << type,
     };
     return vmaAllocateMemory(allocator, &requirements, &create_info, &allocation, &info) ==
@@ -668,12 +671,16 @@ bool BufferCache::PrefersSystemMemory() const {
     // above the texture cache's aggressive mark (95% by default), which then evicts images to
     // make room. Past the budget Windows would page VRAM out instead. Checked for every chunk,
     // so arenas return to VRAM when the budget grows back.
+    // The driver's own figure must also leave 96 MiB: the space free inside VMA blocks is
+    // scattered, and images and staging blocks need whole new allocations (the texture cache
+    // evicts from 64 MiB before the heap's budget).
     if (arena_fallback_memory_type_index == ~0u || !instance.CanReportMemoryUsage()) {
         return false;
     }
-    const u64 budget = instance.GetDeviceMemoryBudgetNow();
-    return budget != 0 &&
-           instance.GetEffectiveDeviceMemoryUsage() + ARENA_CHUNK_SIZE > budget / 100 * 97;
+    const auto levels = instance.GetMemoryLevels();
+    const u64 effective = levels.usage - std::min(levels.usage, levels.vma_free);
+    return levels.budget != 0 && (effective + ARENA_CHUNK_SIZE > levels.budget / 100 * 97 ||
+                                  levels.usage + ARENA_CHUNK_SIZE + 96_MB > levels.budget);
 }
 
 bool BufferCache::IsSystemBacking(vk::DeviceMemory memory, u64 offset) const {
@@ -724,6 +731,10 @@ BufferCache::ArenaPiece BufferCache::AllocateArenaPiece(u64 blocks) {
     if (!system_first && (AdoptPrefetchedChunk(true) || AllocateArenaChunk(false))) {
         return *TakeFreeBlocks(blocks, false);
     }
+    // VRAM short: a chunk may still fit in space VMA already holds, which costs the heap nothing.
+    if (system_first && AllocateArenaChunk(false, true)) {
+        return *TakeFreeBlocks(blocks, false);
+    }
     if (const auto piece = TakeFreeBlocks(blocks, true)) {
         return *piece;
     }
@@ -753,14 +764,16 @@ BufferCache::ArenaPiece BufferCache::AllocateArenaPiece(u64 blocks) {
     return {};
 }
 
-bool BufferCache::AllocateArenaChunk(bool system) {
+bool BufferCache::AllocateArenaChunk(bool system, bool existing_blocks) {
     const u32 type = system ? arena_fallback_memory_type_index : arena_memory_type_index;
     VmaAllocation allocation{};
     VmaAllocationInfo info{};
     if (!AllocateChunkMemory(instance.GetAllocator(), type, ARENA_CHUNK_SIZE, block_size,
-                             allocation, info)) {
-        LOG_WARNING(Render_Vulkan, "Buffer arena chunk in {} memory failed; {}",
-                    system ? "system" : "video", instance.DescribeMemory());
+                             allocation, info, existing_blocks)) {
+        if (!existing_blocks) {
+            LOG_WARNING(Render_Vulkan, "Buffer arena chunk in {} memory failed; {}",
+                        system ? "system" : "video", instance.DescribeMemory());
+        }
         return false;
     }
     AdoptArenaChunk(allocation, info.deviceMemory, info.offset, system);

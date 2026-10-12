@@ -49,12 +49,6 @@ public:
     /// Releases idle memory.
     void TickFrame();
 
-    /// bbport: VRAM is short (the texture cache's pressure mark): idle device-local staging
-    /// goes after half a second instead of ten.
-    void SetVramPressure(bool pressured) noexcept {
-        vram_pressure = pressured;
-    }
-
     /// bbport: device-local staging held now, and how much of it is in ring blocks (the rest
     /// is dedicated buffers for requests larger than a block).
     [[nodiscard]] u64 DeviceLocalBytes() const;
@@ -98,7 +92,6 @@ private:
     u64 keep_blocks = 0; ///< bbport: ring blocks never trimmed
     std::array<std::vector<LargeBuffer>, NUM_TYPES> large_caches;
     u64 frame = 0;
-    bool vram_pressure = false;
 };
 
 } // namespace Vulkan

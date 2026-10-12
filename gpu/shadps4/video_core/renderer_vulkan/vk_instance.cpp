@@ -787,6 +787,11 @@ void Instance::CollectPhysicalMemoryInfo() {
         // If memory budget is not supported, use the size of the heap as the budget.
         total_memory_budget += memory_props.memoryHeaps[i].size;
     }
+    for (const size_t heap : valid_heaps) {
+        if (memory_props.memoryHeaps[heap].size > memory_props.memoryHeaps[primary_heap].size) {
+            primary_heap = heap;
+        }
+    }
     if (!IsIntegrated()) {
         // We reserve some memory for the system.
         const u64 system_memory = std::min<u64>(total_memory_budget / 8, 1_GB);
@@ -894,6 +899,30 @@ Instance::VmaHeapStats Instance::GetVmaHeapStats() const {
             budgets[heap].statistics.blockBytes - budgets[heap].statistics.allocationBytes;
     }
     return stats;
+}
+
+Instance::MemoryLevels Instance::GetMemoryLevels() const {
+    vk::PhysicalDeviceMemoryBudgetPropertiesEXT budget{};
+    vk::PhysicalDeviceMemoryProperties2 props = {
+        .pNext = &budget,
+    };
+    physical_device.getMemoryProperties2(&props);
+    std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> vma{};
+    vmaGetHeapBudgets(allocator, vma.data());
+    MemoryLevels levels{};
+    const auto add = [&](size_t heap) {
+        levels.usage += budget.heapUsage[heap];
+        levels.budget += budget.heapBudget[heap];
+        levels.vma_free += vma[heap].statistics.blockBytes - vma[heap].statistics.allocationBytes;
+    };
+    if (IsIntegrated()) {
+        for (const size_t heap : valid_heaps) {
+            add(heap);
+        }
+    } else {
+        add(primary_heap);
+    }
+    return levels;
 }
 
 std::string Instance::DescribeMemory() const {

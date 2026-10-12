@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "bbport_toggles.h"
+#include <atomic>
+#include <cstdio>
 #include <ranges>
 #include "common/assert.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -116,6 +118,21 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     VmaAllocationInfo alloc_info{};
     VkResult result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_ci, &unsafe_image,
                                      &allocation, &alloc_info);
+    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) {
+        // bbport: VRAM full (a 4 GB GPU at its budget): any memory type the image allows, over
+        // VMA's budget estimate if need be. Slower to sample than failing outright.
+        VmaAllocationCreateInfo fallback_ci = alloc_ci;
+        fallback_ci.flags = 0;
+        fallback_ci.usage = VMA_MEMORY_USAGE_AUTO;
+        result = vmaCreateImage(allocator, &image_ci_unsafe, &fallback_ci, &unsafe_image,
+                                &allocation, &alloc_info);
+        static std::atomic<u32> reported{0};
+        if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
+            std::printf("Image memory: VRAM full, %ux%u image placed %s\n", image_ci.extent.width,
+                        image_ci.extent.height,
+                        result == VK_SUCCESS ? "in any memory type it allows" : "nowhere");
+        }
+    }
     ASSERT_MSG(result == VK_SUCCESS,
                "Failed allocating image with error {} ({}x{}x{}, {} mips, {} layers, {})",
                vk::to_string(vk::Result{result}), image_ci.extent.width, image_ci.extent.height,

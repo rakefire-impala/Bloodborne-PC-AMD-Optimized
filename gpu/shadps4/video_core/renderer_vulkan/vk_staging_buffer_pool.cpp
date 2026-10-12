@@ -30,12 +30,14 @@ constexpr u64 LARGE_IDLE_FRAMES = 3000;
 constexpr u64 PREWARM_BLOCKS = 8;
 constexpr u64 LARGE_MIN_GRANULARITY = 64_KB;
 constexpr u64 BLOCK_SIZE = 16_MB;
-// bbport: device-local staging (detiling input, copies between images) is VRAM taken from
-// textures and arenas on 4 GB cards, and VMA reuses the space cheaply: the ring keeps two
-// blocks, and idle blocks go after ~10 s, ~0.5 s while VRAM is short.
-constexpr u64 DEVICE_LOCAL_KEEP_BLOCKS = 2;
-constexpr u64 DEVICE_LOCAL_IDLE_FRAMES = 600;
-constexpr u64 DEVICE_LOCAL_PRESSURED_IDLE_FRAMES = 30;
+// bbport: device-local staging (detiling output, copies between images) is VRAM taken from
+// textures and arenas on 4 GB cards. An area transition needs ~600 MiB of it at once; each
+// block is its own driver allocation (16 MiB, cleared by the OS), so a ring trimmed to a few
+// blocks re-grew at every transition (hitches) and, trimmed within a second of VRAM pressure,
+// met a full heap there (crash). It keeps 12 blocks (192 MiB; it kept 512 MiB before) and
+// releases blocks beyond them after ~1 minute (1800 submissions) unused.
+constexpr u64 DEVICE_LOCAL_KEEP_BLOCKS = 12;
+constexpr u64 DEVICE_LOCAL_IDLE_FRAMES = 1800;
 
 u64 RoundAllocationSize(u64 size) {
     const u64 step = std::max(std::bit_floor(size) / 4, LARGE_MIN_GRANULARITY);
@@ -192,7 +194,7 @@ u64 StagingBufferPool::IdleFrames(MemoryType type, u64 host_frames) const {
     if (type != MemoryType::DeviceLocal) {
         return host_frames;
     }
-    return vram_pressure ? DEVICE_LOCAL_PRESSURED_IDLE_FRAMES : DEVICE_LOCAL_IDLE_FRAMES;
+    return DEVICE_LOCAL_IDLE_FRAMES;
 }
 
 u64 StagingBufferPool::DeviceLocalRingBytes() const {

@@ -1033,8 +1033,10 @@ void TextureCache::GarbageCollectImages() {
         // the driver's usage did not move with evictions (RX 5500M: pinned at 2619 MiB while
         // hundreds of images were evicted every 5 s, the aggressive pass running on every
         // submission and the game re-uploading what it evicted). Space free inside VMA blocks
-        // is available to new images: count it as unused.
-        total_used_memory = instance.GetEffectiveDeviceMemoryUsage();
+        // is available to new images: count it as unused. Measured on the heap images and
+        // buffers live in (GetMemoryLevels), not the sum with the small CPU-visible VRAM heap.
+        const auto levels = instance.GetMemoryLevels();
+        total_used_memory = levels.usage - std::min(levels.usage, levels.vma_free);
         // bbport: on integrated GPUs (Steam Deck) the usage covers system-memory heaps holding
         // much more than images (buffers backing guest memory), and the startup budget left
         // ~1 GB after its 8 GB system reserve: usage stayed above the critical mark, so the
@@ -1071,16 +1073,21 @@ void TextureCache::GarbageCollectImages() {
                         (unsigned long long)p[2]);
             return p;
         }();
-        const u64 budget = forced_budget ? forced_budget : instance.GetDeviceMemoryBudgetNow();
+        const u64 budget = forced_budget ? forced_budget : levels.budget;
         gc_budget = budget;
         if (budget != 0) {
             trigger_gc_memory = budget / 100 * percent[0];
             pressure_gc_memory = budget / 100 * percent[1];
             critical_gc_memory = budget / 100 * percent[2];
+            // bbport: the space free inside VMA blocks is scattered: a heap the driver reports
+            // as full had 220 MiB of it and still refused a 16 MiB buffer. Within 64 MiB of the
+            // heap's budget the collector works as if past the pressure mark, so new images and
+            // staging blocks find room.
+            if (!forced_budget && levels.usage + 64_MB >= levels.budget) {
+                total_used_memory = std::max(total_used_memory, pressure_gc_memory);
+            }
         }
     }
-    runtime.GetStagingPool().SetVramPressure(gc_budget != 0 &&
-                                             total_used_memory >= pressure_gc_memory);
     if (total_used_memory < trigger_gc_memory) {
         return;
     }
@@ -1222,7 +1229,7 @@ void TextureCache::GarbageCollectImages() {
                 (unsigned long long)(pressure_gc_memory >> 20),
                 (unsigned long long)(critical_gc_memory >> 20),
                 (unsigned long long)(instance.CanReportMemoryUsage()
-                                         ? instance.GetDeviceMemoryUsage() >> 20
+                                         ? instance.GetMemoryLevels().usage >> 20
                                          : 0),
                 (unsigned long long)(gc_budget >> 20), (unsigned long long)gc_evictions,
                 (unsigned long long)(gc_evicted_bytes >> 20), (unsigned long long)gc_downloads,

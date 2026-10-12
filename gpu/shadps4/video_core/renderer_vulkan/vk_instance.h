@@ -505,12 +505,24 @@ public:
     /// allocation failures and memory pressure.
     [[nodiscard]] std::string DescribeMemory() const;
 
-    /// bbport: GetDeviceMemoryUsage minus the space free inside VMA blocks. Freed images and
+    /// bbport: usage, budget and space free inside VMA blocks of the memory images and buffers
+    /// live in: the largest heap on discrete GPUs, all valid heaps on integrated ones. Summing a
+    /// discrete GPU's heaps added the small CPU-visible VRAM window's spare budget (AMD heap 2,
+    /// 256 MiB, nearly unused), which hid a full main heap (2444 of 2444 MiB on an RX 5500M while
+    /// the sums read 2576 of 2608).
+    struct MemoryLevels {
+        u64 usage = 0;
+        u64 budget = 0;
+        u64 vma_free = 0;
+    };
+    [[nodiscard]] MemoryLevels GetMemoryLevels() const;
+
+    /// bbport: usage minus the space free inside VMA blocks (GetMemoryLevels). Freed images and
     /// buffers return their space to blocks that stay allocated, so the driver's figure does
     /// not fall with them; this one does, and new VMA allocations can reuse that space.
     [[nodiscard]] u64 GetEffectiveDeviceMemoryUsage() const {
-        const u64 usage = GetDeviceMemoryUsage();
-        return usage - std::min(usage, GetVmaHeapStats().free_bytes);
+        const MemoryLevels levels = GetMemoryLevels();
+        return levels.usage - std::min(levels.usage, levels.vma_free);
     }
 
     /// Returns the total memory budget available to the device.
@@ -603,6 +615,7 @@ private:
     bool supports_block_texel_view{};
     u64 total_memory_budget{};
     std::vector<size_t> valid_heaps;
+    size_t primary_heap{}; ///< bbport: the largest valid heap
 };
 
 } // namespace Vulkan

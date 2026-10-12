@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <cstdio>
 #include <numeric>
 
 #include "common/alignment.h"
@@ -101,6 +103,24 @@ void UniqueBuffer::Create(vk::BufferCreateInfo& buffer_ci, MemoryType mem_type,
         VkBuffer unsafe_buffer{};
         VkResult result = vmaCreateBuffer(allocator, &buffer_ci_unsafe, &alloc_ci, &unsafe_buffer,
                                           &allocation, out_alloc_info);
+        if ((result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) &&
+            (mem_type == MemoryType::DeviceLocal || mem_type == MemoryType::Stream)) {
+            // bbport: VRAM full (a 4 GB GPU at its budget; a 16 MiB staging block needed during
+            // an area transition failed here): any memory type the buffer allows, system memory
+            // in practice, over VMA's budget estimate if need be. Slower for the GPU, not fatal.
+            VmaAllocationCreateInfo fallback_ci = alloc_ci;
+            fallback_ci.flags &= ~VmaAllocationCreateFlags(VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT);
+            fallback_ci.usage = VMA_MEMORY_USAGE_AUTO;
+            fallback_ci.preferredFlags = 0;
+            result = vmaCreateBuffer(allocator, &buffer_ci_unsafe, &fallback_ci, &unsafe_buffer,
+                                     &allocation, out_alloc_info);
+            static std::atomic<u32> reported{0};
+            if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
+                std::printf("Buffer memory: VRAM full, %llu MiB buffer placed %s\n",
+                            static_cast<unsigned long long>(buffer_ci.size >> 20),
+                            result == VK_SUCCESS ? "in any memory type it allows" : "nowhere");
+            }
+        }
         ASSERT_MSG(result == VK_SUCCESS, "Failed allocating {} MiB buffer with error {}",
                    buffer_ci.size >> 20, vk::to_string(vk::Result{result}));
         buffer = vk::Buffer{unsafe_buffer};
