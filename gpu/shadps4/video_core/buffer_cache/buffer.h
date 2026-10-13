@@ -34,6 +34,18 @@ namespace VideoCore {
 void SetOutOfMemoryHandler(std::function<bool()> handler);
 bool HandleOutOfMemory();
 
+/// bbport: thrown by a buffer allocation that failed for good, instead of its assertion, while
+/// a ToleratedOutOfMemory lives on the thread: for callers with another way to get memory (the
+/// staging ring waits for one of its blocks).
+struct OutOfMemoryError {};
+class ToleratedOutOfMemory {
+public:
+    ToleratedOutOfMemory();
+    ~ToleratedOutOfMemory();
+    ToleratedOutOfMemory(const ToleratedOutOfMemory&) = delete;
+    ToleratedOutOfMemory& operator=(const ToleratedOutOfMemory&) = delete;
+};
+
 /// bbport: memory types images may use first (UniqueImage::Create): the main VRAM heap's types
 /// that the CPU cannot map, on discrete GPUs; 0 (any type) elsewhere. Set once at startup.
 void SetImageMemoryTypeBits(u32 bits);

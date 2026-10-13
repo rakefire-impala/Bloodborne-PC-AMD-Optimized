@@ -4,7 +4,9 @@
 #include "bbport_toggles.h"
 #include "bbport_hitch.h"
 #include <algorithm>
+#include <atomic>
 #include <bit>
+#include <optional>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -105,14 +107,42 @@ StagingBufferRef StagingBufferPool::RequestFromRing(Ring& ring, u64 size, u64 al
     }
 
     if (!best) {
-        BbHitch::staging_blocks.fetch_add(1, std::memory_order_relaxed);
-        best = &ring.blocks.emplace_back(Block{
-            .buffer =
-                std::make_unique<VideoCore::StreamBuffer>(instance, scheduler, type, BLOCK_SIZE),
-            .last_used_frame = frame,
-        });
-        ring.current = ring.blocks.size() - 1;
-        best_offset = *best->buffer->Reserve(size, alignment, false);
+        std::unique_ptr<VideoCore::StreamBuffer> buffer;
+        try {
+            // bbport: with blocks to fall back on, a refused block is not fatal (an RX 5500M
+            // at its VRAM budget crashed here loading Central Yharnam, the reserve spent).
+            std::optional<VideoCore::ToleratedOutOfMemory> tolerated;
+            if (!ring.blocks.empty()) {
+                tolerated.emplace();
+            }
+            buffer =
+                std::make_unique<VideoCore::StreamBuffer>(instance, scheduler, type, BLOCK_SIZE);
+        } catch (const VideoCore::OutOfMemoryError&) {
+            // The next block in rotation was used longest ago: wait for the GPU to finish it.
+            const size_t index = (ring.current + 1) % ring.blocks.size();
+            static std::atomic<u32> reported{0};
+            if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
+                std::printf("Staging: no memory for another %llu MiB %s block; waiting for the GPU "
+                            "to free one of %zu\n",
+                            static_cast<unsigned long long>(BLOCK_SIZE >> 20),
+                            type == MemoryType::DeviceLocal  ? "device-local"
+                            : type == MemoryType::HostCached ? "download"
+                                                             : "upload",
+                            ring.blocks.size());
+            }
+            best = &ring.blocks[index];
+            ring.current = index;
+            best_offset = *best->buffer->Reserve(size, alignment, true);
+        }
+        if (buffer) {
+            BbHitch::staging_blocks.fetch_add(1, std::memory_order_relaxed);
+            best = &ring.blocks.emplace_back(Block{
+                .buffer = std::move(buffer),
+                .last_used_frame = frame,
+            });
+            ring.current = ring.blocks.size() - 1;
+            best_offset = *best->buffer->Reserve(size, alignment, false);
+        }
     }
 
     auto& buffer = *best->buffer;

@@ -20,7 +20,16 @@ namespace VideoCore {
 namespace {
 std::function<bool()> out_of_memory_handler;
 thread_local bool handling_out_of_memory = false;
+thread_local u32 tolerated_out_of_memory = 0;
 } // namespace
+
+ToleratedOutOfMemory::ToleratedOutOfMemory() {
+    ++tolerated_out_of_memory;
+}
+
+ToleratedOutOfMemory::~ToleratedOutOfMemory() {
+    --tolerated_out_of_memory;
+}
 
 void SetOutOfMemoryHandler(std::function<bool()> handler) {
     out_of_memory_handler = std::move(handler);
@@ -145,8 +154,8 @@ void UniqueBuffer::Create(vk::BufferCreateInfo& buffer_ci, MemoryType mem_type,
             result = vmaCreateBuffer(allocator, &buffer_ci_unsafe, &alloc_ci, &unsafe_buffer,
                                      &allocation, out_alloc_info);
         }
-        if ((result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) &&
-            (mem_type == MemoryType::DeviceLocal || mem_type == MemoryType::Stream)) {
+        // Staging (host types) too: within VMA's budget it may only try the types it prefers.
+        if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) {
             // bbport: VRAM full (a 4 GB GPU at its budget; a 16 MiB staging block needed during
             // an area transition failed here): any memory type the buffer allows, system memory
             // in practice, over VMA's budget estimate if need be. Slower for the GPU, not fatal.
@@ -163,6 +172,9 @@ void UniqueBuffer::Create(vk::BufferCreateInfo& buffer_ci, MemoryType mem_type,
                             static_cast<unsigned long long>(buffer_ci.size >> 20),
                             result == VK_SUCCESS ? "in any memory type it allows" : "nowhere");
             }
+        }
+        if (result != VK_SUCCESS && tolerated_out_of_memory != 0) {
+            throw OutOfMemoryError{};
         }
         ASSERT_MSG(result == VK_SUCCESS, "Failed allocating {} MiB buffer with error {}",
                    buffer_ci.size >> 20, vk::to_string(vk::Result{result}));
