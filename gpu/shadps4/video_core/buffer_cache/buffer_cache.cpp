@@ -661,6 +661,7 @@ void BufferCache::EnsureResident(u64 first_block, u64 last_block) {
             backing.end = start + piece.blocks;
             backing.memory = piece.memory;
             backing.offset = piece.offset;
+            backing.block_shift = block_shift;
             resident_ranges.Add(backing);
 
             LOG_INFO(Render, "Making range start={}, end={} resident", backing.start,
@@ -1087,6 +1088,8 @@ void BufferCache::TickArenas(const MemoryLevels& levels) {
     // area's ranges looked unused, were retired, and looking back at it smeared its textures
     // (descriptors read from cleared entries). Without it, only an allocation VRAM, system
     // memory and VMA all refuse reclaims (EmergencyReclaim), instead of failing.
+    // (That smear may also have been the Backing offset bug, which gave retired parts the
+    // blocks of ranges still in use.)
     static const bool reclaim = [] {
         const char* env = std::getenv("BB_ARENA_RECLAIM");
         return env && env[0] == '1';

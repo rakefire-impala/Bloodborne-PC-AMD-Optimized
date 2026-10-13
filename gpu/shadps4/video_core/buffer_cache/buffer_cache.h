@@ -238,14 +238,22 @@ private:
     std::vector<ArenaBinds> pending_binds;
     Vulkan::Semaphore memory_semaphore;
 
+    /// Blocks [start, end) bound to `memory` from byte `offset`.
     struct Backing : public Interval {
         vk::DeviceMemory memory;
         u64 offset;
+        /// bbport: start and end count blocks, the offset bytes. Splitting a backing (retiring
+        /// part of it, Subtract) added blocks to bytes: the parts pointed a few bytes past the
+        /// original offset instead of N blocks, so releasing one freed the blocks of another
+        /// still in use (two ranges on one memory: wrong data; then "Empty buffer arena piece"
+        /// once the free counts and bitmaps disagreed).
+        u32 block_shift;
         constexpr bool CanMergeWith(const Backing& other) const noexcept {
-            return memory == other.memory && offset + (end - start) == other.offset;
+            return memory == other.memory &&
+                   offset + ((end - start) << block_shift) == other.offset;
         }
         constexpr Backing SubRange(u64 a, u64 b) const noexcept {
-            return {{a, b}, memory, offset + (a - start)};
+            return {{a, b}, memory, offset + ((a - start) << block_shift), block_shift};
         }
     };
     IntervalList<Backing> resident_ranges;
