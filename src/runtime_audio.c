@@ -35,6 +35,8 @@ typedef struct {
     SDL_AudioStream *stream;
     uint64_t next_deadline_ns; /* next return of sceAudioOutOutput */
     int64_t adjust_ns; int window_min, window_count; /* queue level control */
+    int window_start, window_put;   /* queue level at the window's start, bytes put since */
+    int stall_windows; unsigned backlog_drops; /* windows in a row the device took ~nothing; drops */
     uint64_t last_output_us;
     pthread_mutex_t lock;
     FILE *dump;                     /* BB_AUDIO_DUMP: raw converted PCM per port */
@@ -147,6 +149,7 @@ static ABI int32_t audio_close(int32_t handle) {
     pthread_mutex_unlock(&table_lock);
     return p ? 0 : error;
 }
+static const unsigned char silence[2048*8*4]; /* one buffer of the largest port */
 /* `pace`: wait for this port's next period. sceAudioOutOutputs waits once for all its ports. */
 static int32_t output_port(int32_t handle, const void *data, int pace) {
     int32_t error=0;
@@ -196,18 +199,64 @@ static int32_t output_port(int32_t handle, const void *data, int pace) {
             /* The device drains the queue in quanta (21 ms on PipeWire), so the level
                is a sawtooth: its minimum over ~32 buffers is what gets controlled. */
             int low=2*(int)bytes, queued=SDL_GetAudioStreamQueued(p->stream);
+            if (!p->window_count) { p->window_start=queued; p->window_put=0; }
             if (queued<(int)bytes) {
-                static const unsigned char silence[2048*8*4];
-                SDL_PutAudioStreamData(p->stream,silence,low-queued<(int)bytes ? low-queued : (int)bytes);
-                queued=low;
+                int fill=low-queued<(int)bytes ? low-queued : (int)bytes;
+                SDL_PutAudioStreamData(p->stream,silence,fill);
+                p->window_put+=fill; queued+=fill;
             }
             if (!p->window_count || queued<p->window_min) p->window_min=queued;
             if (++p->window_count==32) {
-                p->adjust_ns=p->window_min>low+2*(int)bytes ? (int64_t)(period/32) : p->window_min<low ? -(int64_t)(period/32) : 0;
+                /* bbport: a level that stays far above the target for a whole window is backlog,
+                   not the sawtooth: audio queued while the device was gone (a Bluetooth headset
+                   dropping out, the default device changing). The ±3% cadence drained it at a
+                   thirtieth of real time, so a few seconds of it kept every sound late for
+                   minutes. It is dropped: one short gap, then the queue is at its target. */
+                const int frame_bytes=p->channels*p->sample_bytes, backlog=48*80*frame_bytes; /* 80 ms */
+                /* What the device took during the window: the start level plus what came in,
+                   less what is left. Close to nothing: it is not playing. */
+                const int stalled=p->window_start+p->window_put-queued<p->window_put/4;
+                const int dropped=p->window_min>low+backlog;
+                if (dropped) {
+                    if (!p->backlog_drops)
+                        printf("Runtime: audio port %d: %.0f ms queued behind the device (output device changed?); dropped\n",
+                               (int)(p-ports),(double)(p->window_min-low)*1000.0/(48000.0*frame_bytes));
+                    ++p->backlog_drops;
+                    SDL_ClearAudioStream(p->stream);
+                    SDL_PutAudioStreamData(p->stream,silence,(int)bytes);
+                    SDL_PutAudioStreamData(p->stream,silence,(int)bytes);
+                } else if (!stalled && p->backlog_drops) {
+                    if (p->backlog_drops>1)
+                        printf("Runtime: audio port %d: back in step after %u drops\n",(int)(p-ports),p->backlog_drops);
+                    p->backlog_drops=0;
+                }
+                /* Not playing for ~2 s: SDL did not move the stream to the new default device.
+                   Opened again on the current default. */
+                p->stall_windows=stalled ? p->stall_windows+1 : 0;
+                if (p->stall_windows==12) {
+                    SDL_AudioSpec spec={p->is_float ? SDL_AUDIO_F32 : SDL_AUDIO_S16, p->channels, 48000};
+                    SDL_AudioStream *stream=SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,&spec,NULL,NULL);
+                    if (stream) {
+                        SDL_DestroyAudioStream(p->stream);
+                        p->stream=stream;
+                        SDL_ResumeAudioStreamDevice(stream);
+                        SDL_PutAudioStreamData(stream,silence,(int)bytes);
+                        SDL_PutAudioStreamData(stream,silence,(int)bytes);
+                    }
+                    static unsigned reopen_reports;
+                    if (reopen_reports++<8)
+                        printf("Runtime: audio port %d: output stalled; %s on the default device\n",
+                               (int)(p-ports),stream ? "reopened" : "could not reopen");
+                    p->stall_windows=0;
+                }
+                p->adjust_ns=dropped || stalled ? 0 :
+                             p->window_min>low+2*(int)bytes ? (int64_t)(period/32) :
+                             p->window_min<low ? -(int64_t)(period/32) : 0;
                 p->window_count=0;
             }
             p->next_deadline_ns+=(uint64_t)p->adjust_ns;
             SDL_PutAudioStreamData(p->stream,converted,(int)bytes);
+            p->window_put+=(int)bytes;
         }
         ++buffers_out;
     }
