@@ -38,6 +38,7 @@ int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
 int runtime_memory_write_backing(uintptr_t address, const void* data, uint64_t size);
 uint64_t runtime_memory_clamp(uintptr_t address, uint64_t size);
 int runtime_memory_region(uintptr_t address, uintptr_t* start, uintptr_t* end, int* mapped);
+const unsigned char* runtime_memory_backing(uintptr_t address, uintptr_t* end);
 void runtime_memory_gpu_protect(uintptr_t address, uint64_t size, int read, int write);
 typedef void (*RuntimeGpuRange)(uintptr_t address, uint64_t size);
 // runtime_kernel.c: one clock for guest and GPU timestamps
@@ -107,6 +108,22 @@ u64 MemoryManager::ClampRangeSize(VAddr virtual_addr, u64 size) {
     return runtime_memory_clamp(virtual_addr, size);
 }
 static void CopySparseSerial(VAddr source, u8* dest, u64 size) {
+    // bbport: through the backing view. Copies run on the copy and recording threads too, and a
+    // read of a page protected for GPU readbacks (readbacks=2) sent its download to the GPU
+    // thread, which waits for those very copies before it submits: the game froze at boot.
+    // The callers copy ranges the GPU has not modified (else they bind the GPU copy), so the
+    // page's protection only covers its other bytes.
+    while (size) {
+        uintptr_t end = 0;
+        const unsigned char* backing = runtime_memory_backing(source, &end);
+        if (!backing && end == 0) {
+            break; // past every mapping, or no backing view: the guest address below
+        }
+        const u64 n = std::min<u64>(size, end - source);
+        if (backing) std::memcpy(dest, backing, n);
+        else std::memset(dest, 0, n);
+        source += n; dest += n; size -= n;
+    }
     while (size) {
         uintptr_t start = 0, end = 0;
         int mapped = 0;
