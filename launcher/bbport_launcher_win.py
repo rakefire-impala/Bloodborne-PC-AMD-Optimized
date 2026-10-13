@@ -43,7 +43,10 @@ PATCH_VERSION = '01.09'
 MAX_LOG_LINES = 6000
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 # Fork releases use windows-v<upstream version>-tatsunakyo.<revision>.
-VERSION = '1.6-tatsunakyo.18'
+VERSION = '1.0-rakefireimpala'
+# The updater reads TatsunaKyo's releases, whose versions compare higher than this fork's:
+# off until this fork publishes its own (then point RELEASES_* and the tag pattern at it).
+UPDATES_ENABLED = False
 LAUNCHER_BUILD = 'TatsunaKyo revision'
 # Co-op: the community server that answers the game's own server requests.
 COMMUNITY_SERVER = 'https://thehuntersdream.com'
@@ -702,7 +705,7 @@ class Launcher:
         self.banner_source = self.banner_image = None
         self.ui_calls = queue.Queue()  # work for the Tk thread from helper threads
         self.mod_order, self.mod_vars, self.patch_vars = [], {}, {}
-        root.title('Bloodborne: The Crowned Workshop — TatsunaKyo')
+        root.title('Bloodborne: Optimized for mobile discrete AMD systems — rakefire impala')
         root.configure(bg=BG)
         self.dpi = root.winfo_fpixels('1i') / 96.0
         root.geometry(f'{self.px(1120)}x{self.px(740)}')
@@ -1047,14 +1050,16 @@ class Launcher:
         side.pack_propagate(False)
         self.side = side
         brand_width = self.px(184)
-        self.brand_title = tk.Label(side, text='BLOODBORNE:\nTHE CROWNED\nWORKSHOP',
+        self.brand_title = tk.Label(side, text='Bloodborne -\nOptimized for mobile\ndiscrete AMD systems',
                                    bg=BG, fg=GOLD, font=('Georgia', 13),
                                    anchor='w', justify='left', wraplength=brand_width, bd=0, padx=0)
         self.brand_title.pack(fill='x', padx=self.px(18), pady=(self.px(12), self.px(4)))
-        self.brand_author = tk.Label(side, text='by TatsunaKyo', bg=BG, fg=TEXT,
+        self.brand_author = tk.Label(side, text='by rakefire impala', bg=BG, fg=TEXT,
                                     font=('Segoe UI', 10), anchor='w', bd=0, padx=0)
         self.brand_author.pack(fill='x', padx=self.px(18))
-        self.brand_origin = tk.Label(side, text='Native Windows port based on\nSuper Medo\'s bloodbornepc',
+        self.brand_origin = tk.Label(side, text='Native CPU Windows port with GPU\ncode borrowed and edited '
+                                               'from\nShadPS4\'s work. This is a fork of\nTatsuna Kyo\'s '
+                                               'fork of Supermedo\'s\nbloodborne_pc.',
                                     bg=BG, fg=MUTED, font=('Segoe UI', 8),
                                     anchor='w', justify='left', wraplength=brand_width, bd=0, padx=0)
         self.brand_origin.pack(fill='x', padx=self.px(18), pady=(self.px(5), 0))
@@ -1268,12 +1273,13 @@ class Launcher:
         x = self.px(26)
         if not compact:
             self.draw_emblem(c, x+self.px(18), self.px(33), self.px(38))
-            c.create_text(x+self.px(51), self.px(33), text='TatsunaKyo', anchor='w',
+            c.create_text(x+self.px(51), self.px(33), text='by rakefire impala', anchor='w',
                           fill=GOLD, font=('Georgia', 11, 'italic'), tags='workshop-type')
         title_y = self.px(8) if compact else self.px(75)
         c.create_text(x, title_y, text='BLOODBORNE', anchor='nw', fill=TEXT,
                       font=('Georgia', 17 if compact else 26), tags='workshop-type')
-        c.create_text(x, title_y+self.px(31 if compact else 43), text='The Crowned Workshop',
+        c.create_text(x, title_y+self.px(31 if compact else 43),
+                      text='Optimized for mobile discrete AMD systems',
                       anchor='nw', fill=GOLD, font=('Georgia', 12 if compact else 18), tags='workshop-type')
         c.create_line(x, h-self.px(29), w-self.px(26), h-self.px(29), fill=LINE)
         info = game_info(self.var('game_dir', 'app').get())
@@ -2017,6 +2023,12 @@ class Launcher:
     # ---- updates -------------------------------------------------------------------------------
     def check_update(self, manual=False):
         """Helper thread: asks GitHub for the newest release and offers it when it is newer."""
+        if not UPDATES_ENABLED:
+            if manual:
+                self.ui_calls.put(lambda: self.messagebox.showinfo(
+                    'Bloodborne', _('Update checks are off until this fork publishes releases.',
+                                    'Проверка обновлений отключена, пока у этого форка нет релизов.')))
+            return
         try:
             version, url, page = latest_release()
         except (OSError, ValueError, KeyError) as failure:

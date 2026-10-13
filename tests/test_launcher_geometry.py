@@ -72,8 +72,8 @@ with tempfile.TemporaryDirectory(prefix='bbport-geometry-') as directory:
                             for line in str(label.cget('text')).splitlines():
                                 assert face.measure(line) <= available, (scale, size, line, face.measure(line), available)
                             assert label.winfo_height() >= face.metrics('linespace') * len(str(label.cget('text')).splitlines())
-                        assert obj.brand_author.cget('text') == 'by TatsunaKyo'
-                        assert obj.brand_title.cget('text').replace('\n',' ') == 'BLOODBORNE: THE CROWNED WORKSHOP'
+                        assert obj.brand_author.cget('text') == 'by rakefire impala'
+                        assert obj.brand_title.cget('text').replace('\n',' ') == 'Bloodborne - Optimized for mobile discrete AMD systems'
                         # Check live hero typography at compact/high-DPI sizes, including
                         # vertical separation from the game-folder hint and actual artwork.
                         hero_rect = rectangle(obj.banner)

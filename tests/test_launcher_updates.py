@@ -27,9 +27,12 @@ else:
 
 source_version = next(n.value.value for n in ast.parse(source.read_text()).body
                       if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'VERSION' for t in n.targets))
-future_revision = int(source_version.rsplit('.', 1)[1]) + 1
-future_version = source_version.rsplit('.', 1)[0] + '.' + str(future_revision)
+UPDATES = getattr(launcher, 'UPDATES_ENABLED', True)
+if UPDATES:
+    future_revision = int(source_version.rsplit('.', 1)[1]) + 1
+    future_version = source_version.rsplit('.', 1)[0] + '.' + str(future_revision)
 
+@unittest.skipUnless(UPDATES, 'update checks are off until this fork publishes releases')
 class ForkUpdates(unittest.TestCase):
     def release(self, tag=None, assets=None):
         tag = tag or 'windows-v' + future_version
