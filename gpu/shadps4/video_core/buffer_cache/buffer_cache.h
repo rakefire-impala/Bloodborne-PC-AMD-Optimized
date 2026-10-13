@@ -105,6 +105,8 @@ public:
     /// emergency reclaim.
     struct ArenaReclaimStats {
         u64 reclaimed_bytes = 0;
+        u64 demoted_bytes = 0;  ///< cold VRAM ranges moved to system memory (DemoteRanges)
+        u64 promoted_bytes = 0; ///< hot system-memory ranges moved back to VRAM (PromoteRanges)
         u64 migrated_bytes = 0;
         u32 released_chunks = 0;
         u32 emergencies = 0;
@@ -306,6 +308,7 @@ private:
         u32 free_blocks{};
         bool unbind_pending{}; ///< holds freed pieces whose unbind is not submitted yet
         u64 unbind_tick{};     ///< memory_semaphore tick of the last unbind from it
+        u8* mapped{};          ///< system chunks: the chunk in host memory (VMA keeps it mapped)
         std::array<u64, MAX_CHUNK_WORDS> used{};
     };
     std::vector<ArenaChunk> arena_chunks;
@@ -322,9 +325,10 @@ private:
     std::optional<ArenaPiece> TakeFreeBlocks(u64 blocks, bool system);
     bool AllocateArenaChunk(bool system, bool existing_blocks = false);
     void AdoptArenaChunk(VmaAllocation allocation, vk::DeviceMemory memory, u64 offset,
-                         bool system);
+                         bool system, void* mapped = nullptr);
     void FreeArenaPiece(vk::DeviceMemory memory, u64 offset, u64 blocks);
-    void ReleaseEmptyChunks(bool pressured);
+    /// `keep_vram`: no empty VRAM chunk goes back (arena data in system memory will need them).
+    void ReleaseEmptyChunks(bool pressured, bool keep_vram);
     bool PrefersSystemMemory() const;
     bool IsSystemBacking(vk::DeviceMemory memory, u64 offset) const;
 
@@ -347,6 +351,54 @@ private:
     u64 RetireRanges(u64 max_bytes, std::optional<bool> system, u64 tick, Pick&& pick);
     bool EmergencyReclaim();
 
+    /// bbport: resident ranges (backed by `system` memory if given) whose `pick(unit_last_use)`
+    /// accepts them and the GPU has not modified, up to `max_bytes`, in address order (merged
+    /// where contiguous).
+    template <typename Pick>
+    boost::container::small_vector<Backing, 64> PickRanges(u64 max_bytes,
+                                                           std::optional<bool> system,
+                                                           Pick&& pick) const;
+    /// bbport: moves picked ranges from VRAM to system memory at the same arena addresses, so
+    /// the page table stays valid throughout (unlike retiring them): their guest data is copied
+    /// into mapped system blocks by the CPU, the arenas are bound to those in the batch sent with
+    /// submission `tick`, and the VRAM blocks are freed once that submission completes. Returns
+    /// the bytes moved.
+    template <typename Pick>
+    u64 DemoteRanges(u64 max_bytes, u64 tick, Pick&& pick);
+    /// The backing a demoted or promoted range had, freed once `tick` completes (submissions
+    /// before it may still read it).
+    struct ReplacedRange {
+        u64 tick;
+        Backing backing;
+    };
+    std::vector<ReplacedRange> replaced_ranges;
+    void ReleaseReplacedRanges();
+    /// Host pointer of system arena memory at (memory, offset), or nullptr.
+    u8* SystemArenaPointer(vk::DeviceMemory memory, u64 offset) const;
+
+    /// bbport: hot ranges in system memory go back to free VRAM blocks: the GPU copies them in
+    /// submission `copy_tick` into `promote_scratch`, where the VRAM piece is bound (sparse
+    /// aliasing); once that completes, the arenas are bound to the piece (FinishPromotions).
+    /// Both copies hold the same data at the switch, so submissions still running read either.
+    struct Promotion {
+        u64 copy_tick;
+        Backing from;       ///< the system backing of blocks [from.start, from.end)
+        ArenaPiece to;      ///< VRAM blocks, as many as `from`
+        u64 scratch_offset; ///< where `to` is bound in promote_scratch
+        bool cancelled;     ///< arena data written since the copy (uploads, image syncs)
+    };
+    static constexpr u64 PROMOTE_SCRATCH_SIZE = u64{64} << 20;
+    std::vector<Promotion> promotions;
+    const Buffer* promote_scratch{};
+    template <typename Pick>
+    u64 PromoteRanges(u64 max_bytes, u64 tick, Pick&& pick);
+    /// Switches the arenas to the VRAM copies whose copy completed; returns whether any ended.
+    bool FinishPromotions();
+    /// Arena data of guest [address, address + size) is being written: promotions copied before
+    /// would switch to stale data.
+    void CancelPromotions(VAddr address, u64 size);
+    bool hot_in_system{}; ///< hot ranges in system memory at the last arena pass
+
     /// Last use per 1 MiB of guest address space: the display frame (BbStats::gpu_frames) of
     /// its last binding, or-ed with FAULTED_UNIT once a shader read it through the page table.
     static constexpr u32 UNIT_SHIFT = 20;
@@ -354,6 +406,7 @@ private:
     std::vector<u32> unit_last_use;
     void NoteUse(VAddr address, u64 size);
     u64 last_reclaim_frame{};
+    u64 last_demote_frame{};
     u64 last_migrate_frame{};
     ArenaReclaimStats reclaim_stats;
 

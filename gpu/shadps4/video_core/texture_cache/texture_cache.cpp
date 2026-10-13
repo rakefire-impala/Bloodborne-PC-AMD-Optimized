@@ -1267,9 +1267,10 @@ void TextureCache::GarbageCollectImages() {
                 "tiled, %llu MiB), %llu unevictable skipped (%llu MiB, %llu moved to the back), "
                 "%llu skipped unpressured; %llu of %llu passes ended at quota since the last "
                 "report; buffer arenas %llu MiB resident in %u chunks (%llu MiB in system "
-                "memory), %llu MiB reclaimed, %llu MiB out of system memory, %u chunks released, "
-                "%u emergency reclaims; staging %llu MiB in VRAM (%llu in ring blocks); %u VMA "
-                "memory blocks, %llu MiB free inside them; %s\n",
+                "memory), %llu MiB reclaimed, %llu MiB moved there, %llu MiB moved back, %llu "
+                "MiB out of system memory, %u chunks released, %u emergency reclaims; staging "
+                "%llu MiB in VRAM (%llu in ring blocks); %u VMA memory blocks, %llu MiB free "
+                "inside them; %s\n",
                 (unsigned long long)(total_used_memory >> 20),
                 (unsigned long long)(pressure_gc_memory >> 20),
                 (unsigned long long)(critical_gc_memory >> 20),
@@ -1288,6 +1289,8 @@ void TextureCache::GarbageCollectImages() {
                 buffer_cache.GetArenaChunkCount(),
                 (unsigned long long)(buffer_cache.GetArenaSystemBytes() >> 20),
                 (unsigned long long)(arena.reclaimed_bytes >> 20),
+                (unsigned long long)(arena.demoted_bytes >> 20),
+                (unsigned long long)(arena.promoted_bytes >> 20),
                 (unsigned long long)(arena.migrated_bytes >> 20), arena.released_chunks,
                 arena.emergencies,
                 (unsigned long long)(runtime.GetStagingPool().DeviceLocalBytes() >> 20),
