@@ -77,6 +77,10 @@ uintptr_t runtime_ajm_resolve(const char *name);
 void runtime_ajm_report(void);
 uintptr_t runtime_audio_resolve(const char *name);
 void runtime_audio_report(void);
+/* Discord Rich Presence (runtime_discord.c): started before the game runs; told of every
+ * guest file the game opens (map layouts give the area). */
+void runtime_discord_start(void);
+void runtime_discord_note_open(const char *path);
 uintptr_t runtime_pad_resolve(const char *name);
 void runtime_pad_report(void);
 uintptr_t runtime_rtc_resolve(const char *name);
