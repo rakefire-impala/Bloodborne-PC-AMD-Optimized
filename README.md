@@ -4,13 +4,6 @@
 
 <p align="center">Experience Bloodborne natively on Windows systems powered by AMD GPUs, enhanced with optimized video memory algorithms, preventative crash measures catered toward AMD GPUs, modern rendering technologies, customizable gameplay, and a redesigned launcher.</p>
 
-<p align="center">
-  <a href="https://github.com/TatsunaKyo/bloodborne_pc/releases/latest"><img src="docs/assets/readme/revision-stable.svg" alt="Revision 23 Stable" height="28"></a>
-  <a href="docs/compatibility.md"><img src="docs/assets/readme/windows.svg" alt="Windows 10 / 11" height="28"></a>
-  <a href="docs/compatibility.md"><img src="docs/assets/readme/vulkan.svg" alt="Vulkan 1.3" height="28"></a>
-  <a href="LICENSE"><img src="docs/assets/readme/license.svg" alt="GPL-2.0+" height="28"></a>
-</p>
-
 My revision of [TatsunaKyo's Windows Port](https://github.com/TatsunaKyo/bloodborne_pc), built on bbport and the shadPS4 renderer. The aim for this revision is to make Bloodborne more comfortable to play on a lower-end Windows PCs, especially those powered by AMD GPUs. Many graphical and memory issues have been fixed in this revision. Common crashes in numerous areas of the game, especially when loading in on AMD GPUs, have also been fixed. This project would NOT be possible without the original work and the people involved.
 
 > [!CAUTION]
