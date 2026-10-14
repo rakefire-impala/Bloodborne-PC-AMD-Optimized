@@ -4,6 +4,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -504,6 +505,10 @@ public:
     struct VmaHeapStats {
         u32 blocks = 0;
         u64 free_bytes = 0;
+        /// bbport: per memory type, the space free inside its blocks and the largest free range
+        /// there (what an allocation from existing blocks can get).
+        std::array<u64, VK_MAX_MEMORY_TYPES> type_free{};
+        std::array<u64, VK_MAX_MEMORY_TYPES> type_largest_free{};
     };
     [[nodiscard]] VmaHeapStats GetVmaHeapStats() const;
 

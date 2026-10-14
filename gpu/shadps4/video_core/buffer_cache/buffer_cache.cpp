@@ -158,8 +158,15 @@ BufferCache::~BufferCache() {
 }
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
-    memory_tracker->InvalidateRegion(device_addr, size, [this, device_addr, size, assume_locks] {
-        ReadMemory(device_addr, size, true, assume_locks);
+    memory_tracker->InvalidateRegion(device_addr, size, false,
+                                     [this, device_addr, size, assume_locks] {
+                                         ReadMemory(device_addr, size, true, assume_locks);
+                                     });
+}
+
+void BufferCache::UnmapMemory(VAddr device_addr, u64 size) {
+    memory_tracker->InvalidateRegion(device_addr, size, true, [this, device_addr, size] {
+        ReadMemory(device_addr, size, true);
     });
 }
 
@@ -771,6 +778,14 @@ bool BufferCache::PrefersSystemMemory() const {
                                   levels.usage + ARENA_CHUNK_SIZE + 96_MB > levels.budget);
 }
 
+bool BufferCache::HasSpareVmaSpace() const {
+    // bbport: a chunk from space VMA already holds leaves at least 120 MiB of it to images.
+    if (!instance.CanReportMemoryUsage()) {
+        return false;
+    }
+    return instance.GetMemoryLevels().vma_free >= 128_MB;
+}
+
 bool BufferCache::IsSystemBacking(vk::DeviceMemory memory, u64 offset) const {
     for (const ArenaChunk& chunk : arena_chunks) {
         if (chunk.memory == memory && offset >= chunk.offset &&
@@ -1172,6 +1187,15 @@ u64 BufferCache::PromoteRanges(u64 max_bytes, u64 tick, Pick&& pick) {
             if (!piece && !PrefersSystemMemory() && AdoptPrefetchedChunk(false)) {
                 piece = TakeFreeBlocks(from.end - start, false);
             }
+            // bbport: at the budget, a chunk may still fit in space VMA already holds (freed
+            // images), which costs the heap nothing. Without it, promotion waited for demotion
+            // to free VRAM blocks, which new data took first: back in an area whose data had
+            // gone to system memory, an RX 5500M ran at 20 FPS with 0 MiB moved back. Only
+            // with room to spare: arena chunks that took every gap once left a 5.4 MiB texture
+            // none, with the heap at its budget and system memory refused too (a crash).
+            if (!piece && HasSpareVmaSpace() && AllocateArenaChunk(false, true)) {
+                piece = TakeFreeBlocks(from.end - start, false);
+            }
             if (!piece) {
                 return scratch_offset;
             }
@@ -1289,6 +1313,33 @@ bool BufferCache::EmergencyReclaim() {
     return true;
 }
 
+BufferCache::ArenaReclaimStats BufferCache::TakeArenaReclaimStats() {
+    ArenaReclaimStats stats = std::exchange(reclaim_stats, {});
+    if (arena_system_bytes.load(std::memory_order_relaxed) == 0) {
+        return stats;
+    }
+    const u32 frame =
+        static_cast<u32>(BbStats::gpu_frames.load(std::memory_order_relaxed)) & ~FAULTED_UNIT;
+    for (const Backing& backing : resident_ranges) {
+        if (!IsSystemBacking(backing.memory, backing.offset)) {
+            continue;
+        }
+        for (u64 block = backing.start; block < backing.end;) {
+            const u64 unit = (block << block_shift) >> UNIT_SHIFT;
+            const u64 end = std::min<u64>(backing.end, ((unit + 1) << UNIT_SHIFT) >> block_shift);
+            const u64 size = (end - block) << block_shift;
+            if (((frame - (unit_last_use[unit] & ~FAULTED_UNIT)) & ~FAULTED_UNIT) <= 30) {
+                stats.hot_system_bytes += size;
+                if (memory_tracker->IsRegionGpuModified(block << block_shift, size)) {
+                    stats.hot_system_gpu_bytes += size;
+                }
+            }
+            block = end;
+        }
+    }
+    return stats;
+}
+
 void BufferCache::TickArenas(const MemoryLevels& levels) {
     ReleaseRetiredRanges();
     ReleaseReplacedRanges();
@@ -1339,12 +1390,12 @@ void BufferCache::TickArenas(const MemoryLevels& levels) {
         static_cast<u32>(BbStats::gpu_frames.load(std::memory_order_relaxed)) & ~FAULTED_UNIT;
     const auto age = [frame](u32 entry) { return (frame - (entry & ~FAULTED_UNIT)) & ~FAULTED_UNIT; };
     const u64 tick = scheduler.CurrentTick();
+    // Bound within the last second: worth VRAM, wherever it was placed.
+    const auto hot = [&](u32 entry) { return age(entry) <= 30; };
     if (demote && frame - last_demote_frame >= 10) {
         // A few MiB every third of a second: the guest copy runs on the copy threads while this
         // thread waits, ~1-2 ms per 8 MiB.
         last_demote_frame = frame;
-        // Bound within the last second: worth VRAM, wherever it was placed.
-        const auto hot = [&](u32 entry) { return age(entry) <= 30; };
         hot_in_system = arena_system_bytes.load(std::memory_order_relaxed) != 0 &&
                         !PickRanges(1, true, hot).empty();
         // Cold ranges leave VRAM under pressure, and to make room for hot ones placed in system
@@ -1364,10 +1415,14 @@ void BufferCache::TickArenas(const MemoryLevels& levels) {
                     return age(entry) >= min_age && (critical || !(entry & FAULTED_UNIT));
                 });
         }
-        // One batch at a time, not in the bind batch that ends the previous one.
-        if (hot_in_system && promotions.empty() && !promotions_ended) {
-            PromoteRanges(16_MB, tick, hot);
-        }
+    }
+    // One batch at a time, not in the bind batch that ends the previous one, at most one per
+    // display frame (a GPU copy over PCIe each). Was one per 10 frames, ~48 MB/s: back in an area
+    // whose geometry had gone to system memory, the GPU read it over PCIe every frame for seconds.
+    if (demote && hot_in_system && promotions.empty() && !promotions_ended &&
+        frame != last_promote_frame) {
+        last_promote_frame = frame;
+        PromoteRanges(16_MB, tick, hot);
     }
     if (!reclaim) {
         return;
@@ -1496,6 +1551,9 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
             if (!promotions.empty()) {
                 CancelPromotions(addr, size);
             }
+            // Uploaded whole: no GPU-written bytes left in these pages (RegionManager cleared
+            // their GPU bits too).
+            gpu_modified_ranges.Subtract(addr, size);
         },
         [&] { src_buffer = UploadCopies(arena, copies, total_size_bytes); });
 

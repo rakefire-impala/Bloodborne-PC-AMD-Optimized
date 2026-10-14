@@ -164,6 +164,8 @@ public:
 #endif
 
 private:
+    /// bbport: DMA copies and fills on the GPU path also write guest memory (readbacks Off).
+    static bool MirrorDmaToGuest();
     void PrepareRenderState(const GraphicsPipeline* pipeline);
     RenderState BeginRendering(const GraphicsPipeline* pipeline);
     RenderState BeginRenderingFull(const GraphicsPipeline* pipeline);

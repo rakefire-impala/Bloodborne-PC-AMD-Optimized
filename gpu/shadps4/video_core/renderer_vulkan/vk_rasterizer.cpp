@@ -13,6 +13,7 @@
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/amdgpu/pm4_cmds.h"
+#include "video_core/buffer_cache/readback_audit.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -3091,6 +3092,12 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
         return buffer_cache.ObtainBuffer(address, num_bytes, true);
     }();
     runtime.FillBuffer(buffer, offset, num_bytes, value);
+    if (!is_gds && MirrorDmaToGuest()) {
+        scheduler.WaitHostCopies();
+        scheduler.WaitDeferredSignals();
+        std::vector<u32> fill(num_bytes / sizeof(u32), value);
+        memory->TryWriteBacking(std::bit_cast<void*>(address), fill.data(), num_bytes);
+    }
     if (!is_gds) {
         // bbport: an image at that address is refreshed from the buffer before its next use.
         // DMA fills clear render targets; without this the clear never reached a cached image
@@ -3134,6 +3141,16 @@ void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, b
         .size = num_bytes,
     };
     runtime.CopyBuffer(src_buffer, dst_buffer, std::span{&copy, 1});
+    // A source whose guest memory is current (as for the CPU path above) is copied there too.
+    if (!dst_gds && !src_gds && MirrorDmaToGuest() &&
+        !buffer_cache.IsRegionGpuModified(src, num_bytes) &&
+        !texture_cache.FindImageFromRange(src, num_bytes)) {
+        scheduler.WaitHostCopies();
+        scheduler.WaitDeferredSignals();
+        std::vector<u8> data(num_bytes);
+        memory->CopySparseMemory(src, data.data(), num_bytes);
+        memory->TryWriteBacking(std::bit_cast<void*>(dst), data.data(), num_bytes);
+    }
     // bbport: after obtaining the destination, which first took a valid image's contents there.
     texture_cache.InvalidateMemoryFromGPU(dst, num_bytes);
 }
@@ -3144,6 +3161,19 @@ u32 Rasterizer::ReadDataFromGds(u32 gds_offset) {
     u32 value;
     std::memcpy(&value, gds_buf->mapped_data.data() + gds_offset, sizeof(u32));
     return value;
+}
+
+bool Rasterizer::MirrorDmaToGuest() {
+    // bbport: with GPU readbacks Off nothing brings GPU-written data back to guest memory, and a
+    // CPU write elsewhere in a page uploads the whole page from there. DMA copies and fills that
+    // take the GPU path (an image or GPU-written data at the destination) write guest memory too,
+    // through the backing view (no fault, no CPU-modified mark: the GPU copy gets the same bytes),
+    // so that upload carries their result. BB_DMA_MIRROR=0 turns it off.
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_DMA_MIRROR");
+        return !env || env[0] != '0';
+    }();
+    return enabled && EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Disabled;
 }
 
 bool Rasterizer::InvalidateMemory(VAddr addr, u64 size, bool assume_locks) {
@@ -3209,7 +3239,7 @@ void Rasterizer::RegisterMemory(VAddr addr, u64 size) {
 
 void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
     DrainDrawPipe();
-    buffer_cache.InvalidateMemory(addr, size);
+    buffer_cache.UnmapMemory(addr, size);
     texture_cache.UnmapMemory(addr, size);
     {
         std::scoped_lock lock{mapped_ranges_mutex};
@@ -3614,6 +3644,7 @@ void Rasterizer::NoteFrameStart() {
         profiler->BeginFrame();
     }
     const u64 frame = BbStats::gpu_frames.fetch_add(1, std::memory_order_relaxed) + 1;
+    VideoCore::ReadbackAudit::Tick();
     // BB_BUFFER_STATS=1: how many earlier frames the GPU has not finished when the GPU thread
     // starts a frame — the lag that decides whether guest memory can be read in place.
     static const bool stats = [] {

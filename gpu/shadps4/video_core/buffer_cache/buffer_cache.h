@@ -96,6 +96,9 @@ public:
     u64 GetArenaChunkBytes() const noexcept {
         return arena_chunk_bytes.load(std::memory_order_relaxed);
     }
+    u32 GetArenaMemoryType() const noexcept {
+        return arena_memory_type_index;
+    }
     u64 GetArenaSystemBytes() const noexcept {
         return arena_system_bytes.load(std::memory_order_relaxed);
     }
@@ -110,12 +113,12 @@ public:
         u64 migrated_bytes = 0;
         u32 released_chunks = 0;
         u32 emergencies = 0;
+        /// At the call: ranges bound within the last second that sit in system memory, and how
+        /// much of that the GPU has written (PickRanges leaves those where they are).
+        u64 hot_system_bytes = 0;
+        u64 hot_system_gpu_bytes = 0;
     };
-    ArenaReclaimStats TakeArenaReclaimStats() noexcept {
-        const ArenaReclaimStats stats = reclaim_stats;
-        reclaim_stats = {};
-        return stats;
-    }
+    ArenaReclaimStats TakeArenaReclaimStats();
 
     /// bbport: VRAM levels the arena upkeep works against (from the texture cache's GC).
     struct MemoryLevels {
@@ -137,6 +140,9 @@ public:
 
     /// Invalidates any buffer in the logical page range.
     void InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks = false);
+
+    /// Invalidates the range before the guest unmaps it.
+    void UnmapMemory(VAddr device_addr, u64 size);
 
     /// bbport: a guest write fault at `device_addr` was handled; unprotect its neighbourhood.
     void ExtendWriteFault(VAddr device_addr);
@@ -330,6 +336,8 @@ private:
     /// `keep_vram`: no empty VRAM chunk goes back (arena data in system memory will need them).
     void ReleaseEmptyChunks(bool pressured, bool keep_vram);
     bool PrefersSystemMemory() const;
+    /// Enough space free inside VRAM's VMA blocks that an arena chunk may take some.
+    bool HasSpareVmaSpace() const;
     bool IsSystemBacking(vk::DeviceMemory memory, u64 offset) const;
 
     /// A range retired at `tick` (the submission that last may use it), released once that
@@ -407,6 +415,7 @@ private:
     void NoteUse(VAddr address, u64 size);
     u64 last_reclaim_frame{};
     u64 last_demote_frame{};
+    u64 last_promote_frame{};
     u64 last_migrate_frame{};
     ArenaReclaimStats reclaim_stats;
 

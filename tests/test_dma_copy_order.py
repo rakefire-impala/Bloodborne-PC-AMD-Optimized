@@ -103,8 +103,11 @@ struct Scheduler {
 @WAIT_SIGNALS@
 struct BufferCache {
     bool modified=false;
+    VAddr modified_only=0; ///< with `modified`: only this address is GPU-modified (0: all)
     VideoCore::Buffer buffer;
-    bool IsRegionGpuModified(VAddr,u32) const { return modified; }
+    bool IsRegionGpuModified(VAddr address,u32) const {
+        return modified&&(modified_only==0||address==modified_only);
+    }
     const VideoCore::Buffer* GetGdsBuffer() const { return &buffer; }
     std::pair<const VideoCore::Buffer*,u64> ObtainBuffer(VAddr address,u32,bool,bool=false) {
         return {&buffer,address};
@@ -123,12 +126,25 @@ struct Runtime {
         ++gpu_copies;
     }
 };
+struct GuestMemory {
+    unsigned backing_writes=0;
+    void CopySparseMemory(VAddr source,u8* destination,u64 size) {
+        std::memcpy(destination,reinterpret_cast<const void*>(source),size);
+    }
+    bool TryWriteBacking(void* address,const void* data,u64 size) {
+        std::memcpy(address,data,size);++backing_writes;return true;
+    }
+};
 struct Rasterizer {
     Vulkan::DrawPipe* pipe=nullptr;
     Scheduler scheduler;
     BufferCache buffer_cache;
     TextureCache texture_cache;
     Runtime runtime;
+    GuestMemory backing;
+    GuestMemory* memory=&backing;
+    bool mirror=false; ///< readbacks Off (production: EmulatorSettings)
+    bool MirrorDmaToGuest() const { return mirror; }
     void DrainDrawPipe() { if(pipe&&!Vulkan::DrawPipe::OnStageB())pipe->Drain(); }
     void FillBuffer(VAddr,u32,u32,bool);
     void CopyBuffer(VAddr,VAddr,u32,bool,bool);
@@ -208,6 +224,32 @@ int main() {
     r.FillBuffer(0,32,7,true);r.CopyBuffer(0,0,32,true,true);
     assert(r.runtime.gpu_fills==2&&r.runtime.gpu_copies==2);
     assert(!r.scheduler.copy_gate.load());
+#ifdef CHECK_MIRROR
+    // Readbacks Off: a DMA sent to the GPU by its destination writes guest memory too (through
+    // the backing view), so a later upload of that page carries its result.
+    {
+        std::array<u32,8> source,destination,filled;source.fill(5);destination.fill(9);filled.fill(1);
+        Rasterizer m;m.mirror=true;m.buffer_cache.modified=true;
+        m.buffer_cache.modified_only=VAddr(destination.data());
+        m.CopyBuffer(VAddr(destination.data()),VAddr(source.data()),32,false,false);
+        assert(m.runtime.gpu_copies==1&&destination==source&&m.backing.backing_writes==1);
+        m.buffer_cache.modified_only=VAddr(filled.data());
+        m.FillBuffer(VAddr(filled.data()),32,0x77,false);
+        assert(m.runtime.gpu_fills==1&&m.backing.backing_writes==2);
+        assert(std::all_of(filled.begin(),filled.end(),[](u32 v){return v==0x77;}));
+        // A GPU-written source: its guest copy is stale, the destination's stays as it was.
+        std::array<u32,8> kept;kept.fill(3);
+        m.buffer_cache.modified_only=0;
+        m.CopyBuffer(VAddr(kept.data()),VAddr(source.data()),32,false,false);
+        assert(m.runtime.gpu_copies==2&&kept[0]==3&&m.backing.backing_writes==2);
+        // Readbacks on: no mirror.
+        Rasterizer n;n.buffer_cache.modified=true;
+        std::array<u32,8> untouched;untouched.fill(4);
+        n.FillBuffer(VAddr(untouched.data()),32,0x77,false);
+        assert(untouched[0]==4&&n.backing.backing_writes==0);
+        std::printf("DMA mirror: GPU-path copies and fills reach guest memory with readbacks Off; ");
+    }
+#endif
     std::printf("CPU DMA replacement cases: %d; corrupted earlier draw snapshots: %d; GPU/GDS paths preserved\n",
                 cases,corrupted);
     return corrupted ? 1:0;
@@ -232,7 +274,7 @@ with tempfile.TemporaryDirectory(prefix='bb-dma-order-') as directory:
             text=text.replace('@'+name+'@',replacement)
         (temp/'fixture.cpp').write_text(text)
         subprocess.run(shlex.split(args.compiler)+['-std=c++23','-O2','-pthread','-Wall','-Wextra','-Werror',
-                         '-I'+str(temp),'-I'+str(ROOT/'gpu/shim'),str(temp/'fixture.cpp'),
+                         *([] if old else ['-DCHECK_MIRROR']),'-I'+str(temp),'-I'+str(ROOT/'gpu/shim'),str(temp/'fixture.cpp'),
                          str(ROOT/'gpu/shim/bbport_copy.cpp'),'-o',str(temp/'fixture')],check=True)
         result=subprocess.run([str(temp/'fixture')],capture_output=True,text=True,timeout=60)
         print(label+': '+result.stdout.strip(),flush=True)

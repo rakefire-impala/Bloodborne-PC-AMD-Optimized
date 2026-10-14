@@ -158,6 +158,21 @@ public:
         if constexpr (clear) {
             bits.UnsetRange(start_page, end_page);
             if constexpr (type == Type::CPU) {
+                // bbport: these pages are uploaded whole from guest memory, so afterwards the GPU
+                // copy matches the guest one, whatever the GPU wrote there before (lost either
+                // way). With GPU readbacks Off nothing else ever cleared the GPU bit: such pages
+                // stayed GPU-modified for good, which sent every later DMA copy or fill there to
+                // the GPU only (stale guest memory, uploaded over it at the next CPU write: the
+                // smear after area loads) and kept their ranges from moving between VRAM and
+                // system memory.
+                // As ChangeRegionState<GPU, false>: only Precise protects GPU pages for reads
+                // (elsewhere their read watchers were never added).
+                if (!(gpu & mask).None()) {
+                    gpu &= ~mask;
+                    if (EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Precise) {
+                        UpdateProtection<false, true>();
+                    }
+                }
                 KeepHotPagesModified(start_page, end_page);
                 UpdateProtection<true, false>();
             } else if (EmulatorSettings.GetReadbacksMode() != GpuReadbacksMode::Disabled) {
@@ -188,6 +203,23 @@ public:
 
         const RegionBits& bits = GetRegionBits<type>();
         return bits.AnyInRange(start_page, end_page);
+    }
+
+    /// bbport: calls func(address, size) for each run of GPU-modified pages in the range, only
+    /// those also CPU-modified when `cpu_too` (see readback_audit.h).
+    template <bool cpu_too>
+    void ForEachGpuModifiedRange(u64 offset, u64 size, auto&& func) const {
+        const size_t start_page = SanitizeAddress(offset) / TRACKER_BYTES_PER_PAGE;
+        const size_t end_page =
+            Common::DivCeil(SanitizeAddress(offset + size), TRACKER_BYTES_PER_PAGE);
+        if (start_page >= NUM_PAGES_PER_REGION || end_page <= start_page ||
+            !gpu.AnyInRange(start_page, end_page)) {
+            return;
+        }
+        const RegionBits mask(cpu_too ? (gpu & cpu) : gpu, start_page, end_page);
+        for (const auto& [start, end] : mask) {
+            func(cpu_addr + start * TRACKER_BYTES_PER_PAGE, (end - start) * TRACKER_BYTES_PER_PAGE);
+        }
     }
 
     LockType lock;

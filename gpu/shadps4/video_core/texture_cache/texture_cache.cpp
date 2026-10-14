@@ -1267,10 +1267,12 @@ void TextureCache::GarbageCollectImages() {
                 "tiled, %llu MiB), %llu unevictable skipped (%llu MiB, %llu moved to the back), "
                 "%llu skipped unpressured; %llu of %llu passes ended at quota since the last "
                 "report; buffer arenas %llu MiB resident in %u chunks (%llu MiB in system "
-                "memory), %llu MiB reclaimed, %llu MiB moved there, %llu MiB moved back, %llu "
+                "memory, %llu MiB of it used in the last second, %llu MiB of that GPU-written), "
+                "%llu MiB reclaimed, %llu MiB moved there, %llu MiB moved back, %llu "
                 "MiB out of system memory, %u chunks released, %u emergency reclaims; staging "
                 "%llu MiB in VRAM (%llu in ring blocks); %u VMA memory blocks, %llu MiB free "
-                "inside them; %s\n",
+                "inside them (%llu MiB in VRAM, %llu MiB in the arenas' memory type, largest "
+                "free range %llu KiB); %s\n",
                 (unsigned long long)(total_used_memory >> 20),
                 (unsigned long long)(pressure_gc_memory >> 20),
                 (unsigned long long)(critical_gc_memory >> 20),
@@ -1288,6 +1290,8 @@ void TextureCache::GarbageCollectImages() {
                 (unsigned long long)(buffer_cache.GetArenaResidentBytes() >> 20),
                 buffer_cache.GetArenaChunkCount(),
                 (unsigned long long)(buffer_cache.GetArenaSystemBytes() >> 20),
+                (unsigned long long)(arena.hot_system_bytes >> 20),
+                (unsigned long long)(arena.hot_system_gpu_bytes >> 20),
                 (unsigned long long)(arena.reclaimed_bytes >> 20),
                 (unsigned long long)(arena.demoted_bytes >> 20),
                 (unsigned long long)(arena.promoted_bytes >> 20),
@@ -1296,6 +1300,12 @@ void TextureCache::GarbageCollectImages() {
                 (unsigned long long)(runtime.GetStagingPool().DeviceLocalBytes() >> 20),
                 (unsigned long long)(runtime.GetStagingPool().DeviceLocalRingBytes() >> 20),
                 vma.blocks, (unsigned long long)(vma.free_bytes >> 20),
+                (unsigned long long)(instance.CanReportMemoryUsage()
+                                         ? instance.GetMemoryLevels().vma_free >> 20
+                                         : 0),
+                (unsigned long long)(vma.type_free[buffer_cache.GetArenaMemoryType()] >> 20),
+                (unsigned long long)(vma.type_largest_free[buffer_cache.GetArenaMemoryType()] >>
+                                     10),
                 instance.DescribeMemory().c_str());
             gc_report_time = now;
             gc_evictions = gc_evicted_bytes = gc_downloads = 0;

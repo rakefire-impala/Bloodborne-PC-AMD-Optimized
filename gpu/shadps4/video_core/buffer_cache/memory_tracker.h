@@ -13,6 +13,7 @@
 #include "common/debug.h"
 #include "common/types.h"
 #include "core/emulator_settings.h"
+#include "video_core/buffer_cache/readback_audit.h"
 #include "video_core/buffer_cache/region_manager.h"
 
 namespace VideoCore {
@@ -73,18 +74,25 @@ public:
     }
 
     /// Removes all protection from a page and ensures GPU data has been flushed if requested
-    void InvalidateRegion(VAddr cpu_addr, u64 size, auto&& on_flush) noexcept {
+    void InvalidateRegion(VAddr cpu_addr, u64 size, bool unmapping, auto&& on_flush) noexcept {
+        const bool audit = ReadbackAudit::Enabled();
+        ReadbackAudit::Ranges skipped;
         IteratePages<false>(
-            cpu_addr, size, [&on_flush](RegionManager* manager, u64 offset, size_t size) {
+            cpu_addr, size, [&](RegionManager* manager, u64 offset, size_t size) {
                 const bool should_flush = [&] {
                     // Perform both the GPU modification check and CPU state change with the lock
                     // in case we are racing with GPU thread trying to mark the page as GPU
                     // modified. If we need to flush the flush function is going to perform CPU
                     // state change.
                     std::scoped_lock lk{manager->lock};
-                    if (EmulatorSettings.GetReadbacksMode() != GpuReadbacksMode::Disabled &&
-                        manager->template IsRegionModified<Type::GPU>(offset, size)) {
-                        return true;
+                    if (EmulatorSettings.GetReadbacksMode() != GpuReadbacksMode::Disabled) {
+                        if (manager->template IsRegionModified<Type::GPU>(offset, size)) {
+                            return true;
+                        }
+                    } else if (audit) {
+                        manager->template ForEachGpuModifiedRange<false>(
+                            offset, size,
+                            [&](VAddr address, u64 bytes) { skipped.emplace_back(address, bytes); });
                     }
                     manager->template ChangeRegionState<Type::CPU, true>(
                         manager->GetCpuAddr() + offset, size);
@@ -94,13 +102,18 @@ public:
                     on_flush();
                 }
             });
+        ReadbackAudit::Record(unmapping ? ReadbackAudit::Kind::Unmap : ReadbackAudit::Kind::Write,
+                              skipped);
     }
 
     /// Call 'func' for each CPU modified range and unmark those pages as CPU modified
     void ForEachUploadRange(VAddr query_cpu_range, u64 query_size, bool is_written, auto&& func,
                             auto&& on_upload) {
+        const bool audit = ReadbackAudit::Enabled();
+        ReadbackAudit::Ranges stale;
         IteratePages<true>(query_cpu_range, query_size,
-                           [&func, is_written](RegionManager* manager, u64 offset, size_t size) {
+                           [&func, &stale, audit, is_written](RegionManager* manager, u64 offset,
+                                                              size_t size) {
                                // bbport: read-only bindings skip the region lock when no page
                                // in range is CPU-modified. A guest write sets its bit in the
                                // fault handler before the store, and the draw that uses the
@@ -111,6 +124,12 @@ public:
                                    return;
                                }
                                manager->lock.lock();
+                               if (audit) {
+                                   manager->template ForEachGpuModifiedRange<true>(
+                                       offset, size, [&stale](VAddr address, u64 bytes) {
+                                           stale.emplace_back(address, bytes);
+                                       });
+                               }
                                manager->template ForEachModifiedRange<Type::CPU, true>(
                                    manager->GetCpuAddr() + offset, size, func);
                                if (!is_written) {
@@ -118,15 +137,15 @@ public:
                                }
                            });
         on_upload();
-        if (!is_written) {
-            return;
+        if (is_written) {
+            IteratePages<false>(query_cpu_range, query_size,
+                                [](RegionManager* manager, u64 offset, size_t size) {
+                                    manager->template ChangeRegionState<Type::GPU, true>(
+                                        manager->GetCpuAddr() + offset, size);
+                                    manager->lock.unlock();
+                                });
         }
-        IteratePages<false>(query_cpu_range, query_size,
-                            [&func, is_written](RegionManager* manager, u64 offset, size_t size) {
-                                manager->template ChangeRegionState<Type::GPU, true>(
-                                    manager->GetCpuAddr() + offset, size);
-                                manager->lock.unlock();
-                            });
+        ReadbackAudit::Record(ReadbackAudit::Kind::StaleUpload, stale);
     }
 
     /// Call 'func' for each GPU modified range and unmark those pages as GPU modified

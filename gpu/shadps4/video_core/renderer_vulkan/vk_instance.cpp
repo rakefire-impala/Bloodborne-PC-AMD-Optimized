@@ -922,6 +922,14 @@ Instance::VmaHeapStats Instance::GetVmaHeapStats() const {
         stats.free_bytes +=
             budgets[heap].statistics.blockBytes - budgets[heap].statistics.allocationBytes;
     }
+    // Walks every allocation: for the 5 s pressure report only.
+    VmaTotalStatistics total{};
+    vmaCalculateStatistics(allocator, &total);
+    for (u32 type = 0; type < VK_MAX_MEMORY_TYPES; ++type) {
+        const VmaDetailedStatistics& detail = total.memoryType[type];
+        stats.type_free[type] = detail.statistics.blockBytes - detail.statistics.allocationBytes;
+        stats.type_largest_free[type] = detail.unusedRangeCount ? detail.unusedRangeSizeMax : 0;
+    }
     return stats;
 }
 
