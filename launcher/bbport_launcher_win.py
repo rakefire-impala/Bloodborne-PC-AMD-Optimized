@@ -145,7 +145,6 @@ EFFECTS = [
     ('effect_ssr', ('Screen-space reflections (not in the original)', 'Отражения SSR (не было в игре)'), False),
 ]
 EXTRAS = [
-    ('skip_intro', ('Skip the intro logos and movie', 'Пропуск заставок при запуске'), False),
     ('debug_camera', ('Free camera (hold Cross + L3; keyboard Space + Z)', 'Свободная камера (Cross + L3 / Space + Z)'), False),
     ('debug_menu', ('Game debug menu (left touchpad / Tab; needs the debug fonts)',
                     'Debug menu (левый touchpad / Tab; нужны шрифты)'), False),
@@ -167,11 +166,18 @@ TWEAKS = [
     ('tweak_ragdoll', ('Dark Souls-style ragdoll physics (corpses fly further)',
                        'Физика тел как в Dark Souls (тела отлетают дальше)'), False),
 ]
-INI_FLAGS = {'sharpen', 'object_motion', 'show_fps', *(k for k, _t, _o in EFFECTS + EXTRAS + CHEATS + TWEAKS)}
+# Quality of life: off by default. skip_intro is a game patch (patches.py); qol_lamp_travel makes
+# the launch add generated talk/event scripts (scripts/lamp_travel.py, through mods.py).
+QOL = [
+    ('skip_intro', ('Skip the intro logos and movie', 'Пропуск заставок при запуске'), False),
+    ('qol_lamp_travel', ('Travel from any lamp to any other lamp', 'Путешествие от любого фонаря к любому другому'),
+     False),
+]
+INI_FLAGS = {'sharpen', 'object_motion', 'show_fps', *(k for k, _t, _o in EFFECTS + EXTRAS + QOL + CHEATS + TWEAKS)}
 INI_DEFAULTS = {'upscaler': 'fsr4', 'preset': '1', 'sharpen': '1', 'sharpness': '0.50',
                 'object_motion': '1', 'show_fps': '1', 'output_res': '1920x1080', 'model_lod': '0',
                 'live_resolution': 'auto',
-                **{key: '1' if on else '0' for key, _t, on in EFFECTS + EXTRAS + CHEATS + TWEAKS}}
+                **{key: '1' if on else '0' for key, _t, on in EFFECTS + EXTRAS + QOL + CHEATS + TWEAKS}}
 APP_DEFAULTS = {'ui_language': '', 'game_dir': str(PORT_DIR.parent / 'CUSA03173'), 'user_dir': '',
                 'mods_dir': '', 'mods_enabled': True, 'patches_dir': '', 'language': '1',
                 'player_name': '', 'fullscreen': False, 'window_mode': '', 'hdr': False, 'present_mode': 'Mailbox',
@@ -1074,7 +1080,7 @@ class Launcher:
         self.nav, self.current_page = {}, None
         for name, title in (('play', _('Play', 'Играть')), ('graphics', _('Graphics', 'Графика')),
                             ('display', _('Display & FPS', 'Экран и FPS')), ('game', _('Game & effects', 'Игра и эффекты')),
-                            ('cheats', _('Cheats', 'Читы')), ('online', _('Online co-op', 'Онлайн-кооператив')),
+                            ('qol', _('Quality of Life', 'Удобство')), ('cheats', _('Cheats', 'Читы')), ('online', _('Online co-op', 'Онлайн-кооператив')),
                             ('mods', _('Mods & patches', 'Моды и патчи')),
                             ('advanced', _('Advanced', 'Дополнительно')),
                             ('log', _('Log', 'Журнал'))):
@@ -1114,6 +1120,7 @@ class Launcher:
         self.build_graphics()
         self.build_display()
         self.build_game()
+        self.build_qol()
         self.build_cheats()
         self.build_online()
         self.build_mods()
@@ -1501,6 +1508,22 @@ class Launcher:
             self.check(f, key, 'ini', _(*title))
         self.note(f, _('Effects and extras are game patches for version 1.09, applied at start.',
                        'Эффекты и дополнения — патчи игры для версии 1.09, применяются при запуске.'))
+
+    def build_qol(self):
+        f = self.scrolled_page('qol', _('Quality of Life', 'Удобство'),
+                               _('Conveniences the original game does not have. Applied at the next start.',
+                                 'Удобства, которых нет в оригинальной игре. Применяются при следующем запуске.'))
+        self.section(f, _('Quality of Life', 'Удобство'), top=4)
+        hints = {
+            'qol_lamp_travel': _('At a lamp, the travel menu lists the Hunter\'s Dream and every headstone; pick a lit '
+                                 'lamp to go there directly. Single player only. Made from your game files at start '
+                                 '(works with mods that change lamps, as long as they keep the game\'s scripts).',
+                                 'У фонаря меню путешествия показывает Сон охотника и все надгробия: выберите '
+                                 'зажжённый фонарь, чтобы отправиться прямо туда. Только в одиночной игре. '
+                                 'Создаётся из ваших файлов игры при запуске.'),
+        }
+        for key, title, _on in QOL:
+            self.check(f, key, 'ini', _(*title), hints.get(key))
 
     def build_cheats(self):
         f = self.scrolled_page('cheats', _('Cheats', 'Читы'),

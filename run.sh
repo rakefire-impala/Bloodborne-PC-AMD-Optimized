@@ -42,7 +42,8 @@ if [[ ! -f $game/eboot.bin ]]; then echo "No eboot.bin in $game (set BB_GAME_DIR
 original_game=$game
 game=$("$PYTHON" scripts/mods.py "$game" --out "$out" \
     --mods-dir "${BB_MODS_DIR:-$data/mods}" --config "${BB_MODS_CONFIG:-$data/mods.json}" \
-    --enabled "${BB_MODS_ENABLED:-1}")
+    --enabled "${BB_MODS_ENABLED:-1}" \
+    --lamp-travel "${BB_LAMP_TRAVEL:-$(sed -n 's/^qol_lamp_travel=//p' "$BB_CONFIG" 2>/dev/null | tail -n1 | grep . || echo 0)}")
 # A private merged view lasts for this launch, including restarts. Cleanup only our own view.
 if [[ $game != "$(realpath "$original_game")" ]]; then
     mod_game=$game

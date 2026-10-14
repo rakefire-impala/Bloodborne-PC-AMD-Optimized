@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import struct
 import sys
 import tempfile
 
@@ -223,6 +224,8 @@ def main():
     parser.add_argument('--mods-dir', required=True, type=Path)
     parser.add_argument('--config', type=Path)
     parser.add_argument('--enabled', choices=('0', '1'), default='1')
+    parser.add_argument('--lamp-travel', choices=('0', '1'), default='0',
+                        help='add the generated lamp-to-lamp travel layer (lamp_travel.py)')
     args = parser.parse_args()
     layers = []
     if args.enabled == '1':
@@ -236,7 +239,28 @@ def main():
         else:
             for name in selected(args.mods_dir, args.config):
                 layers.append((name, args.mods_dir / name))
+    if args.lamp_travel == '1':
+        # A game version or mod the generator does not understand: play without it.
+        try:
+            layers.append(lamp_travel_layer(args.game, args.out, layers))
+        except (OSError, ValueError, struct.error) as error:
+            print(f'Lamp travel: off ({error})', file=sys.stderr)
     print(build_overlay(args.game, args.out, layers))
+
+
+def lamp_travel_layer(game, out, layers):
+    """Generated last, from the files the other layers leave in effect (so a mod's talk or event
+    scripts are patched rather than replaced)."""
+    import lamp_travel
+    in_effect = {}
+    for _name, root in layers:
+        for relative, source in mod_files(root):
+            in_effect[relative.as_posix()] = source
+    target = Path(out).resolve() / 'qol-lamp-travel'
+    shutil.rmtree(target, ignore_errors=True)
+    count = lamp_travel.generate(lamp_travel.GameFiles(game, in_effect), target)
+    print(f'Lamp travel: {count} lamps can travel to other lamps', file=sys.stderr)
+    return ('Lamp travel (generated)', target)
 
 
 if __name__ == '__main__':
