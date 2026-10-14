@@ -2,7 +2,7 @@
 
 <h1 align="center">Bloodborne: Optimized for AMD</h1>
 
-<p align="center">Experience Bloodborne natively on Windows systems powered by AMD GPUs, enhanced with optimized video memory algorithms, preventative crash measures catered toward AMD GPUs, modern rendering technologies, customizable gameplay and a redesigned launcher.</p>
+<p align="center">Experience Bloodborne natively on Windows systems powered by AMD GPUs, enhanced with optimized video memory algorithms, preventative crash measures catered toward AMD GPUs, modern rendering technologies, customizable gameplay, and a redesigned launcher.</p>
 
 <p align="center">
   <a href="https://github.com/TatsunaKyo/bloodborne_pc/releases/latest"><img src="docs/assets/readme/revision-stable.svg" alt="Revision 23 Stable" height="28"></a>
