@@ -128,7 +128,7 @@ The normal cap controls **real game frames**. The optional **FG output cap** inc
 | 75 FPS | x2 | 120 FPS | Up to 60 real and 120 output FPS. |
 | 75 FPS | x2 | 130 FPS | Up to 65 real and 130 output FPS. |
 
-The optional output field accepts **30–1000 FPS**; the negotiated FG multiplier and your system determine what can be reached. I keep the real-frame slider between 30 and 120 because extreme real rates can affect Bloodborne's movement and physics. Generated frames do not advance that logic.
+The optional output field accepts **30–1000 FPS**; the negotiated FG multiplier and your system determine what can be reached. They keep the real-frame slider between 30 and 120 because extreme real rates can affect Bloodborne's movement and physics. Generated frames do not advance that logic.
 
 They also added a choice for when you Alt-Tab or leave the game in the background. There is no reason to keep rendering at full speed if you would rather save the power:
 
