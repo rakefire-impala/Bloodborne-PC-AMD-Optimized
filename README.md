@@ -68,7 +68,7 @@ This build treats **memory as a first-class constraint**, not an optimization ta
 2. **Transparency**: The launcher shows what's happening (readback modes, memory use, frame times) so users can make informed choices.
 3. **Consistency**: Settings mean the same thing in the launcher and during play, and your choices persist across sessions.
 
-## What this fork adds
+## What this fork had per Tatsuna Kyo's additions
 
 ### High-fidelity upscaling support: DLSS, FSR and XeSS
 
