@@ -982,6 +982,38 @@ class Launcher:
             widget.row_hint.grid(row=r + 1, column=1, sticky='w', pady=(2, 2))
         return widget
 
+    def warning_icon(self, parent, text):
+        """A (!) mark that shows `text` while the pointer is over it (or it has the focus)."""
+        icon = self.tk.Label(parent, text='(!)', bg=PANEL, fg=GOLD, font=('Segoe UI', 10, 'bold'),
+                             cursor='question_arrow', takefocus=True)
+        tip = {}
+
+        def show(_event=None):
+            if tip:
+                return
+            top = self.tk.Toplevel(icon)
+            top.wm_overrideredirect(True)
+            top.configure(bg=LINE)
+            self.tk.Label(top, text=text, bg=PANEL, fg=TEXT, font=('Segoe UI', 9), justify='left',
+                          wraplength=self.px(340), padx=self.px(10), pady=self.px(8)).pack(padx=1, pady=1)
+            top.update_idletasks()
+            x = icon.winfo_rootx() + icon.winfo_width() + self.px(6)
+            y = icon.winfo_rooty()
+            right = icon.winfo_screenwidth() - top.winfo_reqwidth() - self.px(8)
+            if x > right:
+                x = max(0, icon.winfo_rootx() - top.winfo_reqwidth() - self.px(6))
+            top.wm_geometry(f'+{x}+{y}')
+            tip['window'] = top
+
+        def hide(_event=None):
+            if tip:
+                tip.pop('window').destroy()
+        for event in ('<Enter>', '<FocusIn>'):
+            icon.bind(event, show)
+        for event in ('<Leave>', '<FocusOut>', '<Destroy>'):
+            icon.bind(event, hide)
+        return icon
+
     def show_row(self, widget, visible):
         for part in (widget.row_label, widget, getattr(widget, 'row_hint', None)):
             if part is not None:
@@ -1204,6 +1236,21 @@ class Launcher:
                     widget.grid_remove()
         self.row(quick, _('Output', 'Разрешение'), self.choice(quick, 'output_res', 'ini', OUTPUTS, 26))
         self.row(quick, _('Window mode', 'Режим окна'), self.choice(quick, 'window_mode', 'menu', WINDOW_MODES, 26))
+        readbacks = self.ttk.Frame(quick)
+        self.choice(readbacks, 'readbacks', 'app', READBACKS, 22).pack(side='left')
+        self.warning_icon(readbacks, _(
+            'Off is the fastest: the game no longer waits for the GPU to copy its results back. '
+            'With Motion blur and Depth of field on, Off can leave smeared, streaking textures '
+            'after loading an area (lamp travel, deaths); turn those two effects off in the '
+            'in-game menu (Insert or L3+R3) or use Relaxed. Relaxed: no smear, a little slower. '
+            'Precise: slowest, only for troubleshooting.',
+            'Выключено быстрее всего: игра не ждёт, пока GPU вернёт результаты. При включённых '
+            'размытии в движении и глубине резкости это может давать размазанные, тянущиеся '
+            'текстуры после загрузки локации (перемещение между фонарями, смерть); выключите эти '
+            'два эффекта во внутриигровом меню (Insert или L3+R3) или выберите Relaxed. Relaxed: '
+            'без размазывания, чуть медленнее. Precise: самый медленный, только для диагностики.'
+        )).pack(side='left', padx=(6, 0))
+        self.row(quick, _('GPU readbacks', 'Чтение данных GPU'), readbacks)
         ttk.Checkbutton(quick, text=_('Show performance overlay', 'Показывать статистику'),
                         variable=self.var('show_fps', 'menu')).grid(
             row=self.next_row(quick), column=1, sticky='w', pady=(4, 0))
@@ -1656,9 +1703,6 @@ class Launcher:
         self.section(f, _('Performance', 'Производительность'))
         self.row(f, _('Two-stage GPU pipeline', 'Двухстадийный конвейер GPU'), self.choice(f, 'draw_pipe', 'app', DRAW_PIPE),
                  _('20–30% faster; switch it off if the game is unstable.', 'Быстрее на 20–30%; при нестабильности выключите.'))
-        self.row(f, _('GPU readbacks', 'Чтение данных GPU'), self.choice(f, 'readbacks', 'app', READBACKS),
-                 _('How exactly data the GPU writes is copied back for the game.',
-                   'Насколько точно данные, записанные GPU, возвращаются игре.'))
         self.section(f, _('Diagnostics', 'Для разработчика'))
         self.check(f, 'developer_profile', 'app', _('Developer profiling and crash diagnostics', 'Профилирование и диагностика сбоев'))
         ttk.Label(f, text=_('Off by default. Keeps one folder per run in the saves folder / diagnostics, with timings, settings, the exit code and a crash dump when available. Profiling can affect performance.',
