@@ -7,6 +7,8 @@
 My revision of [TatsunaKyo's Windows Port](https://github.com/TatsunaKyo/bloodborne_pc), built on bbport and the shadPS4 renderer. The aim for this revision is to make Bloodborne more comfortable to play on a lower-end Windows PCs, especially those powered by AMD GPUs. Many graphical and memory issues have been fixed in this revision. Common crashes in numerous areas of the game, especially when loading in on AMD GPUs, have also been fixed. This project would NOT be possible without the original work and the people involved.
 
 ---
+---
+---
 
 > [!CAUTION]
 > NO game files are included. You NEED your own decrypted **Bloodborne CUSA03173, version 1.09** dump, including `eboot.bin` and its original data. Most game patches and the added cheats depend on 1.09.
