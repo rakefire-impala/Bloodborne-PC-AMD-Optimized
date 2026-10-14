@@ -1,6 +1,6 @@
 ![Bloodborne: The Crowned Workshop — TatsunaKyo](docs/assets/crowned-workshop-header.png)
 
-<h1 align="center">Bloodborne: The Crowned Workshop</h1>
+<h1 align="center">Bloodborne: Optimized for AMD</h1>
 
 <p align="center">Experience Bloodborne natively on Windows, enhanced with modern rendering technologies, customizable gameplay and a redesigned launcher.</p>
 
@@ -23,9 +23,7 @@
 </table>
 </div>
 
-My revision of [Supermedo's Windows port](https://github.com/Supermedo/bloodborne_pc), built on bbport and the shadPS4 renderer. The aim is to make Bloodborne more comfortable to play on a modern Windows PC, with more graphics choices, better window controls and settings you can change during play. This project would NOT be possible without the original work and the people involved.
-
-The Crowned Workshop is my own place to work on the port. The workshop, lantern and crowned TK emblem are part of that identity; the credit for the game and the original port stays with their creators.
+My revision of [TatsunaKyo's Windows Port](https://github.com/TatsunaKyo/bloodborne_pc), built on bbport and the shadPS4 renderer. The aim for this revision is to make Bloodborne more comfortable to play on a lower-end Windows PC, especially those powered by AMD GPUs. Many graphical and memory issues have been fixed in this revision. Common crashes in numerous areas of the game, especially when loading in on AMD GPUs, have also been fixed. This project would NOT be possible without the original work and the people involved.
 
 > [!CAUTION]
 > NO game files are included. You NEED your own decrypted **Bloodborne CUSA03173, version 1.09** dump, including `eboot.bin` and its original data. Most game patches and the added cheats depend on 1.09.
@@ -260,7 +258,7 @@ For black screens, try **Advanced → Clear shader cache**. Rebuilding it can ca
 ## Credits
 
 
-This revision is maintained by [TatsunaKyo](https://github.com/TatsunaKyo). The Windows port and original launcher are by [Supermedo](https://github.com/Supermedo). The upstream history, copyright notices and licenses are retained.
+This revision is maintained by [rakefire impala](https://github.com/rakefire-impala). The Windows port and original launcher are by [Tatsuna Kyo](https://github.com/TatsunaKyo) and [Supermedo](https://github.com/Supermedo). The upstream history, copyright notices and licenses are retained.
 
 Built on [bbport](https://github.com/deadinside28/bloodborne_pc), the native Linux port of Bloodborne by deadinside28, and on the [shadPS4](https://github.com/shadps4-emu/shadPS4) renderer. The original README is in [docs/original-readme](docs/original-readme/README.md).
 
