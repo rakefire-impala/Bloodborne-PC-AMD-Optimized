@@ -184,7 +184,7 @@ APP_DEFAULTS = {'ui_language': '', 'game_dir': str(PORT_DIR.parent / 'CUSA03173'
                 'fps_mode': 'uncap', 'frame_cap': '', 'real_fps_limit': '-1', 'draw_pipe': '', 'readbacks': '',
                 'frames_ahead': '', 'frame_stats': False, 'gpu_profile': False,
                 'vk_validation': False, 'developer_profile': False, 'extra_env': '', 'close_on_play': False,
-                'check_updates': True, 'online': False, 'online_server': 'srv.shadps4.net:31313',
+                'check_updates': True, 'sacrifice_made': False, 'online': False, 'online_server': 'srv.shadps4.net:31313',
                 'online_webapi': '', 'online_npid': '', 'online_password': '', 'online_upnp': True,
                 'online_community': COMMUNITY_SERVER}
 MENU_DEFAULTS = {'menu_language': 'en', 'window_mode': 'launcher', 'borderless_vsync': '0',
@@ -725,6 +725,131 @@ class Launcher:
         threading.Thread(target=self.detect_gpu, daemon=True).start()
         if self.app.get('check_updates', True) and not COOP_TEST:
             threading.Thread(target=self.check_update, daemon=True).start()
+        if not self.app.get('sacrifice_made'):
+            root.after(300, self.first_boot_sacrifice)
+
+    # (readbacks, depth of field + motion blur on, or None to keep them)
+    SACRIFICES = [
+        ('0', False, ('Forsake the haze',
+                      'GPU Readbacks set to Off (recommended): depth of field and motion blur off.\n'
+                      'You lack blur but maintain performance, efficiency, and practicality. '
+                      'However, the dream will lose its blur...',
+                      'Отречься от дымки',
+                      'Чтение GPU выключено (рекомендуется): глубина резкости и размытие выкл.\n'
+                      'Без размытия, но с производительностью, экономичностью и практичностью. '
+                      'Однако сон потеряет своё размытие...')),
+        ('', None, ('Walk the slow path',
+                    'GPU Readbacks set to Relaxed: No smears, and the haze stays... '
+                    'but still a good deal slower. Patience, hunter.',
+                    'Идти медленным путём',
+                    'Чтение GPU в режиме Relaxed: без размазывания, и дымка остаётся... '
+                    'но всё же заметно медленнее. Терпение, охотник.')),
+        ('0', True, ('Embrace the Nightmare',
+                     'GPU Readbacks set to Off (not recommended): depth of field and motion blur are On.\n'
+                     'Swift, and the haze stays, but the textures will surely smear, Hunter.',
+                     'Принять Кошмар',
+                     'Чтение GPU выключено (не рекомендуется): глубина резкости и размытие вкл.\n'
+                     'Быстро, и дымка остаётся, но текстуры непременно будут размазываться, охотник.')),
+    ]
+
+    def first_boot_sacrifice(self):
+        """Asks once which of speed, haze or clean textures to give up (GPU readbacks trade-off)."""
+        tk = self.tk
+        top = tk.Toplevel(self.root)
+        top.title(_('A sacrifice is required', 'Требуется жертва'))
+        top.configure(bg=BG)
+        top.transient(self.root)
+        top.resizable(False, False)
+        frame = tk.Frame(top, bg=PANEL, padx=self.px(22), pady=self.px(18),
+                         highlightbackground=LINE, highlightthickness=1)
+        frame.pack(fill='both', expand=True, padx=self.px(10), pady=self.px(10))
+        tk.Label(frame, text=_('Good hunter, a sacrifice is required.', 'Добрый охотник, требуется жертва.'),
+                 bg=PANEL, fg=GOLD, font=('Georgia', 15)).pack(anchor='w')
+        tk.Label(frame, text=_(
+            'Your vessel is lean. To keep it whole in the dream, you must give up one of three things: '
+            'swiftness, the haze of depth and motion, or textures free of smearing.\n\n\n'
+            'Choose your offering. You may change it later under GPU readbacks and Game effects.',
+            'Ваш сосуд скуден. Чтобы сохранить его во сне, придётся отдать одно из трёх: '
+            'скорость, дымку глубины и движения или текстуры без размазывания.\n\n\n'
+            'Выберите подношение. Позже его можно изменить в «Чтение данных GPU» и эффектах игры.'),
+            bg=PANEL, fg=TEXT, font=('Segoe UI', 10), justify='left',
+            wraplength=self.px(520)).pack(anchor='w', pady=(self.px(8), self.px(12)))
+
+        def offer(readbacks, effects):
+            self.var('readbacks', 'app').set(readbacks)
+            if effects is not None:
+                self.var('effect_dof', 'ini').set(effects)
+                self.var('effect_motion_blur', 'ini').set(effects)
+            self.app['sacrifice_made'] = True
+            top.destroy()
+            self.collect()
+
+        lore = _('A desperate messenger constantly running backward to relay memories to the dream. '
+                 'On limited hardware, the messenger stumbles, smearing blood and cloth into a blurry stain. '
+                 'Cutting readbacks silences the messenger so your eyes remain unclouded.',
+                 'Отчаянный гонец, вечно бегущий назад, чтобы передать воспоминания сну. '
+                 'На слабом железе гонец спотыкается, кровь и ткань размазываются в мутное пятно. '
+                 'Отключение чтения заставляет гонца умолкнуть, и взор остаётся ясным.')
+        walk_lore = _('A desperate messenger constantly running backward to relay memories to the dream. '
+                      'Forcing the messenger to walk prevents the stumbles of smearing and preserves the haze, '
+                      "but the dream's passage crawls through the mud.",
+                      'Отчаянный гонец, вечно бегущий назад, чтобы передать воспоминания сну. '
+                      'Заставив гонца идти шагом, вы избавляетесь от спотыканий и размазывания и сохраняете дымку, '
+                      'но ход сна увязает в грязи.')
+        lores = (lore, walk_lore, lore)
+        term = _('GPU Readbacks', 'Чтение GPU')
+        tip = {}
+
+        def show_lore(event, text):
+            if tip:
+                return
+            window = tk.Toplevel(top)
+            window.wm_overrideredirect(True)
+            window.configure(bg=LINE)
+            tk.Label(window, text=text, bg=PANEL, fg=TEXT, font=('Segoe UI', 9), justify='left',
+                     wraplength=self.px(340), padx=self.px(10), pady=self.px(8)).pack(padx=1, pady=1)
+            window.wm_geometry(f'+{event.x_root + self.px(12)}+{event.y_root + self.px(16)}')
+            tip['window'] = window
+
+        def hide_lore(_event=None):
+            if tip:
+                tip.pop('window').destroy()
+
+        for (readbacks, effects, text), tip_text in zip(self.SACRIFICES, lores):
+            title, detail = _(text[0], text[2]), _(text[1], text[3])
+            option = tk.Frame(frame, bg=CARD, highlightbackground=LINE, highlightthickness=1,
+                              padx=self.px(12), pady=self.px(8), cursor='hand2')
+            option.pack(fill='x', pady=self.px(4))
+            heading = tk.Label(option, text=title, bg=CARD, fg=GOLD, font=('Georgia', 12, 'bold'),
+                               anchor='w', cursor='hand2')
+            heading.pack(fill='x')
+            body = tk.Text(option, bg=CARD, fg=MUTED, font=('Segoe UI', 9), wrap='word', width=1, height=1,
+                           borderwidth=0, highlightthickness=0, padx=0, pady=0, cursor='hand2')
+            if detail.startswith(term):
+                body.insert('end', term, 'readbacks')
+                detail = detail[len(term):]
+            body.insert('end', detail)
+            body.tag_configure('readbacks', foreground=GOLD, underline=True)
+            body.tag_bind('readbacks', '<Enter>', lambda e, b=body, t=tip_text: (b.configure(cursor='question_arrow'),
+                                                                                  show_lore(e, t)))
+            body.tag_bind('readbacks', '<Leave>', lambda _e, b=body: (b.configure(cursor='hand2'), hide_lore()))
+            body.configure(state='disabled')
+            def fit(_event, b=body):
+                lines = b.count('1.0', 'end-1c', 'update', 'displaylines')
+                lines = lines if isinstance(lines, int) else (lines or (0,))[-1]
+                b.configure(height=(lines or 0) + 1)
+            body.bind('<Configure>', fit)
+            body.pack(fill='x')
+            for widget in (option, heading, body):
+                widget.bind('<Button-1>', lambda _e, r=readbacks, f=effects: (hide_lore(), offer(r, f), 'break')[-1])
+                widget.bind('<Enter>', lambda _e, w=(option, heading, body): [p.configure(bg=BLOOD) for p in w])
+                widget.bind('<Leave>', lambda _e, w=(option, heading, body): [p.configure(bg=CARD) for p in w])
+        top.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - top.winfo_reqwidth()) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - top.winfo_reqheight()) // 3
+        top.geometry(f'+{max(0, x)}+{max(0, y)}')
+        top.grab_set()
+        top.focus_set()
 
     def px(self, size):
         return int(size * self.dpi)
