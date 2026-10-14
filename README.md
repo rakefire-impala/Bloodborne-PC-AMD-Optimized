@@ -1,4 +1,4 @@
-![Bloodborne: The Crowned Workshop — TatsunaKyo](docs/assets/crowned-workshop-header.png)
+![Bloodborne: Optimized for AMD](docs/assets/bb.jpg)
 
 <h1 align="center">Bloodborne: Optimized for AMD</h1>
 
@@ -37,13 +37,56 @@ My revision of [TatsunaKyo's Windows Port](https://github.com/TatsunaKyo/bloodbo
 
 **Play Bloodborne.exe** starts with your saved options. Saves and shader caches normally live in `user/` beside the launcher; you can choose another saves folder. Keep your existing saves, mods and preferences when updating. Each package includes its SHA256 checksum and **Start-Verified-Launcher.cmd**. [Installation and settings](docs/launcher-and-menu.md)
 
+## What's unique about this build
+
+This fork prioritizes **low-VRAM stability** and **quality-of-life improvements** through a series of targeted optimizations and feature additions that work across the entire renderer and launcher.
+
+### Low-VRAM and memory management
+
+The core focus of this build is making Bloodborne playable on budget AMD GPUs, especially the **RX 5500M with 4 GB VRAM**. Key changes include:
+
+- **Intelligent buffer arena management**: Buffer data is split across page-paired arenas, with cold data moved to system memory while hot paths stay in VRAM. This avoids stalls when allocations are refused and keeps the working set tight.
+- **Image and render-target coherence**: Render targets and the buffer cache are kept coherent when the GPU writes through buffers. Images are kept in VRAM by default instead of being migrated to system memory by the allocator.
+- **Staging and copy management**: Staging blocks are held within a VRAM budget; the copy thread cannot deadlock the GPU thread because it uses the backing view for guest memory copies.
+- **Graceful degradation**: When VRAM is constrained, allocations fall back to system memory and cold buffers are automatically reclaimed, with a watchdog preventing freezes during reclamation.
+
+Together, these changes reduce common crash sites (area loads on AMD GPUs), prevent out-of-memory errors, and improve consistency on systems with less than 6 GB of total memory commit.
+
+### GPU readbacks and reliability
+
+The launcher now surfaces GPU readbacks alongside the Play page, with a **(!)** indicator when the "Off" readback mode causes smearing. This lets users understand the tradeoff between speed and stability:
+
+- **Off**: Fastest but can smear when transitioning areas.
+- **Relaxed**: Cleans up the smear, good middle ground.
+- **Precise**: Safest but slower; useful for diagnosis.
+
+### Quality-of-life features
+
+- **Lamp travel**: A dedicated launcher page for lamp-to-lamp travel using a port-drawn menu with headstone tabs, making navigation faster and more visual.
+- **Discord Rich Presence**: The current area is shown in Discord, helping friends see where you are without joining.
+- **Mouse pointer hiding**: The pointer automatically hides after 1 second of inactivity in the game window, improving immersion.
+
+### Launcher and in-game menu cohesion
+
+- **Crowned Workshop identity**: The launcher is branded with a workshop, lantern and crowned emblem that reflect the customization focus. bb.jpg serves as the banner, dropping the small logos for a cleaner look.
+- **Shared settings**: The launcher and in-game menu use identical settings categories (Image, Frames, Window, Overlay, Cheats, Effects, Advanced), so you find the same control in the same place whether you're in the launcher or playing.
+- **Live editing**: Most controls update without a restart, including frame caps, overlay settings, and runtime cheats.
+
+### Design philosophy
+
+This build treats **memory as a first-class constraint**, not an optimization target. The renderer is designed to respect the VRAM budget of lower-end hardware while delivering the visual fidelity and frame rates of modern upscaling and frame-generation features. Every optimization is measured against three criteria:
+
+1. **Stability first**: No mysterious crashes, no out-of-memory panics, no deadlocks under load.
+2. **Transparency**: The launcher shows what's happening (readback modes, memory use, frame times) so users can make informed choices.
+3. **Consistency**: Settings mean the same thing in the launcher and during play, and your choices persist across sessions.
+
 ## What this fork adds
 
 ### High-fidelity upscaling support: DLSS, FSR and XeSS
 
 ![DLSS, FSR and XeSS: input scene, reconstruction and display output](docs/assets/features/upscaling.png)
 
-I wanted more control over image quality and more choices for people playing on different GPUs. The original port already had DLSS, FSR and TAA; I added **XeSS Super Resolution** and a separate **DLSS model-preset selector**, with the same settings available in the launcher and while playing. **DLSS model changes apply live on the next scene frame**; live quality/resolution changes use [the in-game menu’s Live resolution setting](#live-editing-during-play). The following shows all the upscaling options provided:
+I wanted more control over image quality and more choices for people playing on different GPUs. The original port already had DLSS, FSR and TAA; I added **XeSS Super Resolution** and a separate **DLSS model-preset selector**, with the same settings available in the launcher and while playing. **DLSS model changes apply live on the next scene frame**; live quality/resolution changes use [the in-game menu's Live resolution setting](#live-editing-during-play). The following shows all the upscaling options provided:
 
 | Upscaler | Available option |
 |---|---|
@@ -118,6 +161,26 @@ FG is suspended during the background pause or limit, and your foreground settin
 
 [Frame-limit behavior and timing details](docs/display-and-overlay.md#fps-limits) · [Focus, pause and presentation](docs/display-and-overlay.md#window-and-background)
 
+### Temporal stability and renderer optimizations
+
+![Refresh temporal history after a scene change while retaining normal movement history](docs/assets/features/temporal.png)
+
+I've worked on the motion history used by the upscalers and FG, on resetting old history after camera cuts or teleports, and on unnecessary renderer overhead. The aim is to keep moving objects more stable, avoid carrying one scene into another and give ready frames less CPU work to wait behind. Ordinary movement keeps its temporal accumulation so the image can continue to recover detail.
+
+I have made these optimization changes, but I can't guarantee they will increase FPS on different configurations yet. Testing from other users is very welcome. The guides explain the individual changes and comparisons, including the FG inputs and the remaining pacing work.
+
+[Image quality and renderer work](docs/quality-and-performance.md) · [Performance comparisons](docs/performance.md)
+
+### Borderless fullscreen
+
+![Borderless desktop presentation and optional background pause or frame limits](docs/assets/features/window.png)
+
+I added **Borderless fullscreen** because I wanted to switch between the game and other windows comfortably. It uses the desktop resolution and refresh rate, alongside the original Windowed and Fullscreen choices. You can select it before launch or change window mode while playing.
+
+Borderless has its own **V-sync** choice. Off requests Immediate presentation for lower queueing; On requests Mailbox, with FIFO as a fallback. Windows, your driver and display still affect the final latency. The background Pause / 30 / 60 options above are useful here too, and all these controls live in **Window** in both interfaces.
+
+[Window modes, V-sync and background settings](docs/display-and-overlay.md#window-and-background)
+
 ### A compact overlay you can customize
 
 ![Keep the basic readout or choose preset, resolution, FG, latency and a small real-frame graph](docs/assets/features/overlay.png)
@@ -133,26 +196,6 @@ I wanted the overlay to be useful without covering more of the game than necessa
 The optional text stays on one line. The graph adds one shallow row only when enabled, and starts off. Play keeps **Show performance overlay**, with **Customize overlay…** taking you directly to **Overlay** in the launcher; the in-game tab has the same name.
 
 [Overlay fields and how to read the frametime graph](docs/display-and-overlay.md#performance-overlay)
-
-### Borderless fullscreen
-
-![Borderless desktop presentation and optional background pause or frame limits](docs/assets/features/window.png)
-
-I added **Borderless fullscreen** because I wanted to switch between the game and other windows comfortably. It uses the desktop resolution and refresh rate, alongside the original Windowed and Fullscreen choices. You can select it before launch or change window mode while playing.
-
-Borderless has its own **V-sync** choice. Off requests Immediate presentation for lower queueing; On requests Mailbox, with FIFO as a fallback. Windows, your driver and display still affect the final latency. The background Pause / 30 / 60 options above are useful here too, and all these controls live in **Window** in both interfaces.
-
-[Window modes, V-sync and background settings](docs/display-and-overlay.md#window-and-background)
-
-### Temporal stability and renderer optimizations
-
-![Refresh temporal history after a scene change while retaining normal movement history](docs/assets/features/temporal.png)
-
-I've worked on the motion history used by the upscalers and FG, on resetting old history after camera cuts or teleports, and on unnecessary renderer overhead. The aim is to keep moving objects more stable, avoid carrying one scene into another and give ready frames less CPU work to wait behind. Ordinary movement keeps its temporal accumulation so the image can continue to recover detail.
-
-I have made these optimization changes, but I can't guarantee they will increase FPS on different configurations yet. Testing from other users is very welcome. The guides explain the individual changes and comparisons, including the FG inputs and the remaining pacing work.
-
-[Image quality and renderer work](docs/quality-and-performance.md) · [Performance comparisons](docs/performance.md)
 
 ### Optional cheats
 
@@ -256,7 +299,6 @@ For black screens, try **Advanced → Clear shader cache**. Rebuilding it can ca
 [Windows build instructions](packaging/windows/README.md) · [Publishing a release](docs/releasing.md)
 
 ## Credits
-
 
 This revision is maintained by [rakefire impala](https://github.com/rakefire-impala). The Windows port and original launcher are by [Tatsuna Kyo](https://github.com/TatsunaKyo) and [Supermedo](https://github.com/Supermedo). The upstream history, copyright notices and licenses are retained.
 
