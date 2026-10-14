@@ -140,6 +140,10 @@ bool WindowSDL::PollEvents() {
     }
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
+        if (event.type == SDL_EVENT_MOUSE_MOTION || event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+            event.type == SDL_EVENT_MOUSE_BUTTON_UP || event.type == SDL_EVENT_MOUSE_WHEEL) {
+            last_mouse_activity = SDL_GetTicks();
+        }
         if (event.type == SDL_EVENT_KEY_DOWN) {
             // File triggers only. Vulkan commands stay on the renderer's command thread.
             static BbCapture::GeometryKey capture;
@@ -200,6 +204,13 @@ bool WindowSDL::PollEvents() {
         }
     }
     const auto& settings = BbSettings::Get();
+    // Hide the pointer after 1 s without mouse movement; the menu and text entry always show it.
+    const bool idle = SDL_GetTicks() - last_mouse_activity >= 1000;
+    const bool hide = idle && settings.window_focused && !text_active && !BbOverlay::CapturesInput();
+    if (hide != cursor_hidden) {
+        cursor_hidden = hide;
+        if (hide) SDL_HideCursor(); else SDL_ShowCursor();
+    }
     if (!settings.window_focused && settings.background_mode!=BbSettings::BackgroundRun)
         BbNvidia::BeforeSwapchainChange();
     BbBackground::Update(is_open && !settings.window_focused &&

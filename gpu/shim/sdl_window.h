@@ -47,6 +47,8 @@ private:
     int text_state{};
     std::string text, text_prompt, base_title;
     void UpdateTextTitle();
+    uint64_t last_mouse_activity{};
+    bool cursor_hidden{};
     SDL_Window* window{};
     WindowSystemInfo window_info{};
 };
