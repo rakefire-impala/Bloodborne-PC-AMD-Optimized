@@ -42,7 +42,7 @@ Together, these changes reduce common crash sites (area loads on AMD GPUs), prev
 
 ### GPU readbacks and reliability
 
-The launcher now surfaces GPU readbacks alongside the Play page, with a **(!)** indicator when the "Off" readback mode causes smearing. This lets users understand the tradeoff between speed and stability:
+The launcher now surfaces GPU readbacks alongside the Play page, with a **(!)** indicator when the "Off" readback mode causes texture smearing upon long enough playtime. This lets users understand the tradeoff between speed and stability:
 
 - **Off**: Fastest but can smear when transitioning areas.
 - **Relaxed**: Cleans up the smear, good middle ground.
