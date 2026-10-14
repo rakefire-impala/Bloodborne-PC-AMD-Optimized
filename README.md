@@ -11,18 +11,6 @@
   <a href="LICENSE"><img src="docs/assets/readme/license.svg" alt="GPL-2.0+" height="28"></a>
 </p>
 
-<div align="center">
-<table align="center">
-  <tr>
-    <td align="center"><a href="https://github.com/TatsunaKyo/bloodborne_pc/releases/latest"><strong>↓ Download latest&nbsp;↗</strong></a><br>Windows package and checksum</td>
-    <td align="center"><a href="docs/launcher-and-menu.md#installation"><strong>▤ Installation guide&nbsp;↗</strong></a><br>Requirements and setup</td>
-  </tr>
-  <tr>
-    <td colspan="2" align="center"><a href="docs/compatibility.md">Compatibility</a> · <a href="docs/known-issues.md">Current reports</a> · <a href="#roadmap">Roadmap</a> · <a href="docs/index.md">All guides</a> · <a href="docs/releases/index.md">Release notes</a></td>
-  </tr>
-</table>
-</div>
-
 My revision of [TatsunaKyo's Windows Port](https://github.com/TatsunaKyo/bloodborne_pc), built on bbport and the shadPS4 renderer. The aim for this revision is to make Bloodborne more comfortable to play on a lower-end Windows PCs, especially those powered by AMD GPUs. Many graphical and memory issues have been fixed in this revision. Common crashes in numerous areas of the game, especially when loading in on AMD GPUs, have also been fixed. This project would NOT be possible without the original work and the people involved.
 
 > [!CAUTION]
