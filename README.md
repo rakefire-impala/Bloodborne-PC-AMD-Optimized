@@ -50,15 +50,9 @@ The launcher now surfaces GPU readbacks alongside the Play page, with a **(!)** 
 
 ### Quality-of-life features
 
-- **Lamp travel**: A dedicated launcher page for lamp-to-lamp travel using a port-drawn menu with headstone tabs, making navigation faster and more visual.
+- **Lamp travel**: A dedicated launcher page for lamp-to-lamp travel using a port-drawn menu with headstone tabs, making navigation faster and more visual. (EXPERIMENTAL, NEEDS FURTHER TESTING AFTER 1ST HEADSTONE)
 - **Discord Rich Presence**: The current area is shown in Discord, helping friends see where you are without joining.
 - **Mouse pointer hiding**: The pointer automatically hides after 1 second of inactivity in the game window, improving immersion.
-
-### Launcher and in-game menu cohesion
-
-- **Crowned Workshop identity**: The launcher is branded with a workshop, lantern and crowned emblem that reflect the customization focus. bb.jpg serves as the banner, dropping the small logos for a cleaner look.
-- **Shared settings**: The launcher and in-game menu use identical settings categories (Image, Frames, Window, Overlay, Cheats, Effects, Advanced), so you find the same control in the same place whether you're in the launcher or playing.
-- **Live editing**: Most controls update without a restart, including frame caps, overlay settings, and runtime cheats.
 
 ### Design philosophy
 
