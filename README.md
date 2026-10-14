@@ -68,7 +68,7 @@ This build treats **memory as a first-class constraint**, not an optimization ta
 
 ![DLSS, FSR and XeSS: input scene, reconstruction and display output](docs/assets/features/upscaling.png)
 
-They wanted more control over image quality and more choices for people playing on different GPUs. The original port already had DLSS, FSR and TAA; I added **XeSS Super Resolution** and a separate **DLSS model-preset selector**, with the same settings available in the launcher and while playing. **DLSS model changes apply live on the next scene frame**; live quality/resolution changes use [the in-game menu's Live resolution setting](#live-editing-during-play). The following shows all the upscaling options provided:
+They wanted more control over image quality and more choices for people playing on different GPUs. The original port already had DLSS, FSR and TAA; They added **XeSS Super Resolution** and a separate **DLSS model-preset selector**, with the same settings available in the launcher and while playing. **DLSS model changes apply live on the next scene frame**; live quality/resolution changes use [the in-game menu's Live resolution setting](#live-editing-during-play). The following shows all the upscaling options provided:
 
 | Upscaler | Available option |
 |---|---|
@@ -78,7 +78,7 @@ They wanted more control over image quality and more choices for people playing 
 | XeSS 3.0.2 | The added Intel Vulkan integration, with seven dedicated quality modes for supported Intel and other GPUs. |
 | TAA / native AA | Temporal AA at the scene's native resolution. |
 
-For DLSS, I exposed the following presets exactly as separate choices:
+For DLSS, they exposed the following presets exactly as separate choices:
 
 | Preset | Dropdown label |
 |---|---|
@@ -97,7 +97,7 @@ For DLSS, I exposed the following presets exactly as separate choices:
 
 ![Real game frames and extra display frames, with SDR and HDR10 support](docs/assets/features/frame-generation.png)
 
-Support was added for **FSR Frame Generation (x2)** and **NVIDIA DLSS FG / MFG (x2–x6 modes for supported GPUs)** to improve display smoothness while keeping the game's real-frame limit separate. FG can work with a different upscaler and both paths support **SDR and HDR10**; I wanted HDR users to have the same FG choices. You can activate and adjust FG **live from the in-game menu**, as well as before launch in the launcher. I kept the normal FPS limit tied to real game frames, with or without FG, and added an optional second limit for the complete FG output. This lets you control the game rate and the generated display rate separately. I go more in-depth with the technicalities of the implementation in the following page: [FG setup, hardware requirements and how the integration works](docs/frame-generation.md)
+Support was added for **FSR Frame Generation (x2)** and **NVIDIA DLSS FG / MFG (x2–x6 modes for supported GPUs)** to improve display smoothness while keeping the game's real-frame limit separate. FG can work with a different upscaler and both paths support **SDR and HDR10**; they wanted HDR users to have the same FG choices. You can activate and adjust FG **live from the in-game menu**, as well as before launch in the launcher. They kept the normal FPS limit tied to real game frames, with or without FG, and added an optional second limit for the complete FG output. This lets you control the game rate and the generated display rate separately. They go more in-depth with the technicalities of the implementation in the following page: [FG setup, hardware requirements and how the integration works](docs/frame-generation.md)
 
 ### NVIDIA Reflex and AMD Anti-Lag 2
 
@@ -117,7 +117,7 @@ They added independent latency controls because choosing an upscaler or turning 
 
 ![Separate real and output FPS caps, exact number controls and background Pause/30/60 modes](docs/assets/features/fps-limits.png)
 
-I wanted more granular control and to choose the frame rate without fighting a slider that jumps hundreds of frames at the slightest movement. Both interfaces let you **type an exact number** and make small adjustments by dragging. The launcher also supports arrow-key steps and finer dragging with Shift. The real-frame cap can change while playing with Unlocked timing, and your choice is kept when you return to the launcher.
+They wanted more granular control and to choose the frame rate without fighting a slider that jumps hundreds of frames at the slightest movement. Both interfaces let you **type an exact number** and make small adjustments by dragging. The launcher also supports arrow-key steps and finer dragging with Shift. The real-frame cap can change while playing with Unlocked timing, and your choice is kept when you return to the launcher.
 
 The normal cap controls **real game frames**. The optional **FG output cap** includes the generated frames and works alongside it. A 75 FPS real cap therefore does not prevent x2 FG from displaying up to 150 FPS:
 
