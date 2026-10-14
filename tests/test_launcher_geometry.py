@@ -61,7 +61,7 @@ with tempfile.TemporaryDirectory(prefix='bbport-geometry-') as directory:
                         # size too, without pushing navigation or the menu hint out.
                         side_rect = rectangle(obj.side)
                         for label in (obj.brand_title, obj.brand_author, obj.brand_origin,
-                                      obj.brand_version, obj.brand_mark, obj.side_note, *obj.nav.values()):
+                                      obj.brand_version, obj.side_note, *obj.nav.values()):
                             bounds = rectangle(label)
                             assert label.winfo_ismapped(), (language, scale, size, label.cget('text'))
                             assert bounds[0] >= side_rect[0] and bounds[0]+bounds[2] <= side_rect[0]+side_rect[2]

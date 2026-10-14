@@ -1073,9 +1073,6 @@ class Launcher:
                                      bg=BG, fg=GOLD, font=('Segoe UI', 9),
                                      anchor='w', justify='left', wraplength=brand_width, bd=0, padx=0)
         self.brand_version.pack(fill='x', padx=self.px(18), pady=(self.px(3), self.px(8)))
-        self.brand_mark = self.tk.Canvas(side, width=self.px(44), height=self.px(44), bg=BG, bd=0, highlightthickness=0)
-        self.brand_mark.pack(anchor='w', padx=self.px(18), pady=(0, self.px(6)))
-        self.draw_emblem(self.brand_mark, self.px(22), self.px(22), self.px(36))
         tk.Frame(side, bg=LINE, height=1).pack(fill='x', padx=self.px(18), pady=(0, self.px(6)))
         self.nav, self.current_page = {}, None
         for name, title in (('play', _('Play', 'Играть')), ('graphics', _('Graphics', 'Графика')),
@@ -1243,34 +1240,26 @@ class Launcher:
         for key in ('fps_mode', 'upscaler', 'output_res'):
             self.vars[key].trace_add('write', lambda *_a: self.refresh_status())
 
-    def draw_emblem(self, canvas, x, y, size):
-        """The editable crowned TK mark, drawn as vectors at the current DPI."""
-        scale = size / 256
-        def line(points, **kw):
-            canvas.create_line(*[value for a,b in points for value in (x+(a-128)*scale,y+(b-128)*scale)],
-                               fill=GOLD, width=max(1, self.px(1.3)), **kw)
-        for points in (((54,74),(47,34),(90,54),(128,18),(166,54),(209,34),(202,74)),
-                       ((58,87),(198,87)), ((47,218),(47,153),(76,119),(128,101),(180,119),(209,153),(209,218)),
-                       ((75,137),(137,137)), ((106,137),(106,216)),
-                       ((151,137),(151,216)), ((186,137),(151,174),(189,216)),
-                       ((40,237),(216,237))):
-            line(points)
-
     def draw_banner(self):
         """Workshop artwork and live typography, independent of the game dump's cover."""
         c = self.banner
         c.delete('all')
         w, h = max(c.winfo_width(), self.px(400)), int(c['height'])
-        art = PORT_DIR / 'docs/assets/crowned-workshop-art-moon.png'
+        art = PORT_DIR / 'docs/assets/bb.jpg'
         key = (str(art), w, h)
         if self.banner_source != key:
             self.banner_source, self.banner_image = key, None
             try:
                 from PIL import Image, ImageTk, ImageOps
                 with Image.open(art) as painting:
-                    # Keep the hunter/window on the right and a quiet field for lettering.
-                    image = ImageOps.fit(painting.convert('RGB'), (w, h),
-                                        method=Image.Resampling.LANCZOS, centering=(.75, .42))
+                    # Keep the hunter on the right; on wide windows cap the art's size and
+                    # let its black left edge continue as the field for the lettering.
+                    painting = painting.convert('RGB')
+                    fw = min(w, round(painting.width * .24 * self.dpi))
+                    part = ImageOps.fit(painting, (fw, h), method=Image.Resampling.LANCZOS,
+                                        centering=(.85, .4))
+                    image = Image.new('RGB', (w, h), painting.getpixel((0, painting.height // 2)))
+                    image.paste(part, (w - fw, 0))
                     self.banner_image = ImageTk.PhotoImage(image)
             except (ImportError, OSError, self.tk.TclError):
                 pass
@@ -1279,10 +1268,9 @@ class Launcher:
         compact = h < self.px(160)
         x = self.px(26)
         if not compact:
-            self.draw_emblem(c, x+self.px(18), self.px(33), self.px(38))
-            c.create_text(x+self.px(51), self.px(33), text='by rakefire impala', anchor='w',
+            c.create_text(x, self.px(26), text='by rakefire impala', anchor='w',
                           fill=GOLD, font=('Georgia', 11, 'italic'), tags='workshop-type')
-        title_y = self.px(8) if compact else self.px(75)
+        title_y = self.px(8) if compact else self.px(62)
         c.create_text(x, title_y, text='BLOODBORNE', anchor='nw', fill=TEXT,
                       font=('Georgia', 17 if compact else 26), tags='workshop-type')
         c.create_text(x, title_y+self.px(31 if compact else 43),
