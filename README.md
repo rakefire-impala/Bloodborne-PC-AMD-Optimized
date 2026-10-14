@@ -157,7 +157,7 @@ They have made these optimization changes, but they can't guarantee they will in
 
 ![Borderless desktop presentation and optional background pause or frame limits](docs/assets/features/window.png)
 
-They added **Borderless fullscreen** because I wanted to switch between the game and other windows comfortably. It uses the desktop resolution and refresh rate, alongside the original Windowed and Fullscreen choices. You can select it before launch or change window mode while playing.
+They added **Borderless fullscreen** because they wanted to switch between the game and other windows comfortably. It uses the desktop resolution and refresh rate, alongside the original Windowed and Fullscreen choices. You can select it before launch or change window mode while playing.
 
 Borderless has its own **V-sync** choice. Off requests Immediate presentation for lower queueing; On requests Mailbox, with FIFO as a fallback. Windows, your driver and display still affect the final latency. The background Pause / 30 / 60 options above are useful here too, and all these controls live in **Window** in both interfaces.
 
@@ -228,7 +228,7 @@ The original mod/patch loading, keyboard/controller support, shortcuts, shader-c
 - Around **6 GB of free memory commit** (RAM plus page file), or **10 GB for 1440p/4K** output.
 - Your own decrypted **CUSA03173 1.09** game files.
 
-I test the revisions on my **Windows 11 PC with a GeForce RTX 5070 Ti**. This is the main gameplay test configuration for the fork. Automated tests also cover settings, controls, hook behavior, renderer contracts and package contents. Coverage and open problems are collected in [test methods](docs/testing.md) and [current reports](docs/known-issues.md), rather than repeated throughout the documentation. AMD/Intel hardware and other Windows configurations depend on community feedback.
+They test the revisions on their **Windows 11 PC with a GeForce RTX 5070 Ti**. This is the main gameplay test configuration for their fork. Automated tests also cover settings, controls, hook behavior, renderer contracts and package contents. Coverage and open problems are collected in [test methods](docs/testing.md) and [current reports](docs/known-issues.md), rather than repeated throughout the documentation. AMD/Intel hardware and other Windows configurations depend on community feedback.
 
 ## Help and development
 
