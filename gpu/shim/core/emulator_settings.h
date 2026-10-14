@@ -29,7 +29,13 @@ public:
     int GetRcasAttenuation() { static const auto value = int(Number("BB_RCAS_ATTENUATION", 250)); return value; }
     // bbport: Relaxed by default: without readbacks FaceGen reads stale GPU-written vertices
     // (vertex explosions); in Hunter's Nightmare it costs no measurable frame rate.
-    u32 GetReadbacksMode() { static const auto value = u32(Number("BB_READBACKS", GpuReadbacksMode::Relaxed)); return value; }
+    u32 GetReadbacksMode() {
+        static const auto value = u32(Number("BB_READBACKS", GpuReadbacksMode::Relaxed));
+        const int live = readbacks_override.load(std::memory_order_relaxed);
+        return live >= 0 ? u32(live) : value;
+    }
+    /// bbport: diagnostics (ReadbackAudit::Tick, BB_READBACKS_SWITCH): -1 keeps BB_READBACKS.
+    std::atomic<int> readbacks_override{-1};
     // bbport: BB_VBLANK_HZ=0 (uncapped presets): vblank runs at 480 Hz so a finished frame is
     // shown within ~2 ms instead of waiting for the next display-rate vblank (below the display
     // rate frames alternated 10/20 ms at 100 Hz: judder), and GetFrameLimit() caps the rate at

@@ -1556,6 +1556,10 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
             gpu_modified_ranges.Subtract(addr, size);
         },
         [&] { src_buffer = UploadCopies(arena, copies, total_size_bytes); });
+    if (ReadbackAudit::Enabled() && !ReadbackAudit::LastStale().empty() &&
+        ReadbackAudit::MayDescribe()) {
+        DescribeStaleUpload(device_addr, size, is_written, is_texel_buffer);
+    }
 
     if (src_buffer) {
         runtime.CopyBuffer(src_buffer, arena, copies);
@@ -1567,6 +1571,34 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
         return SynchronizeMemoryFromImage(arena, device_addr, size, is_written);
     }
     return false;
+}
+
+// bbport: BB_READBACK_AUDIT=1 — what a stale upload (guest bytes over GPU-written ones) hit:
+// the binding that caused it and the images in those pages.
+void BufferCache::DescribeStaleUpload(VAddr device_addr, u32 size, bool is_written,
+                                      bool is_texel_buffer) {
+    for (const auto& [address, bytes] : ReadbackAudit::LastStale()) {
+        std::string images;
+        texture_cache.ForEachImageInRegion(address, bytes, [&](ImageId, Image& image) {
+            if (images.size() > 400) {
+                return;
+            }
+            images += fmt::format(" [{:#x} {}x{} {}{}{}{}]", image.info.guest_address,
+                                  image.info.size.width, image.info.size.height,
+                                  vk::to_string(image.info.pixel_format),
+                                  image.usage.render_target ? " RT" : "",
+                                  image.usage.depth_target ? " depth" : "",
+                                  True(image.flags & ImageFlagBits::GpuModified) ? " GPU-written"
+                                                                                  : "");
+        });
+        std::printf("Readback audit: stale upload %#llx +%llu KiB by a %s%s binding at %#llx "
+                    "(%u bytes); images:%s\n",
+                    static_cast<unsigned long long>(address),
+                    static_cast<unsigned long long>(bytes >> 10),
+                    is_written ? "written" : "read-only", is_texel_buffer ? " texel" : "",
+                    static_cast<unsigned long long>(device_addr), size,
+                    images.empty() ? " none" : images.c_str());
+    }
 }
 
 const Buffer* BufferCache::UploadCopies(const Buffer* arena, std::span<vk::BufferCopy> copies,

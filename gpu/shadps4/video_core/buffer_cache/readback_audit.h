@@ -13,6 +13,7 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <mutex>
 #include <utility>
@@ -107,7 +108,23 @@ inline void MaybePrint(State& s) {
     s.window_start = now;
 }
 
+/// The stale uploads of the last upload on this thread, for the caller to name what they hit.
+inline Ranges& LastStale() {
+    thread_local Ranges ranges;
+    return ranges;
+}
+
+/// At most 24 descriptions per 5 s window (the window's print resets the count).
+inline bool MayDescribe() {
+    State& s = GetState();
+    std::scoped_lock lk{s.mutex};
+    return s.events[static_cast<size_t>(Kind::StaleUpload)] <= 24;
+}
+
 inline void Record(Kind kind, const Ranges& ranges) {
+    if (kind == Kind::StaleUpload) {
+        LastStale() = ranges;
+    }
     if (ranges.empty()) {
         return;
     }
@@ -126,6 +143,26 @@ inline void Record(Kind kind, const Ranges& ranges) {
 inline void Tick() {
     if (!Enabled()) {
         return;
+    }
+    // BB_READBACKS_SWITCH=<file>: readbacks are Relaxed while the file exists (checked once a
+    // second), to tell a smear that is renewed every frame from one written once.
+    static const char* switch_file = std::getenv("BB_READBACKS_SWITCH");
+    if (switch_file) {
+        static auto last = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last > std::chrono::seconds(1)) {
+            last = now;
+            std::FILE* f = std::fopen(switch_file, "rb");
+            const int mode = f ? int(GpuReadbacksMode::Relaxed) : -1;
+            if (f) {
+                std::fclose(f);
+            }
+            auto& live = EmulatorSettings.readbacks_override;
+            if (live.exchange(mode) != mode) {
+                std::printf("Readback audit: readbacks %s by %s\n", f ? "Relaxed" : "as configured",
+                            switch_file);
+            }
+        }
     }
     State& s = GetState();
     std::scoped_lock lk{s.mutex};

@@ -207,6 +207,8 @@ private:
     static void RunGuestCopy(const BbCopy::Item& item);
     void SmallGuestCopy(const BbCopy::Item& item);
 
+    void DescribeStaleUpload(VAddr device_addr, u32 size, bool is_written, bool is_texel_buffer);
+
     const Buffer* UploadCopies(const Buffer* arena, std::span<vk::BufferCopy> copies,
                                size_t total_size_bytes);
 
