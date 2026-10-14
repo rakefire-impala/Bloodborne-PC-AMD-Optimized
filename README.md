@@ -74,7 +74,7 @@ This build treats **memory as a first-class constraint**, not an optimization ta
 
 ![DLSS, FSR and XeSS: input scene, reconstruction and display output](docs/assets/features/upscaling.png)
 
-I wanted more control over image quality and more choices for people playing on different GPUs. The original port already had DLSS, FSR and TAA; I added **XeSS Super Resolution** and a separate **DLSS model-preset selector**, with the same settings available in the launcher and while playing. **DLSS model changes apply live on the next scene frame**; live quality/resolution changes use [the in-game menu's Live resolution setting](#live-editing-during-play). The following shows all the upscaling options provided:
+They wanted more control over image quality and more choices for people playing on different GPUs. The original port already had DLSS, FSR and TAA; I added **XeSS Super Resolution** and a separate **DLSS model-preset selector**, with the same settings available in the launcher and while playing. **DLSS model changes apply live on the next scene frame**; live quality/resolution changes use [the in-game menu's Live resolution setting](#live-editing-during-play). The following shows all the upscaling options provided:
 
 | Upscaler | Available option |
 |---|---|
@@ -109,7 +109,7 @@ Support was added for **FSR Frame Generation (x2)** and **NVIDIA DLSS FG / MFG (
 
 ![Independent latency controls for supported NVIDIA and AMD GPUs](docs/assets/features/latency.png)
 
-I added independent latency controls because choosing an upscaler or turning Frame Generation off should not remove the option to reduce the render queue. Both interfaces keep these controls in **Frames**, alongside FG and the frame limits. I made **Reflex** a separate Off / On / On + Boost choice, so you can use it without FG. Be warned that NVIDIA FG enables Reflex automatically. I also integrated **AMD Anti-Lag 2** through the supported Radeon Vulkan driver interface.
+They added independent latency controls because choosing an upscaler or turning Frame Generation off should not remove the option to reduce the render queue. Both interfaces keep these controls in **Frames**, alongside FG and the frame limits. They made **Reflex** a separate Off / On / On + Boost choice, so you can use it without FG. Be warned that NVIDIA FG enables Reflex automatically. They also integrated **AMD Anti-Lag 2** through the supported Radeon Vulkan driver interface.
 
 | Control | Choices | Requirements |
 |---|---|---|
@@ -136,7 +136,7 @@ The normal cap controls **real game frames**. The optional **FG output cap** inc
 
 The optional output field accepts **30–1000 FPS**; the negotiated FG multiplier and your system determine what can be reached. I keep the real-frame slider between 30 and 120 because extreme real rates can affect Bloodborne's movement and physics. Generated frames do not advance that logic.
 
-I also added a choice for when you Alt-Tab or leave the game in the background. There is no reason to keep rendering at full speed if you would rather save the power:
+They also added a choice for when you Alt-Tab or leave the game in the background. There is no reason to keep rendering at full speed if you would rather save the power:
 
 | Background mode | What happens while the window is unfocused |
 |---|---|
@@ -153,9 +153,9 @@ FG is suspended during the background pause or limit, and your foreground settin
 
 ![Refresh temporal history after a scene change while retaining normal movement history](docs/assets/features/temporal.png)
 
-I've worked on the motion history used by the upscalers and FG, on resetting old history after camera cuts or teleports, and on unnecessary renderer overhead. The aim is to keep moving objects more stable, avoid carrying one scene into another and give ready frames less CPU work to wait behind. Ordinary movement keeps its temporal accumulation so the image can continue to recover detail.
+They've worked on the motion history used by the upscalers and FG, on resetting old history after camera cuts or teleports, and on unnecessary renderer overhead. The aim is to keep moving objects more stable, avoid carrying one scene into another and give ready frames less CPU work to wait behind. Ordinary movement keeps its temporal accumulation so the image can continue to recover detail.
 
-I have made these optimization changes, but I can't guarantee they will increase FPS on different configurations yet. Testing from other users is very welcome. The guides explain the individual changes and comparisons, including the FG inputs and the remaining pacing work.
+They have made these optimization changes, but they can't guarantee they will increase FPS on different configurations yet. Testing from other users is very welcome. The guides explain the individual changes and comparisons, including the FG inputs and the remaining pacing work.
 
 [Image quality and renderer work](docs/quality-and-performance.md) · [Performance comparisons](docs/performance.md)
 
@@ -163,7 +163,7 @@ I have made these optimization changes, but I can't guarantee they will increase
 
 ![Borderless desktop presentation and optional background pause or frame limits](docs/assets/features/window.png)
 
-I added **Borderless fullscreen** because I wanted to switch between the game and other windows comfortably. It uses the desktop resolution and refresh rate, alongside the original Windowed and Fullscreen choices. You can select it before launch or change window mode while playing.
+They added **Borderless fullscreen** because I wanted to switch between the game and other windows comfortably. It uses the desktop resolution and refresh rate, alongside the original Windowed and Fullscreen choices. You can select it before launch or change window mode while playing.
 
 Borderless has its own **V-sync** choice. Off requests Immediate presentation for lower queueing; On requests Mailbox, with FIFO as a fallback. Windows, your driver and display still affect the final latency. The background Pause / 30 / 60 options above are useful here too, and all these controls live in **Window** in both interfaces.
 
@@ -173,7 +173,7 @@ Borderless has its own **V-sync** choice. Off requests Immediate presentation fo
 
 ![Keep the basic readout or choose preset, resolution, FG, latency and a small real-frame graph](docs/assets/features/overlay.png)
 
-I wanted the overlay to be useful without covering more of the game than necessary. You can keep the original basic readout, hide it completely, or choose which extra fields you want:
+They wanted the overlay to be useful without covering more of the game than necessary. You can keep the original basic readout, hide it completely, or choose which extra fields you want:
 
 - **DLSS preset letter**, without the longer CNN/Transformer descriptions.
 - **Input and output resolution**, so you can see the scene size and reconstructed output.
@@ -189,7 +189,7 @@ The optional text stays on one line. The graph adds one shallow row only when en
 
 ![Combat and movement multipliers plus optional stamina, consumable and fall-damage controls](docs/assets/features/cheats.png)
 
-I added runtime choices alongside the original startup cheats, so you can adjust them from the launcher or while playing:
+They added runtime choices alongside the original startup cheats, so you can adjust them from the launcher or while playing:
 
 | Added choice | Available settings |
 |---|---|
@@ -205,49 +205,21 @@ They start off and share the **Cheats** category in both interfaces. The [curren
 
 [Cheat behavior and current limitations](docs/cheats.md)
 
-### Save Manager
-
-![Save Manager: automatic backups or named snapshots, verified save files and metadata, and closed-game restoration with rollback](docs/assets/features/save-manager.png)
-
-I added **Save Manager** to protect progress before a new session or an experimental change. Open it from **Game & files** to create named snapshots or restore a verified backup with a rollback copy of your current saves. It preserves the original save files, metadata and save memory, including custom saves locations.
-
-Automatic backups run before launching and start on, with ten snapshots kept by default. You can adjust that limit from one to one hundred; manual and rollback copies are kept. Save operations require a closed game, and an interrupted restore is recovered before the next launch.
-
-[Save Manager: backup settings, restoration and recovery](docs/save-manager.md)
-
-### The Crowned Workshop launcher
-
-![Play quick choices lead to seven organized settings pages with shared preferences](docs/assets/features/launcher.png)
-
-I redesigned the launcher around my workshop, lantern and crowned TK emblem, and organized the settings so that the visual identity also makes it easier to use and reflects all the changes made with the project. The sidebar separates the seven shared **Settings** pages from the launcher tools, and bordered sections separate related controls within a page.
-
-**Play** keeps the quick choices together, grouped into image, frames and window/overlay. The DLSS model selector appears only when DLSS is selected, XeSS has its own quality selector, and NVIDIA FG shows its multiplier on a separate row. Each complete setting has one home in the detailed pages; Play is a shortcut to those same preferences. **Game & files**, mods, online setup and logs remain launcher tools.
-
-[Launcher tour, category table and screenshots](docs/launcher-and-menu.md#the-launcher)
-
 ### A compact and cohesive in-game menu
 
 ![Seven matching settings categories, available in English or Russian with Insert or L3+R3](docs/assets/features/in-game.png)
 
-I translated the port's settings menu into **English**, retained Russian, and replaced the long page with **seven tabs**: Image, Frames, Window, Overlay, Cheats, Effects and Advanced. Press **Insert** or **L3+R3** to open it. Close and restart controls stay within reach, with a layout that adapts to the available space.
+They translated the port's settings menu into **English**, retained Russian, and replaced the long page with **seven tabs**: Image, Frames, Window, Overlay, Cheats, Effects and Advanced. Press **Insert** or **L3+R3** to open it. Close and restart controls stay within reach, with a layout that adapts to the available space.
 
 Those seven categories now match the launcher. If you find Reflex under Frames before launching, you find it under Frames during play too. Sharpening stays in Image, background behavior in Window, and model detail/game effects in Effects. Both interfaces use the same saved preferences, and settings that need a restart tell you so.
-
-#### LIVE editing during play
-
-I designed the added runtime controls to be useful **LIVE, without closing and restarting the game**. Press **Insert** or **L3+R3** to change DLSS model presets, supported FG/latency modes, unlocked frame caps, window/background behavior, runtime cheats or your overlay. Both interfaces keep the same preferences.
-
-For live upscaler quality/output changes, enable **Image → Live resolution changes** before launching. Startup game patches and a few renderer options still require a restart; [the live-settings table](docs/live-settings.md) makes those exceptions clear.
-
-[Shared categories, live settings and restart requirements](docs/launcher-and-menu.md#in-game-settings)
 
 ### Optional developer diagnostics
 
 ![Optional developer profiling with session logs and crash information](docs/assets/features/diagnostics.png)
 
-I added an opt-in profiler so a crash or performance report can include more than a description of what happened. It keeps a separate session folder with logs, settings, timings and Windows crash details when available. Enable **Advanced → Diagnostics** before reproducing a problem; it starts off for normal play because profiling can add overhead.
+They added an opt-in profiler so a crash or performance report can include more than a description of what happened. It keeps a separate session folder with logs, settings, timings and Windows crash details when available. Enable **Advanced → Diagnostics** before reproducing a problem; it starts off for normal play because profiling can add overhead.
 
-I also added **Generate Support Report**, available in Diagnostics and Log. It brings the useful information together, removes personal paths and credentials, and lets you inspect every included file before exporting a ZIP. The anonymous CPU/RAM profile is optional, and you choose whether to attach the report to GitHub yourself.
+They also added **Generate Support Report**, available in Diagnostics and Log. It brings the useful information together, removes personal paths and credentials, and lets you inspect every included file before exporting a ZIP. The anonymous CPU/RAM profile is optional, and you choose whether to attach the report to GitHub yourself.
 
 [Support Report contents, privacy and hardware submissions](docs/support-reports.md)
 
@@ -263,20 +235,6 @@ The original mod/patch loading, keyboard/controller support, shortcuts, shader-c
 - Your own decrypted **CUSA03173 1.09** game files.
 
 I test the revisions on my **Windows 11 PC with a GeForce RTX 5070 Ti**. This is the main gameplay test configuration for the fork. Automated tests also cover settings, controls, hook behavior, renderer contracts and package contents. Coverage and open problems are collected in [test methods](docs/testing.md) and [current reports](docs/known-issues.md), rather than repeated throughout the documentation. AMD/Intel hardware and other Windows configurations depend on community feedback.
-
-## Roadmap
-
-I am keeping the existing gameplay work active while making the fork easier to maintain:
-
-- **Release reliability:** updater compatibility, verified complete packages, CI and useful report forms.
-- **Save Manager:** extend the shipped backup/restore tools with named save profiles and further save protection.
-- **PC input:** full remapping, native mouse camera and controller/UI consistency.
-- **Ultrawide and HUD:** aspect-aware FOV, interface placement and cinematic handling.
-- **Frame pacing and image quality:** real/displayed cadence, shader-cache resilience and HUDless FG.
-- **Support and compatibility:** a locally reviewed/redacted report archive and reviewed hardware results.
-- **Further cheats and vendor features:** the scoped gameplay/training proposals and supported backend extensions.
-
-[Detailed gameplay roadmap](docs/tatsunakyo-next.md) · [Infrastructure phases](docs/infrastructure-plan.md)
 
 ## Help and development
 
