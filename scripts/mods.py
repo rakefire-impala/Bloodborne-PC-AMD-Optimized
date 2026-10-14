@@ -252,13 +252,20 @@ def lamp_travel_layer(game, out, layers):
     """Generated last, from the files the other layers leave in effect (so a mod's talk or event
     scripts are patched rather than replaced)."""
     import lamp_travel
+    from patches import game_app_version
+    # The talk scripts wait for the port's menu, which reads the event flags of the 1.09
+    # executable only (src/runtime_lamp.c): another version would leave the dialog waiting.
+    version = game_app_version(game)
+    if version != '01.09':
+        raise ValueError(f'game version {version}; the travel menu needs 01.09')
     in_effect = {}
     for _name, root in layers:
         for relative, source in mod_files(root):
             in_effect[relative.as_posix()] = source
     target = Path(out).resolve() / 'qol-lamp-travel'
     shutil.rmtree(target, ignore_errors=True)
-    count = lamp_travel.generate(lamp_travel.GameFiles(game, in_effect), target)
+    count = lamp_travel.generate(lamp_travel.GameFiles(game, in_effect), target,
+                                 lamp_travel.game_language())
     print(f'Lamp travel: {count} lamps can travel to other lamps', file=sys.stderr)
     return ('Lamp travel (generated)', target)
 

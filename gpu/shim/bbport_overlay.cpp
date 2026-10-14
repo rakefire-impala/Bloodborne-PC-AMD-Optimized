@@ -13,6 +13,7 @@
 #include <string>
 
 #include <SDL3/SDL.h>
+#include "bbport_lamp_menu.h"
 #include "bbport_settings.h"
 #include "../bbcheats.h"
 #include "imgui.h"
@@ -1134,6 +1135,7 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     font_config.FontDataOwnedByAtlas = false;
     io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(bb_font_ttf),
                                    int(bb_font_ttf_end - bb_font_ttf), 18.0f, &font_config);
+    BbLampMenu::LoadFont(io.Fonts);
 
     const vk::Instance vk_instance = instance.GetInstance();
     ImGui_ImplVulkan_LoadFunctions(
@@ -1198,6 +1200,11 @@ bool HandleEvent(const SDL_Event& event) {
         return false;
     }
     ImGuiIO& io = ImGui::GetIO();
+    // The lamp travel menu takes every input while it is open (the settings menu waits).
+    if (BbLampMenu::IsOpen() && event.type != SDL_EVENT_WINDOW_FOCUS_GAINED &&
+        event.type != SDL_EVENT_WINDOW_FOCUS_LOST && BbLampMenu::HandleEvent(event)) {
+        return true;
+    }
     const bool is_open = menu_open;
     switch (event.type) {
     case SDL_EVENT_WINDOW_FOCUS_GAINED:
@@ -1290,11 +1297,12 @@ bool HandleEvent(const SDL_Event& event) {
 }
 
 bool Visible() {
-    return initialized && (menu_open || text_entry_active || BbSettings::Get().show_fps);
+    return initialized && (menu_open || text_entry_active || BbLampMenu::IsOpen() ||
+                           BbSettings::Get().show_fps);
 }
 
 bool CapturesInput() {
-    return menu_open || text_entry_active;
+    return menu_open || text_entry_active || BbLampMenu::IsOpen();
 }
 
 void SetTextEntry(bool active, const std::string& prompt, const std::string& text) {
@@ -1362,6 +1370,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     if (text_entry_active) {
         TextEntryBox();
+    }
+    if (BbLampMenu::IsOpen()) {
+        BbLampMenu::Draw();
     }
     ImGui::Render();
 

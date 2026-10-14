@@ -40,10 +40,16 @@ if [[ -z ${PYTHON:-} ]]; then echo 'Install Python 3 or set PYTHON.' >&2; exit 1
 game=${BB_GAME_DIR:-../CUSA03173}
 if [[ ! -f $game/eboot.bin ]]; then echo "No eboot.bin in $game (set BB_GAME_DIR)." >&2; exit 1; fi
 original_game=$game
+lamp_travel=${BB_LAMP_TRAVEL:-$(sed -n 's/^qol_lamp_travel=//p' "$BB_CONFIG" 2>/dev/null | tail -n1 | grep . || echo 0)}
 game=$("$PYTHON" scripts/mods.py "$game" --out "$out" \
     --mods-dir "${BB_MODS_DIR:-$data/mods}" --config "${BB_MODS_CONFIG:-$data/mods.json}" \
-    --enabled "${BB_MODS_ENABLED:-1}" \
-    --lamp-travel "${BB_LAMP_TRAVEL:-$(sed -n 's/^qol_lamp_travel=//p' "$BB_CONFIG" 2>/dev/null | tail -n1 | grep . || echo 0)}")
+    --enabled "${BB_MODS_ENABLED:-1}" --lamp-travel "$lamp_travel")
+# The lamp travel menu's lamps and texts, written by the generator once the layer is complete.
+if [[ $lamp_travel == 1 && -f $out/qol-lamp-travel/lamp_menu.txt ]]; then
+    export BB_LAMP_MENU=$(realpath "$out/qol-lamp-travel/lamp_menu.txt")
+else
+    unset BB_LAMP_MENU
+fi
 # A private merged view lasts for this launch, including restarts. Cleanup only our own view.
 if [[ $game != "$(realpath "$original_game")" ]]; then
     mod_game=$game

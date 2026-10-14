@@ -33,6 +33,18 @@ int bbgpu_text_input_poll(char *out_utf8, uint64_t size);
 /* 1 while the in-game settings menu is open: the game's pad input is held neutral. */
 int bbgpu_overlay_captures_input(void);
 void bbgpu_before_input(void);
+/* Lamp travel menu (src/runtime_lamp.c, gpu/shim/bbport_lamp_menu.cpp). load reads the
+ * generator's lamp_menu.txt and returns the number of lamps (0 on failure) with the event flags
+ * the talk scripts use; open shows it (lit: one byte per lamp, here: the lamp the player stands
+ * at or -1); result returns a lamp index, BBGPU_LAMP_DREAM, BBGPU_LAMP_CANCEL or, while the
+ * player chooses, BBGPU_LAMP_PENDING. The menu holds the game's pad input neutral. */
+#define BBGPU_LAMP_MENU_MAX 64
+enum { BBGPU_LAMP_PENDING = -3, BBGPU_LAMP_DREAM = -2, BBGPU_LAMP_CANCEL = -1 };
+int bbgpu_lamp_menu_load(const char *path, int *request, int *done, int *dream,
+                         const int **lamp_flags, const int **lit_flags);
+void bbgpu_lamp_menu_open(const unsigned char *lit, int here);
+void bbgpu_lamp_menu_close(void);
+int bbgpu_lamp_menu_result(void);
 /* Number of symbols registered by the vendored libraries (diagnostics). */
 unsigned bbgpu_symbol_count(void);
 /* Completed and current cooperative pause time; the window event loop keeps running. */

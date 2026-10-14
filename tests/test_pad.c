@@ -3,9 +3,21 @@
 #include <unistd.h>
 #include "../src/runtime_pad.c"
 
+#ifdef _WIN32
+/* MinGW has no setenv, and "/tmp" does not exist (the file is made in the working directory). */
+static int setenv(const char *name, const char *value, int overwrite) {
+    (void)overwrite;
+    return _putenv_s(name,value);
+}
+#define TEMP_TEMPLATE "bbport-pad-test-XXXXXX"
+#else
+#define TEMP_TEMPLATE "/tmp/bbport-pad-test-XXXXXX"
+#endif
+
 static int capture;
 int bbgpu_overlay_captures_input(void) { return capture; }
 void bbgpu_before_input(void) {}
+void runtime_lamp_poll(void) {}
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *name) {
     (void)table; (void)count; (void)name;
     return 0;
@@ -20,7 +32,7 @@ static void inject(const char *path, const char *tokens) {
 }
 
 int main(void) {
-    char path[]="/tmp/bbport-pad-test-XXXXXX";
+    char path[]=TEMP_TEMPLATE;
     int fd=mkstemp(path);
     assert(fd>=0);
     close(fd);

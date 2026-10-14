@@ -314,6 +314,7 @@ static ABI int32_t pad_read_state(int32_t handle, PadData *data) {
     if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
     if (!data) return ERR_INVALID_ARG;
     bbgpu_before_input();
+    runtime_lamp_poll(); /* the game's own thread: event flags are read and set here */
     pthread_mutex_lock(&lock);
     sample(data); ++reads;
     pthread_mutex_unlock(&lock);

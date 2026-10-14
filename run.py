@@ -153,12 +153,19 @@ def main():
     if not (game / 'eboot.bin').is_file():
         fail(f'No eboot.bin in {game} (set BB_GAME_DIR).')
     original_game = game.resolve()
+    lamp_travel = env.get('BB_LAMP_TRAVEL') or ini_value(config, 'qol_lamp_travel') or '0'
     game = Path(run_script('mods.py', game, '--out', out,
                            '--mods-dir', env.get('BB_MODS_DIR', data / 'mods'),
                            '--config', env.get('BB_MODS_CONFIG', data / 'mods.json'),
                            '--enabled', env.get('BB_MODS_ENABLED', '1'),
-                           '--lamp-travel', env.get('BB_LAMP_TRAVEL') or ini_value(config, 'qol_lamp_travel') or '0',
+                           '--lamp-travel', lamp_travel,
                            capture=True).strip())
+    # The lamp travel menu's lamps and texts, written by the generator once the layer is complete.
+    lamp_menu = out / 'qol-lamp-travel' / 'lamp_menu.txt'
+    if lamp_travel == '1' and lamp_menu.is_file():
+        env['BB_LAMP_MENU'] = str(lamp_menu.resolve())
+    else:
+        env.pop('BB_LAMP_MENU', None)
     mod_view = game if game.resolve() != original_game else None
     try:
         run_script('prepare.py', game, '--out', out)

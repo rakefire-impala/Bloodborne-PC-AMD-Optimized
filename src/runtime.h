@@ -81,6 +81,9 @@ void runtime_audio_report(void);
  * guest file the game opens (map layouts give the area). */
 void runtime_discord_start(void);
 void runtime_discord_note_open(const char *path);
+/* Lamp travel menu (runtime_lamp.c): checks the executable and BB_LAMP_MENU; polled by the pad. */
+void runtime_lamp_install(void *image, size_t size, const char *app_version);
+void runtime_lamp_poll(void);
 uintptr_t runtime_pad_resolve(const char *name);
 void runtime_pad_report(void);
 uintptr_t runtime_rtc_resolve(const char *name);

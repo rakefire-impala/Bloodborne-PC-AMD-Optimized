@@ -100,6 +100,28 @@ class Bnd4:
         return bytes(out)
 
 
+# --- FMG text tables ------------------------------------------------------------------------------
+
+
+def fmg_texts(raw: bytes) -> dict:
+    """{id: text} of an FMG (version 2: 64-bit string offsets, UTF-16)."""
+    if raw[2] != 2:
+        raise ValueError('unsupported FMG version')
+    groups = struct.unpack_from('<i', raw, 0x0C)[0]
+    offsets = struct.unpack_from('<q', raw, 0x18)[0]
+    texts = {}
+    for g in range(groups):
+        first_index, first_id, last_id = struct.unpack_from('<iii', raw, 0x28 + g * 16)
+        for k in range(last_id - first_id + 1):
+            start = struct.unpack_from('<q', raw, offsets + (first_index + k) * 8)[0]
+            if start:
+                end = start
+                while raw[end:end + 2] != b'\0\0':
+                    end += 2
+                texts[first_id + k] = raw[start:end].decode('utf-16-le')
+    return texts
+
+
 # --- EzState talk scripts (fsSL) ------------------------------------------------------------------
 
 ESD_DATA = 0x6C

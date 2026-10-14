@@ -1,24 +1,29 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Lamp-to-lamp travel (launcher: Quality of Life). Generated from the player's own game files.
 
-At a lamp, "Return to the Hunter's Dream?" becomes a list: Hunter's Dream (the game's own travel)
-and the five headstones of the Dream, each opening that headstone's list of lit lamps. The game's
-texts are reused, so the menus follow the game language.
+At a lamp, "Return to the Hunter's Dream?" opens the port's travel menu (gpu/shim/bbport_lamp_menu):
+a tab per headstone of the Hunter's Dream with that headstone's lamps, "???" for lamps not lit yet,
+and the Hunter's Dream on Square. The menu's texts are the game's own, in the game's language.
 
 How the game does it: a headstone's talk script (script/talk/m21_00_00_00, t210000-t210003 and
-t210721) lists lamps with c1_19(index, name 7000MMMI, lit flag) and, once a lamp is picked, sets
-the warp request flag 7210MMMI; the Hunter's Dream event script (event 12107000, one instance per
-lamp) waits for that flag and warps with "respawn point warp" (2003[49]) to the lamp's region.
+t210721) lists lamps with c1_19(index, name 7000MMMI, lit flag) and, once a lamp is picked, calls a
+check that shows a message if the lamp is unusable and otherwise sets the warp request flag
+7210MMMI; the Hunter's Dream event script (event 12107000, one instance per lamp) waits for that
+flag and warps with "respawn point warp" (2003[49]) to the lamp's region. The destination's arrival
+event (common 7300) clears the flag.
 
 What this adds, in a mod layer that replaces whole files:
-- each lamp's talk script (script/talk/<map>.talkesdbnd.dcx): the list menus, built from the
-  headstones' own lists and their "lamp usable?" check (copied as is), minus the lamp itself;
+- each lamp's talk script (script/talk/<map>.talkesdbnd.dcx): the dialog calls a new state group
+  that asks the port for a choice through event flags (MENU_* below) and runs the headstone's own
+  "lamp usable?" check (copied as is) on the lamp picked;
 - the common event script (event/common.emevd.dcx): event 7250, one instance per lamp, which
-  outside the Hunter's Dream and outside co-op waits for that lamp's warp flag, clears it, plays
-  the lamp travel animation and warps (the Dream keeps its own handlers).
+  outside the Hunter's Dream and outside co-op waits for that lamp's warp flag, plays the lamp
+  travel animation and warps (the Dream keeps its own handlers);
+- lamp_menu.txt beside dvdroot_ps4: the menu's lamps and texts for the port (BB_LAMP_MENU).
 Lamps show the travel dialog only in single player, so co-op never sets these flags.
 """
 import argparse
+import os
 from pathlib import Path
 import struct
 import sys
@@ -29,35 +34,51 @@ import fsformats as F  # noqa: E402
 DREAM_TALK = 'script/talk/m21_00_00_00.talkesdbnd.dcx'
 DREAM_EVENTS = 'event/m21_00_00_00.emevd.dcx'
 COMMON_EVENTS = 'event/common.emevd.dcx'
-# Headstone talk scripts: (file, headstone name message, "has a lit lamp" flag).
-HEADSTONES = [('t210000.esd', 70010100, 12105030), ('t210001.esd', 70010101, 12105031),
-              ('t210002.esd', 70010102, 12105032), ('t210003.esd', 70010103, 12105033),
-              ('t210721.esd', 70010104, 12105034)]
+MENU_FILE = 'lamp_menu.txt'
+# Headstone talk scripts and their names (Yharnam, Frontier, Unseen, Nightmare, Hunter's Nightmare).
+HEADSTONES = [('t210000.esd', 70010100), ('t210001.esd', 70010101), ('t210002.esd', 70010102),
+              ('t210003.esd', 70010103), ('t210721.esd', 70010104)]
 DREAM_NAME = 70002100          # "Hunter's Dream"
 DREAM_QUESTION = 10010713      # "Return to the Hunter's Dream?"
 WARP_EVENT = 12107000          # the Dream's per-lamp warp handler
 HANDLER_EVENT = 7250           # ours, in common.emevd (7210-7299 are unused there)
 TRAVEL_ANIMATION = 101160      # what the game's own lamp travel (common event 7200) plays
 PLAYER = 10000
-TOP_GROUP, REGION_GROUP, CHECK_GROUP = 0x7FFFFF80, 0x7FFFFF81, 0x7FFFFF8F
+TRAVEL_GROUP, CHECK_GROUP = 0x7FFFFF80, 0x7FFFFF8F
+# Event flags shared with the port (src/runtime_lamp.c); 6920-6999 are used by no game file.
+# The talk script clears them, marks its own lamp and sets MENU_REQUEST; the port shows the menu
+# and sets the lamp picked (or MENU_DREAM) and then MENU_DONE.
+MENU_REQUEST, MENU_DONE, MENU_DREAM, MENU_LAMPS = 6920, 6921, 6922, 6928
+MENU_LAMP_LIMIT = 6984
+# Game language (BB_LANGUAGE, the PS4 system language) -> message folder. The overlay's font has
+# no CJK glyphs: those languages get the English names.
+MESSAGE_FOLDERS = {0: 'engus', 1: 'engus', 2: 'frafr', 3: 'spaes', 4: 'deude', 5: 'itait', 6: 'nldnl',
+                   7: 'porpt', 8: 'rusru', 9: 'engus', 10: 'engus', 11: 'engus', 12: 'finfi',
+                   13: 'swese', 14: 'dandk', 15: 'norno', 16: 'polpl', 17: 'porbr', 18: 'enggb',
+                   19: 'turtr', 20: 'spaar'}
+TEXT_TABLES = ('イベントテキスト', 'SP_キーガイド')  # event texts, key guide (menu.msgbnd)
+KEY_SELECT, KEY_RETURN = 200000, 110000
 
 TRUE = F.ez(1)
 EV_CALL_RESULT = lambda n: bytes([F.EZ_CALL_RESULT]) + F.ez_int(n) + bytes([F.EZ_EQ, F.EZ_END])  # noqa: E731
 EV_CALL_DONE = bytes([F.EZ_CALL_RESULT, F.EZ_CALL_RUNNING, F.EZ_NE, F.EZ_END])
-EV_SELECTED = lambda n: bytes([F.EZ_GET_REG0]) + F.ez_int(n) + bytes([F.EZ_EQ, F.EZ_END])  # noqa: E731
+EV_FLAG_ON = lambda flag: F.ez(F.ez_call(15, flag), bytes([F.EZ_CONTINUE]), 1, bytes([F.EZ_EQ]))  # noqa: E731
 
 
 def ret(value):
     return (7, -1, [F.ez(value)])
 
 
+def set_flag(flag, value):
+    return (1, 11, [F.ez(flag), F.ez(value)])
+
+
 class Headstone:
     """One headstone's lamp list, read from its talk script."""
 
-    def __init__(self, esd: F.Esd, name_msg, flag):
-        self.name_msg, self.flag = name_msg, flag
+    def __init__(self, esd: F.Esd, name_msg):
+        self.name_msg = name_msg
         self.lamps = []  # (index, name message, lit flag, map, lamp, "not usable" message)
-        self.cancel = self.show = self.wait = None
         self.check_group = None
         for gid, first, count in esd.groups:
             for si in range(first, first + count):
@@ -77,11 +98,6 @@ class Headstone:
                 break
         else:
             raise ValueError('no selection state')
-        self.cancel = esd.expression(esd.conds[esd.state_conds(switch)[0]]['eval'])
-        self.show = [(b, c, esd.cmd_args(ci)) for ci in esd.commands(esd.states[switch]['entry'])
-                     for b, c, _ in [esd.cmds[ci]]]
-        self.wait = [(b, c, esd.cmd_args(ci)) for ci in esd.commands(esd.states[switch]['while'])
-                     for b, c, _ in [esd.cmds[ci]]]
         targets = {}
         for ci in esd.state_conds(switch)[1:]:
             ev = esd.expression(esd.conds[ci]['eval'])
@@ -128,11 +144,25 @@ def copy_group(src: F.Esd, gid, dst: F.Esd, new_gid):
         dst.set_target(new, ids[sid])
 
 
-def add_list_group(esd: F.Esd, gid, headstone: Headstone, items, on_pick):
-    """A list menu state group: items [(index, message, flag)], on_pick(index) -> (entry
-    commands, kind) where an int kind ends the group with that value and 'call' waits for a
-    called group (result 1: back to the list; otherwise return 0). Cancel returns 1."""
-    conds_by_state = {}
+def menu_lamps(headstones):
+    """[(headstone, [(menu index, lamp entry)])]: every lamp of the Dream's headstones, numbered
+    in list order for its MENU_LAMPS flag."""
+    out, n = [], 0
+    for hs in headstones:
+        lamps = []
+        for lamp in hs.lamps:
+            lamps.append((n, lamp))
+            n += 1
+        out.append((hs, lamps))
+    if MENU_LAMPS + n > MENU_LAMP_LIMIT:
+        raise ValueError(f'{n} lamps do not fit the menu flags')
+    return out
+
+
+def add_travel_group(esd: F.Esd, here, tabs):
+    """The state group the lamp's dialog calls: asks the port for a choice and returns 1 when
+    cancelled, 2 for the Hunter's Dream, 0 once a picked lamp went through the usable check
+    (which sets its warp flag, or shows why it cannot be used)."""
     pending = []
 
     def go(evaluator, target_sid, passes=()):
@@ -141,28 +171,29 @@ def add_list_group(esd: F.Esd, gid, headstone: Headstone, items, on_pick):
             pending.append((c, target_sid))
         return c
 
-    def nested(evaluator, target_sid):
-        return esd.add_cond(evaluator, subs=[go(TRUE, target_sid)])
-
-    states = [(0, [], [], [], [go(TRUE, 1)]),
-              (1, [(1, 20, [])], [], [], [go(TRUE, 2)]),
-              (2, [(1, 19, [F.ez(i), F.ez(m), F.ez(f)]) for i, m, f in items], [], [], [go(TRUE, 3)])]
-    switch = [go(headstone.cancel, 4)]
+    everything = [(n, lamp) for _hs, lamps in tabs for n, lamp in lamps]
+    ask = [set_flag(MENU_DONE, 0), set_flag(MENU_DREAM, 0)]
+    ask += [set_flag(MENU_LAMPS + n, 0) for n, _ in everything]
+    ask += [set_flag(MENU_LAMPS + n, 1) for n, lamp in everything if (lamp[3], lamp[4]) == here]
+    ask.append(set_flag(MENU_REQUEST, 1))
+    answer = [go(EV_FLAG_ON(MENU_DREAM), None, passes=[set_flag(MENU_DREAM, 0), ret(2)])]
     picks = []
-    for sid, (index, _m, _f) in enumerate(items, start=10):
-        switch.append(go(EV_SELECTED(index), sid))
-        entry, kind = on_pick(index)
-        if kind == 'call':
-            conds = [nested(EV_CALL_RESULT(1), 1), nested(EV_CALL_DONE, 5)]
-        else:
-            conds = [go(TRUE, None, passes=[ret(kind)])]
-        picks.append((sid, entry, conds))
-    states.append((3, headstone.show, headstone.wait, [], switch))
-    states.append((4, [], [], [], [go(TRUE, None, passes=[ret(1)])]))
-    states.append((5, [], [], [], [go(TRUE, None, passes=[ret(0)])]))
-    for s, entry, conds in picks:
-        states.append((s, entry, [], [], conds))
-    ids = esd.add_group(gid, states)
+    for n, lamp in everything:
+        if (lamp[3], lamp[4]) == here:
+            continue
+        sid = 10 + n
+        answer.append(go(EV_FLAG_ON(MENU_LAMPS + n), sid, passes=[set_flag(MENU_LAMPS + n, 0)]))
+        _index, _msg, _flag, area, number, unusable = lamp
+        check = [(6, CHECK_GROUP, [F.ez(area), F.ez(number), F.ez(unusable)])]
+        done = esd.add_cond(EV_CALL_DONE, subs=[go(TRUE, 3)])
+        picks.append((sid, check, [done]))
+    answer.append(go(TRUE, None, passes=[ret(1)]))
+    states = [(0, [], [], [], [go(TRUE, 1)]),
+              (1, ask, [], [], [go(EV_FLAG_ON(MENU_DONE), 2)]),
+              (2, [set_flag(MENU_REQUEST, 0), set_flag(MENU_DONE, 0)], [], [], answer),
+              (3, [], [], [], [go(TRUE, None, passes=[ret(0)])])]
+    states += [(sid, entry, [], [], conds) for sid, entry, conds in picks]
+    ids = esd.add_group(TRAVEL_GROUP, states)
     for c, target in pending:
         esd.set_target(c, ids[target])
 
@@ -182,8 +213,8 @@ def lamp_identity(esd: F.Esd):
     return None
 
 
-def patch_lamp(esd: F.Esd, here, headstones, check_src):
-    """Turn the lamp's "Return to the Hunter's Dream?" dialog into the travel lists."""
+def patch_lamp(esd: F.Esd, here, tabs, check_src, check_group):
+    """Turn the lamp's "Return to the Hunter's Dream?" dialog into the port's travel menu."""
     for gid, first, count in esd.groups:
         for si in range(first, first + count):
             for ci in esd.commands(esd.states[si]['entry']):
@@ -209,28 +240,14 @@ def patch_lamp(esd: F.Esd, here, headstones, check_src):
         raise ValueError('unexpected dialog conditions')
     wait = [(esd.cmds[i][0], esd.cmds[i][1], esd.cmd_args(i)) for i in esd.commands(esd.states[dialog]['while'])]
 
-    copy_group(check_src, headstones[0].check_group, esd, CHECK_GROUP)
-    regions = []
-    for k, hs in enumerate(headstones):
-        lamps = [lp for lp in hs.lamps if (lp[3], lp[4]) != here]
-        if not lamps:
-            continue
-        gid = REGION_GROUP + k
-        items = [(i + 1, msg, flag) for i, (_, msg, flag, _, _, _) in enumerate(lamps)]
-        by_index = {i + 1: lp for i, lp in enumerate(lamps)}
-        add_list_group(esd, gid, hs, items,
-                       lambda n, by=by_index: ([(6, CHECK_GROUP, [F.ez(by[n][3]), F.ez(by[n][4]), F.ez(by[n][5])])], 'call'))
-        regions.append((hs.name_msg, hs.flag, gid))
-    top = [(1, DREAM_NAME, -1)] + [(k + 2, msg, flag) for k, (msg, flag, _) in enumerate(regions)]
-    calls = {k + 2: gid for k, (_, _, gid) in enumerate(regions)}
-    add_list_group(esd, TOP_GROUP, headstones[0], top,
-                   lambda n: ([], 2) if n == 1 else ([(6, calls[n], [])], 'call'))
+    copy_group(check_src, check_group, esd, CHECK_GROUP)
+    add_travel_group(esd, here, tabs)
 
     # Result 1: cancelled; 2: Hunter's Dream (the game's own travel); otherwise a lamp was picked
     # and its warp flag set (the event script warps): the dialog ends as when cancelled.
     def nested(evaluator, target):
         return esd.add_cond(evaluator, subs=[esd.add_cond(TRUE, target=target)])
-    esd.replace_state(dialog, entry=[(6, TOP_GROUP, [])], while_=wait,
+    esd.replace_state(dialog, entry=[(6, TRAVEL_GROUP, [])], while_=wait,
                       conds=[nested(EV_CALL_RESULT(1), cancel), nested(EV_CALL_RESULT(2), ok),
                              nested(EV_CALL_DONE, cancel)])
 
@@ -252,35 +269,74 @@ def patch_common(common: F.Emevd, warps):
     template = common.event_ins(7200)  # the game's own lamp travel: multiplayer end, flag wait/clear
     if len(template) < 3 or [t[:2] for t in template[:3]] != [(1003, 6), (3, 0), (2003, 2)]:
         raise ValueError('unexpected lamp travel event 7200')
+    wait_on = template[1]
+    if wait_on[2][:4] != bytes([0, 1, 0, 0]):
+        raise ValueError('unexpected lamp travel flag wait')
     common.add_event(HANDLER_EVENT, [
         template[0],                                        # end in co-op
         (1003, 8, bytes([0, 1, 21, 0])),                   # end in the Hunter's Dream (m21_00)
-        template[1],                                        # wait for the warp flag
-        template[2],                                        # clear it
+        # A warp leaves its flag on until the destination's arrival event (common 7300) clears
+        # it, so a handler starting in that map would warp again: wait for it to be off first.
+        (wait_on[0], wait_on[1], bytes([0, 0, 0, 0]) + wait_on[2][4:]),
+        wait_on,                                            # wait for the warp flag
         (2003, 18, struct.pack('<ii', PLAYER, TRAVEL_ANIMATION) + bytes(4)),
         (1001, 0, struct.pack('<f', 4.0)),
         (2003, 49, bytes(4)),                               # respawn point warp
-    ], params=[(2, 4, 0, 4), (3, 0, 0, 4), (6, 0, 4, 4)])
+    ], params=[(2, 4, 0, 4), (3, 4, 0, 4), (6, 0, 4, 4)])
     common.append_to_event(0, [(2000, 0, struct.pack('<4i', slot, HANDLER_EVENT, flag, region))
                                for slot, (flag, region) in enumerate(warps)])
 
 
-def generate(source, out: Path):
+def menu_texts(source, language):
+    """{message id: text} of the event texts and key guide in the game language (English if
+    unavailable)."""
+    folder = MESSAGE_FOLDERS.get(language, 'engus')
+    for name in dict.fromkeys((folder, 'engus')):
+        try:
+            bnd = F.Bnd4(F.Dcx(source(f'msg/{name}/menu.msgbnd.dcx')).data)
+        except OSError:
+            continue
+        texts = {}
+        for path, data in bnd.files:
+            if path and path.replace('\\', '/').split('/')[-1].split('.')[0] in TEXT_TABLES:
+                texts.update(F.fmg_texts(data))
+        if texts:
+            return texts
+    raise ValueError('no menu texts')
+
+
+def write_menu(path: Path, tabs, texts):
+    """The port's menu: tab lines (headstone name) followed by their lamps (menu flag, lit flag,
+    name). Tab separated, UTF-8."""
+    def text(msg):
+        return texts.get(msg, '').replace('\t', ' ').replace('\n', ' ').strip()
+    lines = [f'dream\t{text(DREAM_NAME)}', f'keys\t{text(KEY_SELECT)}\t{text(KEY_RETURN)}']
+    for hs, lamps in tabs:
+        lines.append(f'headstone\t{text(hs.name_msg)}')
+        for n, (_index, msg, lit, _area, _lamp, _unusable) in lamps:
+            lines.append(f'lamp\t{MENU_LAMPS + n}\t{lit}\t{text(msg)}')
+    lines.append(f'flags\t{MENU_REQUEST}\t{MENU_DONE}\t{MENU_DREAM}')
+    path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+
+def generate(source, out: Path, language=1):
     """source(relative path) -> bytes of the file in effect (mods included). Writes the layer
-    under out/dvdroot_ps4 and returns the number of lamps changed."""
+    under out/dvdroot_ps4 and the menu to out/lamp_menu.txt; returns the number of lamps changed."""
     dream_talk = F.Bnd4(F.Dcx(source(DREAM_TALK)).data)
-    headstones, check_src = [], None
-    for name, msg, flag in HEADSTONES:
+    headstones, check_src, check_group = [], None, None
+    for name, msg in HEADSTONES:
         i = dream_talk.find(name)
         if i is None:
             continue
         esd = F.Esd(dream_talk.files[i][1])
-        headstones.append(Headstone(esd, msg, flag))
+        headstones.append(Headstone(esd, msg))
         if check_src is None:
-            check_src = esd
+            check_src, check_group = esd, headstones[-1].check_group
     if not headstones:
         raise ValueError('no headstones in the Hunter\'s Dream talk scripts')
+    tabs = menu_lamps(headstones)
     warps = destinations(F.Emevd(F.Dcx(source(DREAM_EVENTS)).data))
+    texts = menu_texts(source, language)
 
     root = out / 'dvdroot_ps4'
     lamps = 0
@@ -295,7 +351,7 @@ def generate(source, out: Path):
             here = lamp_identity(esd)
             if here is None:
                 continue
-            patch_lamp(esd, here, headstones, check_src)
+            patch_lamp(esd, here, tabs, check_src, check_group)
             entry[1] = esd.write()
             changed = True
             lamps += 1
@@ -307,6 +363,7 @@ def generate(source, out: Path):
     patch_common(common, warps)
     (root / COMMON_EVENTS).parent.mkdir(parents=True, exist_ok=True)
     (root / COMMON_EVENTS).write_bytes(common_dcx.write(common.write()))
+    write_menu(out / MENU_FILE, tabs, texts)  # last: its presence means the layer is complete
     return lamps
 
 
@@ -330,12 +387,19 @@ class GameFiles:
         return sorted(f'script/talk/{n}' for n in names)
 
 
+def game_language():
+    try:
+        return int(os.environ.get('BB_LANGUAGE', '1'))
+    except ValueError:
+        return 1
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('game', type=Path)
     parser.add_argument('--out', type=Path, required=True)
     args = parser.parse_args()
-    print(f'Lamp travel: {generate(GameFiles(args.game), args.out)} lamps')
+    print(f'Lamp travel: {generate(GameFiles(args.game), args.out, game_language())} lamps')
 
 
 if __name__ == '__main__':
