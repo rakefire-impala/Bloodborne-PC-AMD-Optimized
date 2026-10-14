@@ -166,6 +166,8 @@ def main():
         env['BB_LAMP_MENU'] = str(lamp_menu.resolve())
     else:
         env.pop('BB_LAMP_MENU', None)
+    # Safe menu (src/runtime_pause.c): the start menu stops enemies and projectiles.
+    env['BB_SAFE_MENU'] = env.get('BB_SAFE_MENU') or ini_value(config, 'qol_safe_menu') or '0'
     mod_view = game if game.resolve() != original_game else None
     try:
         run_script('prepare.py', game, '--out', out)

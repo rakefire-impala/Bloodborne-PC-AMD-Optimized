@@ -53,12 +53,31 @@ would then wait for a menu that never opens (turn the option off in that case). 
 the formats involved (DCX, BND4, talk and event scripts); `tests/test_fsformats.py` and
 `tests/test_lamp_travel.py` check them against the game files (`BB_GAME_DIR`).
 
+## Enemies stop while the start menu is open ("safe menu")
+
+`qol_safe_menu=1` in `bbport.ini` (or `BB_SAFE_MENU=1`). While the start menu is open (any of its
+pages: inventory, equipment, status, ...), enemies and their projectiles stand still until it
+closes; the menus and items work as usual (using an item closes the menu, as in the game). Single
+player only: as host, while joining or as a guest, nothing pauses.
+
+- Enemies get the game's own debug freeze ("Switch All No Update"): bit `0x400` of each
+  character's debug flags (`ChrIns +0x3b0 -> +0x20`, word `+0x200`), on every character set but the
+  last two, which hold the players. Only characters frozen by the port are thawed.
+- Projectiles: three calls return at once while paused: `SprjBulletManager`'s step (spawn
+  requests, each bullet's update and flight), the attack manager's update (lifetime and hits of
+  bullets and attacks) and `SprjBulletManager`'s update (creation phases, emitters). A projectile
+  fired just as the menu opens hangs in the air and resumes its flight once the menu closes: it
+  can neither hit you while you are in the menu nor be dodged by opening it.
+- The player is not made invulnerable: falls, poison and other harm not caused by enemies keep the
+  game's behaviour, so opening the menu cannot be used to escape them.
+
+`src/runtime_pause.c` checks the 1.09 executable byte for byte before hooking (the menu state at
+menu manager `+0x54` = 2, `SprjSessionManager +0x124` for IsHost/IsTryJoinSession/IsClient, and
+the code it relies on); otherwise it logs `Safe menu: executable/version guard failed` and the
+menu does not pause.
+
 ## Planned, not implemented yet
 
-- **Pause while the start menu is open ("safe menu")**: enemies frozen, no damage, inventory usable.
-  Groundwork in the 2026-10-13 handoff: the menu manager object at image `0x5562878`, the start tab
-  dialog update at `0x16ac710`, `WorldChrManDbg` flags at `0x553e888+` (player no-dead `+0`,
-  stealth `+6`, silent `+7`; the "all no move/attack/damage" bytes are still to be identified).
 - **Jump on Cross/A**: an automatic dash (hold Circle) then L3 (the game's only jump, `W_Jump`,
   behaviour event 1142), with item pickups and other prompts taking priority
   (`SprjActionButtonMan`, global `0x5540048`) and nothing in menus.

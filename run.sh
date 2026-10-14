@@ -50,6 +50,8 @@ if [[ $lamp_travel == 1 && -f $out/qol-lamp-travel/lamp_menu.txt ]]; then
 else
     unset BB_LAMP_MENU
 fi
+# Safe menu (src/runtime_pause.c): the start menu stops enemies and projectiles.
+export BB_SAFE_MENU=${BB_SAFE_MENU:-$(sed -n 's/^qol_safe_menu=//p' "$BB_CONFIG" 2>/dev/null | tail -n1 | grep . || echo 0)}
 # A private merged view lasts for this launch, including restarts. Cleanup only our own view.
 if [[ $game != "$(realpath "$original_game")" ]]; then
     mod_game=$game

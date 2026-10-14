@@ -84,6 +84,10 @@ void runtime_discord_note_open(const char *path);
 /* Lamp travel menu (runtime_lamp.c): checks the executable and BB_LAMP_MENU; polled by the pad. */
 void runtime_lamp_install(void *image, size_t size, const char *app_version);
 void runtime_lamp_poll(void);
+/* Safe menu (runtime_pause.c): BB_SAFE_MENU=1 stops enemies and projectiles while the start menu
+ * is open; checks the executable, polled by the pad. */
+void runtime_pause_install(void *image, size_t size, const char *app_version);
+void runtime_pause_poll(void);
 uintptr_t runtime_pad_resolve(const char *name);
 void runtime_pad_report(void);
 uintptr_t runtime_rtc_resolve(const char *name);
