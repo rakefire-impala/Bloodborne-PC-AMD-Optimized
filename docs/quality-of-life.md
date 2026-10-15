@@ -53,12 +53,13 @@ would then wait for a menu that never opens (turn the option off in that case). 
 the formats involved (DCX, BND4, talk and event scripts); `tests/test_fsformats.py` and
 `tests/test_lamp_travel.py` check them against the game files (`BB_GAME_DIR`).
 
-## Enemies stop while the start menu is open ("safe menu")
+## The world pauses while the start menu is open ("safe menu")
 
 `qol_safe_menu=1` in `bbport.ini` (or `BB_SAFE_MENU=1`). While the start menu is open (any of its
-pages: inventory, equipment, status, ...), enemies and their projectiles stand still until it
-closes; the menus and items work as usual (using an item closes the menu, as in the game). Single
-player only: as host, while joining or as a guest, nothing pauses.
+pages: inventory, equipment, status, ...), enemies, their projectiles, the world's sounds and its
+effects (fire, fog, ...) stand still until it closes; the menus, their sounds and items work as
+usual (using an item closes the menu, as in the game). Single player only: as host, while joining
+or as a guest, nothing pauses.
 
 - Enemies get the game's own debug freeze ("Switch All No Update"): bit `0x400` of each
   character's debug flags (`ChrIns +0x3b0 -> +0x20`, word `+0x200`), on every character set but the
@@ -68,6 +69,12 @@ player only: as host, while joining or as a guest, nothing pauses.
   bullets and attacks) and `SprjBulletManager`'s update (creation phases, emitters). A projectile
   fired just as the menu opens hangs in the air and resumes its flight once the menu closes: it
   can neither hit you while you are in the menu nor be dodged by opening it.
+- Sounds (FMOD Ex, run on its own thread): at the start of `EventSystemI::update` the event
+  channel groups playing under each category are paused, and resumed when the menu closes. Whole
+  categories are not paused: the menu's sounds share "SE" with the world's, so sounds started
+  while the menu is open (the menu's) play. A reverb tail fades out over about a second.
+- Effects: the graphics scene's update has an unused switch (scene `+0x5ce`) that gives the
+  particle effects and the rest of its updates no time; they are drawn as they are.
 - The player is not made invulnerable: falls, poison and other harm not caused by enemies keep the
   game's behaviour, so opening the menu cannot be used to escape them.
 

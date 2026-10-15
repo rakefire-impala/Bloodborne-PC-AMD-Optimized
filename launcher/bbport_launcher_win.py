@@ -172,7 +172,7 @@ QOL = [
     ('skip_intro', ('Skip the intro logos and movie', 'Пропуск заставок при запуске'), False),
     ('qol_lamp_travel', ('Travel from any lamp to any other lamp', 'Путешествие от любого фонаря к любому другому'),
      False),
-    ('qol_safe_menu', ('Enemies stop while the start menu is open', 'Враги замирают, пока открыто меню'), False),
+    ('qol_safe_menu', ('The world pauses while the start menu is open', 'Мир замирает, пока открыто меню'), False),
 ]
 INI_FLAGS = {'sharpen', 'object_motion', 'show_fps', *(k for k, _t, _o in EFFECTS + EXTRAS + QOL + CHEATS + TWEAKS)}
 INI_DEFAULTS = {'upscaler': 'fsr4', 'preset': '1', 'sharpen': '1', 'sharpness': '0.50',
@@ -1682,13 +1682,14 @@ class Launcher:
                                  'У фонаря меню путешествия показывает Сон охотника и все надгробия: выберите '
                                  'зажжённый фонарь, чтобы отправиться прямо туда. Только в одиночной игре. '
                                  'Создаётся из ваших файлов игры при запуске.'),
-            'qol_safe_menu': _('Opening the start menu freezes enemies and their projectiles until you close it; '
+            'qol_safe_menu': _('Opening the start menu freezes enemies, their projectiles, the world\'s sounds and '
+                               'effects such as fire and fog until you close it; the menu keeps its sounds, and '
                                'inventory, equipment and items work as usual. Single player only (co-op is never '
                                'paused). Falls, poison and other harm not caused by enemies are not paused.',
-                               'Открытое стартовое меню останавливает врагов и их снаряды, пока вы его не закроете; '
-                               'инвентарь, снаряжение и предметы работают как обычно. Только в одиночной игре '
-                               '(кооператив не ставится на паузу). Падения, яд и прочий вред не от врагов не '
-                               'останавливаются.'),
+                               'Открытое стартовое меню останавливает врагов, их снаряды, звуки мира и эффекты вроде '
+                               'огня и тумана, пока вы его не закроете; звуки меню остаются, инвентарь, снаряжение и '
+                               'предметы работают как обычно. Только в одиночной игре (кооператив не ставится на '
+                               'паузу). Падения, яд и прочий вред не от врагов не останавливаются.'),
         }
         for key, title, _on in QOL:
             self.check(f, key, 'ini', _(*title), hints.get(key))

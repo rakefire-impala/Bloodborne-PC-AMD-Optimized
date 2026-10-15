@@ -50,7 +50,7 @@ inline constexpr Effect Effects[] = {
     {"skip_intro", "Пропуск заставок при запуске", "Skip startup intros", false},
     // Quality of life (launcher), read by run.sh/run.py at start; listed so a save keeps them.
     {"qol_lamp_travel", "Путешествие между фонарями", "Travel between lamps", false},
-    {"qol_safe_menu", "Враги замирают в меню", "Enemies stop in the start menu", false},
+    {"qol_safe_menu", "Мир замирает в меню", "World pauses in the start menu", false},
     {"debug_camera", "Свободная камера (Cross + L3)", "Free camera (Cross + L3)", false},
     {"debug_menu", "Debug menu (нужны файлы шрифтов)", "Debug menu (requires font files)", false},
     {"cheat_no_death", "Чит: бессмертие (не ниже 1 HP)", "Cheat: never die (at least 1 HP)", false},
