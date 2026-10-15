@@ -43,7 +43,7 @@ PATCH_VERSION = '01.09'
 MAX_LOG_LINES = 6000
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 # Fork releases use windows-v<upstream version>-tatsunakyo.<revision>.
-VERSION = '1.0-rakefireimpala'
+VERSION = '1.3'
 # The updater reads TatsunaKyo's releases, whose versions compare higher than this fork's:
 # off until this fork publishes its own (then point RELEASES_* and the tag pattern at it).
 UPDATES_ENABLED = False
@@ -733,23 +733,23 @@ class Launcher:
     SACRIFICES = [
         ('0', False, ('Forsake the haze',
                       'GPU Readbacks set to Off (recommended): depth of field and motion blur off.\n'
-                      'You lack blur but maintain performance, efficiency, and practicality. '
+                      'You maintain performance, efficiency, and practicality. '
                       'However, the dream will lose its blur...',
                       'Отречься от дымки',
                       'Чтение GPU выключено (рекомендуется): глубина резкости и размытие выкл.\n'
-                      'Без размытия, но с производительностью, экономичностью и практичностью. '
+                      'Вы сохраняете производительность, экономичностью и практичностью. '
                       'Однако сон потеряет своё размытие...')),
-        ('', None, ('Walk the slow path',
-                    'GPU Readbacks set to Relaxed: No smears, and the haze stays... '
-                    'but still a good deal slower. Patience, hunter.',
+        ('', True, ('Walk the slow path',
+                    'GPU Readbacks set to On: depth of field and motion blur also on.\n'
+                    'No texture smears, and the haze stays, but still a good deal slower. Patience, hunter.',
                     'Идти медленным путём',
-                    'Чтение GPU в режиме Relaxed: без размазывания, и дымка остаётся... '
-                    'но всё же заметно медленнее. Терпение, охотник.')),
+                    'Чтение GPU включено: глубина резкости и размытие тоже включены.\n'
+                    'Без размазывания текстур, и дымка остаётся, но всё же заметно медленнее. Терпение, охотник.')),
         ('0', True, ('Embrace the Nightmare',
-                     'GPU Readbacks set to Off (not recommended): depth of field and motion blur are On.\n'
+                     'GPU Readbacks set to Off: depth of field and motion blur on (not recommended).\n'
                      'Swift, and the haze stays, but the textures will surely smear, Hunter.',
                      'Принять Кошмар',
-                     'Чтение GPU выключено (не рекомендуется): глубина резкости и размытие вкл.\n'
+                     'Чтение GPU выключено: глубина резкости и размытие включены (не рекомендуется).\n'
                      'Быстро, и дымка остаётся, но текстуры непременно будут размазываться, охотник.')),
     ]
 
@@ -767,11 +767,9 @@ class Launcher:
         tk.Label(frame, text=_('Good hunter, a sacrifice is required.', 'Добрый охотник, требуется жертва.'),
                  bg=PANEL, fg=GOLD, font=('Georgia', 15)).pack(anchor='w')
         tk.Label(frame, text=_(
-            'Your vessel is lean. To keep it whole in the dream, you must give up one of three things: '
-            'swiftness, the haze of depth and motion, or textures free of smearing.\n\n\n'
+            'Your vessel is lean. To keep it whole in the dream, you must give up one of three things.\n\n'
             'Choose your offering. You may change it later under GPU readbacks and Game effects.',
-            'Ваш сосуд скуден. Чтобы сохранить его во сне, придётся отдать одно из трёх: '
-            'скорость, дымку глубины и движения или текстуры без размазывания.\n\n\n'
+            'Ваш сосуд скуден. Чтобы сохранить его во сне, придётся отдать одно из трёх.\n\n'
             'Выберите подношение. Позже его можно изменить в «Чтение данных GPU» и эффектах игры.'),
             bg=PANEL, fg=TEXT, font=('Segoe UI', 10), justify='left',
             wraplength=self.px(520)).pack(anchor='w', pady=(self.px(8), self.px(12)))
@@ -1234,7 +1232,7 @@ class Launcher:
         tk.Frame(side, bg=LINE, height=1).pack(fill='x', padx=self.px(18), pady=(0, self.px(6)))
         self.nav, self.current_page = {}, None
         for name, title in (('play', _('Play', 'Играть')), ('graphics', _('Graphics', 'Графика')),
-                            ('display', _('Display & FPS', 'Экран и FPS')), ('game', _('Game & effects', 'Игра и эффекты')),
+                            ('display', _('Display & FPS', 'Экран и FPS')), ('game', _('Game effects', 'Игра и эффекты')),
                             ('qol', _('Quality of Life', 'Удобство')), ('cheats', _('Cheats', 'Читы')), ('online', _('Online co-op', 'Онлайн-кооператив')),
                             ('mods', _('Mods & patches', 'Моды и патчи')),
                             ('advanced', _('Advanced', 'Дополнительно')),
@@ -1452,7 +1450,7 @@ class Launcher:
         c.create_line(x, h-self.px(29), w-self.px(26), h-self.px(29), fill=LINE)
         info = game_info(self.var('game_dir', 'app').get())
         sub = (_('Game version {} · ready', 'Версия игры {} · готова').format(info[1]) if info
-               else _('Choose your game folder in Game & effects', 'Выберите папку игры в «Игра и эффекты»'))
+               else _('Choose your game folder in Game effects', 'Выберите папку игры в «Игра и эффекты»'))
         c.create_text(x, h-self.px(15), text=sub, anchor='w', fill=TEXT,
                       font=('Segoe UI', 9), tags='workshop-type')
 
@@ -1645,7 +1643,7 @@ class Launcher:
                     var.set(value == '1' if key in MENU_FLAGS else value)
 
     def build_game(self):
-        f = self.scrolled_page('game', _('Game & effects', 'Игра и эффекты'),
+        f = self.scrolled_page('game', _('Game effects', 'Игра и эффекты'),
                                _('Your game dump, saves and the game patches.', 'Дамп игры, сохранения и патчи игры.'))
         self.section(f, _('Game', 'Игра'), top=4)
         self.folder(f, 'game_dir', _('Game folder', 'Папка игры'),
@@ -1886,7 +1884,7 @@ class Launcher:
     def refresh_status(self):
         info = game_info(self.var('game_dir', 'app').get())
         if not info:
-            game = _('✗ No eboot.bin in the game folder (Game & effects)', '✗ В папке игры нет eboot.bin («Игра и эффекты»)')
+            game = _('✗ No eboot.bin in the game folder (Game effects)', '✗ В папке игры нет eboot.bin («Игра и эффекты»)')
         elif info[1] == PATCH_VERSION:
             game = _('✓ Game version {}: every patch available', '✓ Версия игры {}: доступны все патчи').format(info[1])
         else:

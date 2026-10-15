@@ -4,13 +4,13 @@ texts in the same order. Russian lives next to the English text in bbport_launch
 Missing or empty entries fall back to English."""
 
 KEYS = [
-    'Play', 'Graphics', 'Display & FPS', 'Game & effects', 'Mods & patches', 'Advanced', 'Log',
+    'Play', 'Graphics', 'Display & FPS', 'Game effects', 'Mods & patches', 'Advanced', 'Log',
     'PLAY', 'Stop', 'native port · Windows', "In the game: Insert or L3+R3\nopens the port's menu.",
     'Ready check', 'Quick settings', 'Frame rate', 'Upscaler', 'Preset', 'Output', 'Fullscreen',
-    'CUSA03173 · game version {}', 'Game folder not set', 'Choose your game folder (Game & effects)',
+    'CUSA03173 · game version {}', 'Game folder not set', 'Choose your game folder (Game effects)',
     '✓ Game version {}: every patch available',
     '⚠ Game version {}: runs at 30 FPS without the community patches (they are for 1.09)',
-    '✗ No eboot.bin in the game folder (Game & effects)',
+    '✗ No eboot.bin in the game folder (Game effects)',
     '✓ Saves found in {}', '• No saves yet: the game creates them in {}',
     '✓ Graphics card: {}', '• Graphics card: not checked', '• Checking the graphics card…',
     '✗ No Vulkan 1.3 graphics card found (update the driver)',
