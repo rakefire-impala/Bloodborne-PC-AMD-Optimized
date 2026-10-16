@@ -440,9 +440,11 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
             PrintIssues("create info", issues);
             return false;
         }
-        if (ffxVkPortableUpscaleContextCreate(&device_info, &create_info, &context) !=
-            FFX_VK_PORTABLE_OK) {
-            std::printf("Upscaler: FSR 3 context creation failed\n");
+        if (const auto result =
+                ffxVkPortableUpscaleContextCreate(&device_info, &create_info, &context);
+            result != FFX_VK_PORTABLE_OK) {
+            std::printf("Upscaler: FSR 3 context creation failed (%d) for %ux%u -> %ux%u; %s\n",
+                        int(result), w, h, ow, oh, instance.DescribeMemory().c_str());
             context = nullptr;
             return false;
         }

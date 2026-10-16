@@ -77,8 +77,15 @@ static void EmitVertexMotion(EmitContext& ctx) {
                                            ctx.push_data_block,
                                            ctx.ConstU32(PushData::MotionParamIndex));
     const Id param_index = ctx.OpLoad(u32_type, param_ptr);
+    // AMD's Windows driver miscompiles vertex-shader loads through a pointer whose 64-bit base
+    // is a compile-time constant: it reads the wrong address (GPU page fault, device lost) once
+    // the buffer lies above 4 GiB. Parameter indices are far below 2^31, so this is a zero the
+    // compiler cannot fold, keeping the base a runtime value.
+    const Id runtime_zero = ctx.OpUConvert(
+        ctx.U64, ctx.OpShiftRightLogical(u32_type, param_index, ctx.ConstU32(31u)));
     const auto address = [&](u64 base, Id index, u32 stride) {
-        return ctx.OpIAdd(ctx.U64, ctx.Constant(ctx.U64, base),
+        return ctx.OpIAdd(ctx.U64,
+                          ctx.OpIAdd(ctx.U64, ctx.Constant(ctx.U64, base), runtime_zero),
                           ctx.OpIMul(ctx.U64, ctx.OpUConvert(ctx.U64, index),
                                      ctx.Constant(ctx.U64, u64(stride))));
     };

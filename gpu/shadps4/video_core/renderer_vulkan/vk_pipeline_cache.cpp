@@ -654,6 +654,16 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
 
     if (sel.motion) {
         constexpr u32 mv = Shader::MotionVectors::Output;
+        // Slots between the shader's targets and the motion slot: the first pass may have
+        // filled them from bound guest targets the shader does not write, and the second
+        // pass stopped before them. The rasterizer leaves them unbound, so the pipeline must
+        // not declare a format or write mask there (VUID-vkCmdDrawIndexed-08912).
+        for (u32 cb = key.num_color_attachments; cb < mv; ++cb) {
+            std::memset(&key.color_buffers[cb], 0, sizeof(Shader::PsColorBuffer));
+            key.write_masks[cb] = {};
+            key.blend_controls[cb] = {};
+            key.color_samples[cb] = 0;
+        }
         key.motion_vectors = 1;
         key.mrt_mask |= 1u << mv;
         key.num_color_attachments = mv + 1;
