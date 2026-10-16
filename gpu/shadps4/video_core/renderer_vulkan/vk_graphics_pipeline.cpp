@@ -422,8 +422,11 @@ GraphicsPipeline::GraphicsPipeline(
 
     auto [pipeline_result, pipe] =
         device.createGraphicsPipelineUnique(pipeline_cache, pipeline_info);
-    ASSERT_MSG(pipeline_result == vk::Result::eSuccess, "Failed to create graphics pipeline: {}",
-               vk::to_string(pipeline_result));
+    ASSERT_MSG(pipeline_result == vk::Result::eSuccess,
+               "Failed to create graphics pipeline: {} ({}, motion {}, {} color attachments, "
+               "mrt mask {:#x}, preloaded {})",
+               vk::to_string(pipeline_result), debug_str, u32(key.motion_vectors),
+               u32(key.num_color_attachments), u32(key.mrt_mask), preloading);
     pipeline = std::move(pipe);
     SetObjectName(device, *pipeline, "Graphics Pipeline {}", debug_str);
 }

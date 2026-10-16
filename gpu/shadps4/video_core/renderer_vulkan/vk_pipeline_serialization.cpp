@@ -220,6 +220,13 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
     GraphicsPipeline::SerializationSupport sdata{};
     sdata.Deserialize(ar);
 
+    // Motion vertex shaders are never loaded from the cache (LoadShaderMeta), so a motion key
+    // would be built with another vertex permutation that lacks the motion varyings, and
+    // AMD's driver refuses that pipeline. They compile at runtime when object motion is on.
+    if (sel.graphics_key.motion_vectors) {
+        return false;
+    }
+
     for (int stage_idx = 0; stage_idx < MaxShaderStages; ++stage_idx) {
         const auto& hash = sel.graphics_key.stage_hashes[stage_idx];
         if (!hash) {
