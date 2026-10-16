@@ -209,6 +209,18 @@ private:
 
     void DescribeStaleUpload(VAddr device_addr, u32 size, bool is_written, bool is_texel_buffer);
 
+    /// bbport: readbacks Off. A guest write into a 4 KiB page that also holds GPU-written bytes
+    /// keeps a copy of the page as it was before the write (a twin); the page's upload then
+    /// sends the bytes the CPU changed and leaves the GPU's own bytes alone (they were uploaded
+    /// whole, stale guest bytes over live GPU data: exposure values, counters, simulation state).
+    void TwinGpuPages(VAddr address, u64 size);
+    /// Uploads [address, address + size) through `upload`, merging twinned pages; returns the
+    /// pages that still hold GPU-written bytes afterwards.
+    template <typename Upload>
+    void UploadWithTwins(VAddr address, u64 size, Upload&& upload,
+                         boost::container::small_vector<VAddr, 4>& kept_pages);
+    void DropTwins(VAddr address, u64 size);
+
     const Buffer* UploadCopies(const Buffer* arena, std::span<vk::BufferCopy> copies,
                                size_t total_size_bytes);
 
@@ -236,6 +248,19 @@ private:
     StreamBuffer stream_buffer;
     Buffer gds_buffer;
     RangeSet gpu_modified_ranges;
+
+    // bbport: twins of guest pages (TwinGpuPages), a fixed pool: taken in the write fault
+    // handler, so it never allocates; pages beyond it upload whole as before.
+    static constexpr u64 TwinPageSize = 4096;
+    static constexpr size_t MaxTwins = 1024;
+    struct Twin {
+        VAddr page = 0; ///< 0: free
+        std::array<u8, TwinPageSize> bytes;
+    };
+    std::mutex twin_mutex;
+    std::unique_ptr<std::array<Twin, MaxTwins>> twins;
+    size_t twin_high_water = 0;          ///< slots in use are below it
+    std::atomic<u32> twin_count{0};
 
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;

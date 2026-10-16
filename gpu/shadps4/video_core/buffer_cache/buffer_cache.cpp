@@ -63,6 +63,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
       stream_buffer{instance, scheduler, MemoryType::Stream, STREAM_BUFFER_SIZE},
       gds_buffer{instance, 0, GDS_BUFFER_SIZE, MemoryType::Stream, "GDS Buffer"},
       memory_semaphore{instance} {
+    twins = std::make_unique<std::array<Twin, MaxTwins>>();
     while (arena_page_bits > MIN_ARENA_PAGE_BITS &&
            (u64{2} << arena_page_bits) > instance.GetMaxBufferSize()) {
         --arena_page_bits;
@@ -158,16 +159,157 @@ BufferCache::~BufferCache() {
 }
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
-    memory_tracker->InvalidateRegion(device_addr, size, false,
-                                     [this, device_addr, size, assume_locks] {
-                                         ReadMemory(device_addr, size, true, assume_locks);
-                                     });
+    memory_tracker->InvalidateRegion(
+        device_addr, size, false,
+        [this, device_addr, size, assume_locks] {
+            ReadMemory(device_addr, size, true, assume_locks);
+        },
+        [this](VAddr address, u64 bytes) { TwinGpuPages(address, bytes); });
 }
 
 void BufferCache::UnmapMemory(VAddr device_addr, u64 size) {
-    memory_tracker->InvalidateRegion(device_addr, size, true, [this, device_addr, size] {
-        ReadMemory(device_addr, size, true);
-    });
+    DropTwins(device_addr, size);
+    memory_tracker->InvalidateRegion(
+        device_addr, size, true, [this, device_addr, size] { ReadMemory(device_addr, size, true); },
+        [](VAddr, u64) {});
+}
+
+void BufferCache::TwinGpuPages(VAddr address, u64 size) {
+    if (BbToggle::Disabled(BbToggle::UploadTwins)) {
+        return;
+    }
+    std::scoped_lock lk{twin_mutex};
+    for (VAddr page = Common::AlignDown(address, TwinPageSize); page < address + size;
+         page += TwinPageSize) {
+        size_t free_slot = MaxTwins;
+        bool present = false;
+        for (size_t i = 0; i < twin_high_water; ++i) {
+            const VAddr slot_page = (*twins)[i].page;
+            if (slot_page == page) {
+                present = true; // the first write since the last upload took it
+                break;
+            }
+            if (slot_page == 0 && free_slot == MaxTwins) {
+                free_slot = i;
+            }
+        }
+        if (present) {
+            continue;
+        }
+        if (free_slot == MaxTwins) {
+            if (twin_high_water == MaxTwins) {
+                continue; // pool full: this page uploads whole, as without twins
+            }
+            free_slot = twin_high_water++;
+        }
+        Twin& twin = (*twins)[free_slot];
+        twin.page = page;
+        std::memcpy(twin.bytes.data(), reinterpret_cast<const void*>(page), TwinPageSize);
+        twin_count.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void BufferCache::DropTwins(VAddr address, u64 size) {
+    if (twin_count.load(std::memory_order_relaxed) == 0) {
+        return;
+    }
+    std::scoped_lock lk{twin_mutex};
+    for (size_t i = 0; i < twin_high_water; ++i) {
+        Twin& twin = (*twins)[i];
+        if (twin.page != 0 && twin.page + TwinPageSize > address && twin.page < address + size) {
+            twin.page = 0;
+            twin_count.fetch_sub(1, std::memory_order_relaxed);
+        }
+    }
+}
+
+template <typename Upload>
+void BufferCache::UploadWithTwins(VAddr address, u64 size, Upload&& upload,
+                                  boost::container::small_vector<VAddr, 4>& kept_pages) {
+    const VAddr end = address + size;
+    VAddr run_start = address;
+    std::array<u8, TwinPageSize> before;
+    for (VAddr page = Common::AlignDown(address, TwinPageSize); page < end;
+         page += TwinPageSize) {
+        bool twinned = false;
+        {
+            std::scoped_lock lk{twin_mutex};
+            for (size_t i = 0; i < twin_high_water; ++i) {
+                Twin& twin = (*twins)[i];
+                if (twin.page == page) {
+                    before = twin.bytes;
+                    twin.page = 0;
+                    twin_count.fetch_sub(1, std::memory_order_relaxed);
+                    twinned = true;
+                    break;
+                }
+            }
+        }
+        if (!twinned || page < address || page + TwinPageSize > end) {
+            continue; // uploaded with its run (partial pages never come from page tracking)
+        }
+        // GPU-written bytes of the page (written bindings since its last whole upload).
+        boost::container::small_vector<std::pair<VAddr, VAddr>, 8> gpu_runs;
+        gpu_modified_ranges.ForEachInRange(page, TwinPageSize, [&](VAddr start, VAddr stop) {
+            gpu_runs.emplace_back(start, stop);
+        });
+        if (gpu_runs.empty()) {
+            continue;
+        }
+        // Compared in 4-byte words: a word the CPU changed is uploaded whole.
+        const auto* now = reinterpret_cast<const u8*>(page);
+        const auto changed = [&](u64 offset) {
+            return std::memcmp(now + offset, before.data() + offset, 4) != 0;
+        };
+        u64 gpu_bytes = 0, changed_bytes = 0;
+        for (const auto& [start, stop] : gpu_runs) {
+            gpu_bytes += stop - start;
+            for (u64 offset = Common::AlignDown(start - page, 4); page + offset < stop; offset += 4) {
+                changed_bytes += changed(offset) ? 4 : 0;
+            }
+        }
+        // Most of the GPU's bytes rewritten: a new occupant (a texture loaded over an old GPU
+        // buffer). The whole page is the guest's; coinciding bytes must not keep GPU data.
+        if (changed_bytes * 2 >= gpu_bytes) {
+            continue;
+        }
+        if (page > run_start) {
+            upload(run_start, page - run_start);
+        }
+        VAddr cursor = page;
+        for (const auto& [start, stop] : gpu_runs) {
+            const VAddr first_word = page + Common::AlignDown(start - page, 4);
+            if (first_word > cursor) {
+                upload(cursor, first_word - cursor);
+            }
+            VAddr changed_start = 0;
+            VAddr word = first_word;
+            for (; word < stop; word += 4) {
+                if (changed(word - page)) {
+                    changed_start = changed_start ? changed_start : word;
+                } else if (changed_start) {
+                    upload(changed_start, word - changed_start);
+                    changed_start = 0;
+                }
+            }
+            if (changed_start) {
+                upload(changed_start, word - changed_start);
+            }
+            cursor = std::max(cursor, word);
+        }
+        if (cursor < page + TwinPageSize) {
+            upload(cursor, page + TwinPageSize - cursor);
+        }
+        if (ReadbackAudit::Enabled()) {
+            ReadbackAudit::Record(ReadbackAudit::Kind::Kept,
+                                  {{page, gpu_bytes - std::min(gpu_bytes, changed_bytes)}});
+        }
+        kept_pages.push_back(page);
+        run_start = page + TwinPageSize;
+    }
+    if (end > run_start) {
+        upload(run_start, end - run_start);
+    }
 }
 
 // bbport: the game fills its per-frame buffers (constants, skinning output) sequentially and
@@ -1543,19 +1685,30 @@ bool BufferCache::SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 
     boost::container::small_vector<vk::BufferCopy, 4> copies;
     size_t total_size_bytes{};
     const Buffer* src_buffer{};
+    boost::container::small_vector<VAddr, 4> kept_pages;
     memory_tracker->ForEachUploadRange(
         device_addr, size, is_written,
         [&](u64 addr, u64 size) {
-            copies.emplace_back(total_size_bytes, addr, size);
-            total_size_bytes += size;
-            if (!promotions.empty()) {
-                CancelPromotions(addr, size);
+            const auto upload = [&](VAddr piece, u64 piece_size) {
+                copies.emplace_back(total_size_bytes, piece, piece_size);
+                total_size_bytes += piece_size;
+                if (!promotions.empty()) {
+                    CancelPromotions(piece, piece_size);
+                }
+                // Uploaded: no GPU-written bytes left there (RegionManager cleared the pages'
+                // GPU bits too; pages with GPU bytes left get theirs back below).
+                gpu_modified_ranges.Subtract(piece, piece_size);
+            };
+            if (twin_count.load(std::memory_order_relaxed) != 0) {
+                UploadWithTwins(addr, size, upload, kept_pages);
+            } else {
+                upload(addr, size);
             }
-            // Uploaded whole: no GPU-written bytes left in these pages (RegionManager cleared
-            // their GPU bits too).
-            gpu_modified_ranges.Subtract(addr, size);
         },
         [&] { src_buffer = UploadCopies(arena, copies, total_size_bytes); });
+    for (const VAddr page : kept_pages) {
+        memory_tracker->MarkRegionAsGpuModified(page, TwinPageSize);
+    }
     if (ReadbackAudit::Enabled() && !ReadbackAudit::LastStale().empty() &&
         ReadbackAudit::MayDescribe()) {
         DescribeStaleUpload(device_addr, size, is_written, is_texel_buffer);

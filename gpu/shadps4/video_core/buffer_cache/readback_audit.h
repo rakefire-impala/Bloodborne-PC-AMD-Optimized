@@ -24,8 +24,10 @@
 
 namespace VideoCore::ReadbackAudit {
 
-enum class Kind { Write, Unmap, StaleUpload };
-constexpr size_t NumKinds = 3;
+/// Kept: of those stale uploads, merged ones (BufferCache::TwinGpuPages) that left the
+/// GPU-written bytes the CPU did not change in place; their bytes are the bytes kept.
+enum class Kind { Write, Unmap, StaleUpload, Kept };
+constexpr size_t NumKinds = 4;
 
 /// Guest ranges (address, bytes), collected under a region lock and recorded after it.
 using Ranges = std::vector<std::pair<VAddr, u64>>;
@@ -50,7 +52,8 @@ inline State& GetState() {
 
 inline void Print(State& s, double seconds) {
     static constexpr const char* names[NumKinds] = {"writes into", "unmaps of",
-                                                    "stale uploads over"};
+                                                    "stale uploads over",
+                                                    "merged uploads keeping"};
     const char* mode = "Off";
     switch (EmulatorSettings.GetReadbacksMode()) {
     case GpuReadbacksMode::Disabled:
@@ -97,7 +100,7 @@ inline void MaybePrint(State& s) {
     if (seconds < 5.0) {
         return;
     }
-    if (s.events[0] + s.events[1] + s.events[2] != 0) {
+    if (s.events[0] + s.events[1] + s.events[2] + s.events[3] != 0) {
         Print(s, seconds);
     }
     s.events = {};

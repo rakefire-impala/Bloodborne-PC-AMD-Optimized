@@ -73,8 +73,22 @@ public:
                             });
     }
 
-    /// Removes all protection from a page and ensures GPU data has been flushed if requested
-    void InvalidateRegion(VAddr cpu_addr, u64 size, bool unmapping, auto&& on_flush) noexcept {
+    /// bbport: marks a region GPU-modified again (pages whose GPU-written bytes survived a
+    /// merged upload, see BufferCache::TwinGpuPages).
+    void MarkRegionAsGpuModified(VAddr dirty_cpu_addr, u64 query_size) noexcept {
+        IteratePages<false>(dirty_cpu_addr, query_size,
+                            [](RegionManager* manager, u64 offset, size_t size) {
+                                std::scoped_lock lk{manager->lock};
+                                manager->template ChangeRegionState<Type::GPU, true>(
+                                    manager->GetCpuAddr() + offset, size);
+                            });
+    }
+
+    /// Removes all protection from a page and ensures GPU data has been flushed if requested.
+    /// bbport: with readbacks Off, `on_gpu_pages(address, size)` sees the GPU-modified pages of
+    /// a write fault while they are still protected, before the guest store lands.
+    void InvalidateRegion(VAddr cpu_addr, u64 size, bool unmapping, auto&& on_flush,
+                          auto&& on_gpu_pages) noexcept {
         const bool audit = ReadbackAudit::Enabled();
         ReadbackAudit::Ranges skipped;
         IteratePages<false>(
@@ -89,10 +103,16 @@ public:
                         if (manager->template IsRegionModified<Type::GPU>(offset, size)) {
                             return true;
                         }
-                    } else if (audit) {
+                    } else {
                         manager->template ForEachGpuModifiedRange<false>(
-                            offset, size,
-                            [&](VAddr address, u64 bytes) { skipped.emplace_back(address, bytes); });
+                            offset, size, [&](VAddr address, u64 bytes) {
+                                if (audit) {
+                                    skipped.emplace_back(address, bytes);
+                                }
+                                if (!unmapping) {
+                                    on_gpu_pages(address, bytes);
+                                }
+                            });
                     }
                     manager->template ChangeRegionState<Type::CPU, true>(
                         manager->GetCpuAddr() + offset, size);
