@@ -110,9 +110,28 @@ void DataBase::Open() {
             mz_zip_writer_init_file(&zip_ar, cache_path.string().c_str(), 0);
         }
     } else {
-        cache_path = GetUserPath(PathType::CacheDir) / game_info.GameSerial();
-        if (!std::filesystem::exists(cache_path)) {
-            std::filesystem::create_directories(cache_path);
+        // bbport: other bbport builds started from the same launcher settings share the user
+        // folder, and their shaders and pipelines under the plain serial name do not build
+        // here (the warm-up failed on them). This build keeps its own folder, started once
+        // from the shared one.
+        const auto shared_path = GetUserPath(PathType::CacheDir) / game_info.GameSerial();
+        cache_path = GetUserPath(PathType::CacheDir) /
+                     (std::string{game_info.GameSerial()} + "-rakefire");
+        std::error_code ec;
+        if (!std::filesystem::exists(cache_path, ec)) {
+            std::filesystem::create_directories(cache_path, ec);
+            u32 copied = 0;
+            for (const auto& entry : std::filesystem::directory_iterator(shared_path, ec)) {
+                if (entry.is_regular_file(ec) && entry.path().extension() != ".tmp" &&
+                    std::filesystem::copy_file(entry.path(), cache_path / entry.path().filename(),
+                                               ec)) {
+                    ++copied;
+                }
+            }
+            if (copied) {
+                LOG_WARNING(Render, "Pipeline cache: {} files copied from the shared folder {}",
+                            copied, shared_path.string());
+            }
         }
     }
 
@@ -239,6 +258,30 @@ void DataBase::Load(BlobType type, const std::string& name, std::vector<u32>& da
     return LoadVector(type, path, data);
 }
 
+bool DataBase::Exists(BlobType type, const std::string& name) const {
+    if (!opened || EmulatorSettings.IsPipelineCacheArchived()) {
+        return false;
+    }
+    auto path = cache_path / name;
+    path.replace_extension(GetBlobFileExtension(type));
+    std::error_code ec;
+    return std::filesystem::exists(path, ec);
+}
+
+void DataBase::Remove(BlobType type, const std::string& name) {
+    if (!opened || EmulatorSettings.IsPipelineCacheArchived()) {
+        return;
+    }
+    auto path = cache_path / name;
+    path.replace_extension(GetBlobFileExtension(type));
+    if (!preloaded) {
+        removals.push_back(std::move(path));
+        return;
+    }
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+}
+
 void DataBase::ForEachBlob(BlobType type, const std::function<void(std::vector<u8>&& data)>& func) {
     const auto& ext = GetBlobFileExtension(type);
     if (EmulatorSettings.IsPipelineCacheArchived()) {
@@ -285,6 +328,12 @@ void DataBase::Clear() {
 }
 
 void DataBase::FinishPreload() {
+    preloaded = true;
+    for (const auto& path : removals) {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+    }
+    removals.clear();
     if (EmulatorSettings.IsPipelineCacheArchived()) {
         mz_zip_writer_init_from_reader(&zip_ar, cache_path.string().c_str());
         ar_is_read_only = false;

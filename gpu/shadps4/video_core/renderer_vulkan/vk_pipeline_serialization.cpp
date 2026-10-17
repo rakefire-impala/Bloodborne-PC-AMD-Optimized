@@ -15,6 +15,8 @@ namespace Serialization {
 static constexpr u32 ShaderBinaryVersion = 7u; // bbport: interpolated integer fix (Pascal)
 static constexpr u32 ShaderMetaVersion = 7u; // bbport: ImageResource::needs_native
 static constexpr u32 PipelineKeyVersion = 5u; // bbport: Info layout (ImageResource::needs_native)
+/// bbport: marks the motion buffer addresses after a motion vertex shader's Info.
+static constexpr u64 MotionAddressesTag = 0x5345525344444142ull;
 } // namespace Serialization
 
 namespace Vulkan {
@@ -76,6 +78,14 @@ void RegisterShaderMeta(const Shader::Info& info,
 
     spec.Serialize(ar);
     info.Serialize(ar);
+    // bbport: a motion vertex shader embeds the object motion buffer addresses: they follow the
+    // Info (tagged; other shaders keep their layout). They are the same from start
+    // to start on one GPU and driver; LoadShaderMeta takes the shader while they still are.
+    if (info.hw_stage == Shader::HwStage::Vertex && spec.runtime_info.hw.vs.motion_vectors) {
+        meta.Write(Serialization::MotionAddressesTag);
+        meta.Write(Shader::MotionVectors::params_address);
+        meta.Write(Shader::MotionVectors::positions_address);
+    }
 
     Storage::DataBase::Instance().Save(Storage::BlobType::ShaderMeta,
                                        fmt::format("{:#018x}", perm_hash), ar.TakeOff());
@@ -115,10 +125,24 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
     spec.Deserialize(ar);
     info.Deserialize(ar);
 
-    // Motion vertex shaders embed session-local buffer device addresses. They must be
-    // recompiled for the current allocation, never loaded from a previous process.
+    // Motion vertex shaders embed the object motion buffer addresses (RegisterShaderMeta
+    // records them). Loaded only while this start has the same ones; an older entry without
+    // them is compiled again.
     if (info.hw_stage == Shader::HwStage::Vertex && spec.runtime_info.hw.vs.motion_vectors) {
-        return false;
+        // The addresses follow the Info (an entry without them has only the archive's slack
+        // byte left here).
+        if (ar.Remaining() < 3 * sizeof(u64) || !Shader::MotionVectors::positions_address) {
+            return false;
+        }
+        u64 tag{}, params_address{}, positions_address{};
+        meta.Read(tag);
+        meta.Read(params_address);
+        meta.Read(positions_address);
+        if (tag != Serialization::MotionAddressesTag ||
+            params_address != Shader::MotionVectors::params_address ||
+            positions_address != Shader::MotionVectors::positions_address) {
+            return false;
+        }
     }
 
     fetch_shader_data = spec.fetch_shader_data;
@@ -220,10 +244,10 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
     GraphicsPipeline::SerializationSupport sdata{};
     sdata.Deserialize(ar);
 
-    // Motion vertex shaders are never loaded from the cache (LoadShaderMeta), so a motion key
-    // would be built with another vertex permutation that lacks the motion varyings, and
-    // AMD's driver refuses that pipeline. They compile at runtime when object motion is on.
-    if (sel.graphics_key.motion_vectors) {
+    // Motion keys build only with object motion on: their vertex shaders load only while the
+    // motion buffers keep the addresses those embed (LoadShaderMeta); otherwise the key is
+    // stale and compiles at runtime.
+    if (sel.graphics_key.motion_vectors && !Shader::MotionVectors::positions_address) {
         return false;
     }
 
@@ -258,6 +282,20 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
     sel.modules.fill(nullptr);
     sel.fetch_shader.reset();
 
+    if (!it.value()->Handle()) {
+        // bbport: the driver refused this key's stages together (GraphicsPipeline logged it).
+        // Its shaders stay loaded (each fits its own specialization); the key is deleted so
+        // the next start does not build it again, and a draw that needs it builds it anew.
+        auto& storage = Storage::DataBase::Instance();
+        const auto name =
+            fmt::format("g_{:#018x}", std::hash<GraphicsPipelineKey>{}(sel.graphics_key));
+        const bool stored = storage.Exists(Storage::BlobType::PipelineKey, name);
+        storage.Remove(Storage::BlobType::PipelineKey, name);
+        LOG_WARNING(Render_Vulkan, "Pipeline key {} {}", name,
+                    stored ? "removed" : "not found under that name");
+        graphics_pipelines.erase(it);
+        return false;
+    }
     return true;
 }
 

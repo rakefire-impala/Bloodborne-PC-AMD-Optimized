@@ -41,11 +41,20 @@ public:
     void Load(BlobType type, const std::string& name, std::vector<u8>& data);
     void Load(BlobType type, const std::string& name, std::vector<u32>& data);
 
+    /// bbport: whether a blob of that name is stored (written in an earlier session; blobs of
+    /// this session may still be queued). Always false for the archived cache.
+    [[nodiscard]] bool Exists(BlobType type, const std::string& name) const;
+    /// bbport: deletes a stored blob (a pipeline key that no longer builds), during the warm-up
+    /// once it ends (ForEachBlob holds the file open). Not for the archived cache.
+    void Remove(BlobType type, const std::string& name);
+
     void ForEachBlob(BlobType type, const std::function<void(std::vector<u8>&& data)>& func);
 
 private:
     std::jthread io_worker{};
     std::filesystem::path cache_path{};
+    std::vector<std::filesystem::path> removals{}; ///< bbport: deleted by FinishPreload
+    bool preloaded{};
     bool opened{};
 };
 

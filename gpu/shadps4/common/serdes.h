@@ -56,6 +56,11 @@ struct Archive {
         return offset >= container.size();
     }
 
+    /// bbport: bytes after the read position.
+    [[nodiscard]] size_t Remaining() const {
+        return offset < container.size() ? container.size() - offset : 0;
+    }
+
     Archive() = default;
     explicit Archive(std::vector<u8>&& v) : container{v} {}
 

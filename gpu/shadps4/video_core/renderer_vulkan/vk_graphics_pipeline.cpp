@@ -422,6 +422,14 @@ GraphicsPipeline::GraphicsPipeline(
 
     auto [pipeline_result, pipe] =
         device.createGraphicsPipelineUnique(pipeline_cache, pipeline_info);
+    if (pipeline_result != vk::Result::eSuccess && preloading) {
+        // bbport: a cached key whose stages no longer fit together (an older cache generation
+        // or another build's files): the warm-up drops it (no handle), and the pipeline is
+        // built again from the game's shaders when it is first drawn.
+        LOG_WARNING(Render_Vulkan, "Cached graphics pipeline {} (motion {}) does not build ({}): "
+                    "dropped", debug_str, u32(key.motion_vectors), vk::to_string(pipeline_result));
+        return;
+    }
     ASSERT_MSG(pipeline_result == vk::Result::eSuccess,
                "Failed to create graphics pipeline: {} ({}, motion {}, {} color attachments, "
                "mrt mask {:#x}, preloaded {})",
