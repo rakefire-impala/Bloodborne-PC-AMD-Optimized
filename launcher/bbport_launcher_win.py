@@ -182,6 +182,7 @@ INI_DEFAULTS = {'upscaler': 'fsr4', 'preset': '1', 'sharpen': '1', 'sharpness': 
 APP_DEFAULTS = {'ui_language': '', 'game_dir': str(PORT_DIR.parent / 'CUSA03173'), 'user_dir': '',
                 'mods_dir': '', 'mods_enabled': True, 'patches_dir': '', 'language': '1',
                 'player_name': '', 'fullscreen': False, 'window_mode': '', 'hdr': False, 'present_mode': 'Mailbox',
+                'fullscreen_hz': '',
                 'fps_mode': 'uncap', 'frame_cap': '', 'real_fps_limit': '-1', 'draw_pipe': '', 'readbacks': '',
                 'frames_ahead': '', 'frame_stats': False, 'gpu_profile': False,
                 'vk_validation': False, 'developer_profile': False, 'extra_env': '', 'close_on_play': False,
@@ -215,6 +216,10 @@ DLSS_PRESETS = [('default', ('Default (driver)', 'По умолчанию (др�
                 ('k', ('K (Transformer 1st gen)', 'K (Transformer 1-го пок.)')),
                 ('m', ('M (Transformer 2nd gen)', 'M (Transformer 2-го пок.)')),
                 ('l', ('L (Transformer 2nd gen)', 'L (Transformer 2-го пок.)'))]
+# Fullscreen refresh rate (BB_FULLSCREEN_HZ): '' keeps the desktop's. A monitor at 144 Hz without
+# FreeSync/G-Sync shows 60 FPS frames for 2 and 3 refreshes in turn; its 60 Hz mode shows each once.
+FULLSCREEN_RATES = [('', ('Desktop refresh rate', 'Частота рабочего стола')), ('60', ('60 Hz',)),
+                    ('120', ('120 Hz',))]
 WINDOW_MODES = [('windowed', ('Windowed', 'Оконный')),
                 ('borderless', ('Borderless fullscreen', 'Без рамки на весь экран')),
                 ('fullscreen', ('Fullscreen (driver default)', 'Полный экран (настройка драйвера)'))]
@@ -501,6 +506,8 @@ def game_environment(s):
     env['BB_FULLSCREEN'] = '1' if s['fullscreen'] else '0'
     env['BB_LAUNCHER_WINDOW_MODE'] = launcher_window_mode(s)
     env['BB_PRESENT_MODE'] = s['present_mode']
+    if str(s.get('fullscreen_hz', '')).isdecimal():
+        env['BB_FULLSCREEN_HZ'] = str(s['fullscreen_hz'])
     if s['hdr']:
         env['BB_HDR'] = '1'
     # 75 uses the variable frame-time patch, not a fixed 60/90 timing patch.
@@ -1617,6 +1624,12 @@ class Launcher:
         self.row(f, _('Presentation', 'Режим показа кадров'), self.presentation_choice,
                  _('Used in windowed/fullscreen modes. Borderless uses the V-sync option above.',
                    'Для оконного и полноэкранного режимов. Без рамки используется V-sync выше.'))
+        self.fullscreen_rate_choice = self.choice(f, 'fullscreen_hz', 'app', FULLSCREEN_RATES)
+        self.row(f, _('Fullscreen refresh rate', 'Частота в полноэкранном режиме'), self.fullscreen_rate_choice,
+                 _('Fullscreen only. 60 Hz paces 60 FPS evenly on a 144 Hz monitor without FreeSync '
+                   '(at 144 Hz each frame stays up for 2 or 3 refreshes). With FreeSync on, keep the desktop rate.',
+                   'Только полный экран. 60 Гц даёт ровные 60 FPS на мониторе 144 Гц без FreeSync '
+                   '(при 144 Гц кадр держится 2 или 3 обновления). С FreeSync оставьте частоту рабочего стола.'))
         self.vars['window_mode'].trace_add('write', lambda *_a: self.update_window_controls())
         self.update_window_controls()
         self.check(f, 'hdr', 'app', _('Allow HDR output', 'Разрешить HDR'),
@@ -1630,6 +1643,9 @@ class Launcher:
         borderless = self.var('window_mode', 'menu').get() == 'borderless'
         self.borderless_vsync_check.configure(state='normal' if borderless else 'disabled')
         self.presentation_choice.configure(state='disabled' if borderless else 'readonly')
+        if hasattr(self, 'fullscreen_rate_choice'):
+            fullscreen = self.var('window_mode', 'menu').get() in ('fullscreen', 'launcher')
+            self.fullscreen_rate_choice.configure(state='readonly' if fullscreen else 'disabled')
 
     def refresh_menu_settings(self):
         latest = menu_values(self.app)

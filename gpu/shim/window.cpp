@@ -1,5 +1,6 @@
 #include "bbport_nvidia.h"
 // bbport: SDL3 window for the Vulkan swapchain (X11 or Wayland).
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <SDL3/SDL.h>
@@ -15,6 +16,33 @@
 #endif
 
 namespace Frontend {
+
+// bbport: BB_FULLSCREEN_HZ=<Hz>: fullscreen takes the display's mode at that refresh rate (at the
+// desktop size) instead of the desktop's own. On a 144 Hz monitor without variable refresh, 60
+// FPS frames otherwise stay up for 2 and 3 refreshes in turn: judder at an even frame time.
+static const SDL_DisplayMode* FullscreenMode(SDL_Window* window, SDL_DisplayMode& mode) {
+    static const float hz = [] {
+        const char* env = std::getenv("BB_FULLSCREEN_HZ");
+        return env ? float(std::atof(env)) : 0.0f;
+    }();
+    if (hz <= 0.0f) {
+        return nullptr;
+    }
+    const SDL_DisplayID display = SDL_GetDisplayForWindow(window);
+    const SDL_DisplayMode* desktop = SDL_GetDesktopDisplayMode(display);
+    if (!desktop || !SDL_GetClosestFullscreenDisplayMode(display, desktop->w, desktop->h, hz,
+                                                         false, &mode)) {
+        LOG_WARNING(Frontend, "No {} Hz display mode: fullscreen keeps the desktop's", hz);
+        return nullptr;
+    }
+    static bool reported = false;
+    if (!reported) {
+        reported = true;
+        std::printf("Window: fullscreen at %dx%d %.2f Hz (desktop %.2f Hz, BB_FULLSCREEN_HZ)\n",
+                    mode.w, mode.h, mode.refresh_rate, desktop->refresh_rate);
+    }
+    return &mode;
+}
 
 WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}, height{height_} {
     // Gamepads are sampled by runtime_pad.c; their events are pumped here with the window's.
@@ -39,7 +67,8 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     }
     const int requested = BbSettings::Get().window_mode;
     window_mode = requested == BbSettings::WindowFromLauncher ? launcher_window_mode : requested;
-    // Desktop fullscreen keeps the monitor's current resolution and refresh rate.
+    // Desktop fullscreen keeps the monitor's current resolution and refresh rate (unless
+    // BB_FULLSCREEN_HZ asks for another rate: FullscreenMode).
     SDL_SetHint(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS,
                 window_mode == BbSettings::Borderless ? "0" : "1");
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_FULLSCREEN_BOOLEAN,
@@ -48,6 +77,13 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     window = SDL_CreateWindowWithProperties(props);
     SDL_DestroyProperties(props);
     ASSERT_MSG(window, "Failed to create window: {}", SDL_GetError());
+    if (window_mode == BbSettings::Fullscreen) {
+        SDL_DisplayMode mode{};
+        if (const SDL_DisplayMode* chosen = FullscreenMode(window, mode)) {
+            SDL_SetWindowFullscreenMode(window, chosen);
+            SDL_SyncWindow(window);
+        }
+    }
 
     const char* driver = SDL_GetCurrentVideoDriver();
     const SDL_PropertiesID wp = SDL_GetWindowProperties(window);
@@ -88,7 +124,10 @@ void WindowSDL::ApplyWindowMode() {
                 mode == BbSettings::Borderless ? "0" : "1");
     // All SDL window mutations run on the event thread, never on the renderer thread.
     BbNvidia::BeforeSwapchainChange();
-    if (!SDL_SetWindowFullscreenMode(window, nullptr) ||
+    SDL_DisplayMode exclusive{};
+    const SDL_DisplayMode* fullscreen_mode =
+        mode == BbSettings::Fullscreen ? FullscreenMode(window, exclusive) : nullptr;
+    if (!SDL_SetWindowFullscreenMode(window, fullscreen_mode) ||
         !SDL_SetWindowFullscreen(window, mode != BbSettings::Windowed)) {
         LOG_ERROR(Frontend, "Cannot change window mode: {}", SDL_GetError());
         SDL_SetHint(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS,
