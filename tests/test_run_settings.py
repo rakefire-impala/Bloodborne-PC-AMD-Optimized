@@ -95,6 +95,18 @@ class RestartResolutionTests(unittest.TestCase):
         self.assertEqual(self.run_restarts(ini_extra='live_resolution=auto\n', caps=0)[0]['BB_RENDER_RES'],
                          '854x480')
 
+    def test_1080p_startup_patch_when_the_gpu_check_picks_it(self):
+        at_1080p = 'output_res=1920x1080\n'
+        # auto: the GPU check decides at 1080p as above it (preset 1, Quality: 1280x720).
+        self.assertEqual(self.run_restarts(ini_extra=at_1080p + 'live_resolution=auto\n',
+                                           caps=0)[0]['BB_RENDER_RES'], '1280x720')
+        self.assertIsNone(self.run_restarts(ini_extra=at_1080p + 'live_resolution=auto\n',
+                                            caps=1)[0]['BB_RENDER_RES'])
+        # Unset or 0: 1080p keeps the game's sizes (live host targets), as before.
+        self.assertIsNone(self.run_restarts(ini_extra=at_1080p, caps=0)[0]['BB_RENDER_RES'])
+        self.assertIsNone(self.run_restarts(ini_extra=at_1080p + 'live_resolution=0\n',
+                                            caps=0)[0]['BB_RENDER_RES'])
+
     def test_live_resolution_without_sed_or_grep(self):
         # A missing sed ended run.sh (exit 127) before the game in the AppImage on NixOS.
         self.assertEqual(self.run_restarts(ini_extra='live_resolution=0\n', caps=1,

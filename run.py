@@ -189,13 +189,18 @@ def main():
                 env.pop(key, None)
         fps = env.get('BB_FPS', 'uncap') if patched else '30'
         scaled_render = scaled_output = None
+        live = env.get('BB_LIVE_RES') or ini_value(config, 'live_resolution') or '0'
         if not env.get('BB_RENDER_RES'):
-            printed = run_script('patches.py', '--print-scaled', '--settings', config, capture=True).split()
+            # 1080p output keeps the game's sizes unless the GPU check below picks the startup
+            # patch (auto): on those GPUs the live path's per-frame copies cost the same there.
+            at_1080p = ['--at-1080p'] if live == 'auto' else []
+            printed = run_script('patches.py', '--print-scaled', *at_1080p, '--settings', config,
+                                 capture=True).split()
             if len(printed) == 2:
                 scaled_render, scaled_output = printed
-        live = '0'
-        if scaled_output:
-            live = env.get('BB_LIVE_RES') or ini_value(config, 'live_resolution') or '0'
+        if not scaled_output:
+            live = '0'
+        else:
             if live == 'auto':
                 caps = probe.parent / 'bb-gpu-capabilities.exe'
                 result = subprocess.run([str(caps), '--live-resolution'], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,

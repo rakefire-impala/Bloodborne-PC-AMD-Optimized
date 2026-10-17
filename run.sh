@@ -76,19 +76,23 @@ fps=${BB_FPS:-uncap}
 # (output and presets change in the menu without a restart, but post-processing stays at 1080p
 # and scene targets are copied back: much slower on the Steam Deck and older GPUs). Chosen by
 # BB_LIVE_RES=0/1, else bbport.ini live_resolution=0/1/auto (auto: the GPU check, strong
-# discrete GPUs get them); off when unset. 1080p output and TAA always use the live path.
-if [[ -z ${BB_RENDER_RES:-} ]]; then
-    read -r scaled_render scaled_output < <("$PYTHON" scripts/patches.py --print-scaled --settings "$BB_CONFIG") || true
+# discrete GPUs get them); off when unset. TAA always uses the live path, 1080p output too
+# unless auto picks the startup patch (the live path's copies cost the same there).
+live=${BB_LIVE_RES:-}
+# Bash builtins only: the AppImage's PATH has no sed/grep (a missing one ended run.sh silently).
+if [[ -z $live && -f $BB_CONFIG ]]; then
+    while IFS= read -r line || [[ -n $line ]]; do
+        [[ $line =~ ^live_resolution=([01]|auto)$ ]] && live=${BASH_REMATCH[1]}
+    done < "$BB_CONFIG"
 fi
-live=0
-if [[ -n ${scaled_output:-} ]]; then
-    live=${BB_LIVE_RES:-}
-    # Bash builtins only: the AppImage's PATH has no sed/grep (a missing one ended run.sh silently).
-    if [[ -z $live && -f $BB_CONFIG ]]; then
-        while IFS= read -r line || [[ -n $line ]]; do
-            [[ $line =~ ^live_resolution=([01]|auto)$ ]] && live=${BASH_REMATCH[1]}
-        done < "$BB_CONFIG"
-    fi
+if [[ -z ${BB_RENDER_RES:-} ]]; then
+    at_1080p=
+    [[ $live == auto ]] && at_1080p=1
+    read -r scaled_render scaled_output < <("$PYTHON" scripts/patches.py --print-scaled ${at_1080p:+--at-1080p} --settings "$BB_CONFIG") || true
+fi
+if [[ -z ${scaled_output:-} ]]; then
+    live=0
+else
     if [[ $live == auto ]]; then
         if [[ -n ${BB_PROBE:-} ]]; then caps=$(dirname -- "$BB_PROBE")/bb-gpu-capabilities
         elif [[ -n ${BB_PREBUILT:-} ]]; then caps=bin/bb-gpu-capabilities

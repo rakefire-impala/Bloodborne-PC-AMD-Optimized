@@ -153,15 +153,20 @@ def output_size(settings):
     return OUTPUT_SIZE
 
 
-def scaled_sizes(settings):
+def scaled_sizes(settings,at_1080p=False):
     """(render, output) for an output other than 1080p (above it, or 720p for the Steam Deck):
     the game renders at output / preset scale (or at the output size without upscaler) and the
-    upscaler fills the output. None at 1080p and for TAA (native, live host targets only)."""
+    upscaler fills the output. None at 1080p and for TAA (native, live host targets only).
+    at_1080p: also for 1080p output with a preset below it (run.py asks for that when the GPU
+    check decides; on GPUs it keeps off live changes, the 1080p live path's copies cost as much
+    as above 1080p)."""
     out=output_size(settings)
-    if out==OUTPUT_SIZE or settings.get('upscaler')=='taa': return None
+    if settings.get('upscaler')=='taa': return None
+    if out==OUTPUT_SIZE and not at_1080p: return None
     scale=1.0
     if settings.get('upscaler','fsr3')!='off':
         scale=preset_scale(settings)
+    if out==OUTPUT_SIZE and scale<=1.0: return None
     render=tuple(max(2,round(v/scale/2)*2) for v in out)
     # A scene of exactly 1920x1080 (4K Performance) is indistinguishable from the game's UI
     # coordinate space, which the port's UI composition recognizes by that size.
@@ -301,9 +306,11 @@ def main():
     p.add_argument('--output-res',default='',help='output resolution WxH (the upscaler\'s; the UI stays 1920x1080)')
     p.add_argument('--print-scaled',action='store_true',
                    help='print "RENDER OUTPUT" (WxH) when bbport.ini selects an output other than 1080p')
+    p.add_argument('--at-1080p',action='store_true',
+                   help='with --print-scaled: also for 1080p output with a preset below 1080p')
     a=p.parse_args()
     if a.print_scaled:
-        sizes=scaled_sizes(read_settings(a.settings))
+        sizes=scaled_sizes(read_settings(a.settings),a.at_1080p)
         if sizes: print(f'{sizes[0][0]}x{sizes[0][1]} {sizes[1][0]}x{sizes[1][1]}')
         return
     if a.print_preset_size:

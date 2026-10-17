@@ -132,6 +132,16 @@ class NativeUiTests(unittest.TestCase):
         # TAA is native-only and uses the live host targets.
         self.assertIsNone(scaled_sizes({'output_res': '1280x720', 'upscaler': 'taa', 'preset': '3'}))
 
+    def test_1080p_scales_the_scene_only_when_asked(self):
+        # run.py asks (at_1080p) when the GPU check may pick the startup patch at 1080p.
+        balanced = {'output_res': '1920x1080', 'preset': '2'}
+        self.assertEqual(scaled_sizes(balanced, at_1080p=True), ((1130, 636), (1920, 1080)))
+        self.assertEqual(scaled_sizes({'preset': '4'}, at_1080p=True), ((640, 360), (1920, 1080)))
+        # Native AA, no upscaler and TAA have no smaller scene: the live path stays.
+        self.assertIsNone(scaled_sizes({**balanced, 'preset': '0'}, at_1080p=True))
+        self.assertIsNone(scaled_sizes({**balanced, 'upscaler': 'off'}, at_1080p=True))
+        self.assertIsNone(scaled_sizes({**balanced, 'upscaler': 'taa'}, at_1080p=True))
+
 
 class DebugPatchTests(unittest.TestCase):
     def test_camera_patch_is_optional_and_compatible_with_fps_and_debug_menu(self):
