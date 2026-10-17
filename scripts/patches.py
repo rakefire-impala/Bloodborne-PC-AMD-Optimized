@@ -77,6 +77,15 @@ def validate_patch_requirements(names, game):
                              'or disable debug_menu in bbport.ini')
 
 
+def upscaled_scene_patches(settings,size):
+    """Patches for a scene the startup patch renders below the output for the upscaler.
+    The game's own AA is temporal: at the reduced size it ran before FSR and fed it its history,
+    which after area reloads (lamp travel) went stale and flickered as smears. The upscaler
+    does the anti-aliasing there."""
+    if not size or settings.get('upscaler','fsr3') in ('off','taa'): return []
+    return ['Disable AA']
+
+
 def effect_patches(settings):
     names=[]
     for key,(off,on) in EFFECTS.items():
@@ -333,10 +342,11 @@ def main():
         return
     names=FPS_PRESETS[a.fps]+[n.strip() for n in a.extra.split(';') if n.strip()]
     names+=[n for n in effect_patches(read_settings(a.settings)) if n not in names]
+    size=render_size(read_settings(a.settings),a.render_res) if a.render_res else None
+    names+=[n for n in upscaled_scene_patches(read_settings(a.settings),size) if n not in names]
     validate_patch_requirements(names,a.game_dir)
     segments=eboot_segments((a.out/'eboot.elf').read_bytes())
     writes=compile_patches(a.xml,names,a.app_version,segments)
-    size=render_size(read_settings(a.settings),a.render_res) if a.render_res else None
     # The UI keeps the game's 1920x1080 coordinates even for a larger output: the port draws
     # it into the output-size image with a viewport scaled by output / 1920
     # (UiComposition::NativeViewport), so it is rasterized at the output resolution.

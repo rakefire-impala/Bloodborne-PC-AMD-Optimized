@@ -11,7 +11,7 @@ from patches import (EBOOT_BASE, OUTPUT_SIZE, RESOLUTION_TEMPLATE, SCENE_HEIGHT,
                      SCENE_WIDTH, UI_HEIGHT, UI_WIDTH, compile_patches,
                      render_size, resolution_writes, scaled_sizes, effect_patches,
                      validate_patch_requirements, external_patches, external_selection,
-                     compile_external, read_settings, preset_scale)
+                     compile_external, read_settings, preset_scale, upscaled_scene_patches)
 
 XML = ROOT / 'patches/Bloodborne.xml'
 SEGMENTS = [(0, 0x6000000)]
@@ -131,6 +131,12 @@ class NativeUiTests(unittest.TestCase):
                          ((1916, 1078), (3840, 2160)))
         # TAA is native-only and uses the live host targets.
         self.assertIsNone(scaled_sizes({'output_res': '1280x720', 'upscaler': 'taa', 'preset': '3'}))
+
+    def test_reduced_scene_turns_the_games_temporal_aa_off(self):
+        # Below the output the upscaler does the AA; the game's AA history fed it smears.
+        self.assertEqual(upscaled_scene_patches({'upscaler': 'fsr3'}, (1130, 636)), ['Disable AA'])
+        self.assertEqual(upscaled_scene_patches({'upscaler': 'fsr3'}, None), [])
+        self.assertEqual(upscaled_scene_patches({'upscaler': 'off'}, (1280, 720)), [])
 
     def test_1080p_scales_the_scene_only_when_asked(self):
         # run.py asks (at_1080p) when the GPU check may pick the startup patch at 1080p.
