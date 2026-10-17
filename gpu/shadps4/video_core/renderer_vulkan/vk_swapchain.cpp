@@ -10,6 +10,7 @@
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
 #include "bbport_settings.h"
+#include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 #ifdef _WIN32
@@ -89,6 +90,15 @@ void Swapchain::Create(u32 width_, u32 height_) {
 #endif
 
     auto [swapchain_result, chain] = instance.GetDevice().createSwapchainKHR(swapchain_info);
+    // bbport: recreated at the VRAM budget (window mode change, Alt-Tab), the driver refused
+    // the images and the game stopped; free staging, then the VRAM reserve, as for images.
+    for (u32 attempt = 0; attempt < 4 &&
+                          (swapchain_result == vk::Result::eErrorOutOfDeviceMemory ||
+                           swapchain_result == vk::Result::eErrorOutOfHostMemory) &&
+                          VideoCore::HandleOutOfMemory();
+         ++attempt) {
+        std::tie(swapchain_result, chain) = instance.GetDevice().createSwapchainKHR(swapchain_info);
+    }
     ASSERT_MSG(swapchain_result == vk::Result::eSuccess, "Failed to create swapchain: {}",
                vk::to_string(swapchain_result));
     swapchain = chain;
