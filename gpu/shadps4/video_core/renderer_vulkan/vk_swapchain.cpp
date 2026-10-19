@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdio>
 #include <limits>
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -37,7 +38,33 @@ Swapchain::~Swapchain() {
     instance.GetInstance().destroySurfaceKHR(surface);
 }
 
+bool Swapchain::SurfaceHasArea() const {
+    const auto [result, capabilities] =
+        instance.GetPhysicalDevice().getSurfaceCapabilitiesKHR(surface);
+    if (result != vk::Result::eSuccess) {
+        return true; // Create reports the failure
+    }
+    const vk::Extent2D current = capabilities.currentExtent;
+    return current.width == std::numeric_limits<u32>::max() ||
+           (current.width != 0 && current.height != 0);
+}
+
 void Swapchain::Create(u32 width_, u32 height_) {
+    // bbport: a minimized window's surface is 0x0 on Windows, and stays so for a moment after
+    // SDL reports the window restored (a screenshot overlay minimizes a fullscreen game). The
+    // swapchain was then created at 0x0 and drawn into, and AMD's integrated GPU driver lost the
+    // device. Keep the current swapchain (or none) and try again on the next frame: the
+    // presenter skips frames until the surface has a size.
+    if (!SurfaceHasArea()) {
+        width = height = 0;
+        needs_recreation = true;
+        if (!reported_empty_surface) {
+            reported_empty_surface = true;
+            std::printf("Swapchain: the window's surface is 0x0 (minimized); presenting resumes "
+                        "when it has a size\n");
+        }
+        return;
+    }
     width = width_;
     height = height_;
     needs_recreation = false;
@@ -140,6 +167,10 @@ void Swapchain::SetHDR(bool hdr) {
 }
 
 bool Swapchain::AcquireNextImage() {
+    if (!swapchain || width == 0 || height == 0) {
+        needs_recreation = true; // no swapchain of the surface's size yet (Create)
+        return false;
+    }
     vk::Device device = instance.GetDevice();
     vk::Result result =
         device.acquireNextImageKHR(swapchain, std::numeric_limits<u64>::max(),

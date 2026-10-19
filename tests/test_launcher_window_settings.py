@@ -58,7 +58,7 @@ class Widget:
 
 interpreter = tk.Tcl()
 tk_api = types.SimpleNamespace(
-    Frame=Widget, Canvas=Widget, TclError=tk.TclError,
+    Frame=Widget, Canvas=Widget, Label=Widget, TclError=tk.TclError,
     BooleanVar=lambda **kwargs: tk.BooleanVar(master=interpreter, **kwargs),
     StringVar=lambda **kwargs: tk.StringVar(master=interpreter, **kwargs),
     DoubleVar=lambda **kwargs: tk.DoubleVar(master=interpreter, **kwargs))
@@ -75,6 +75,7 @@ def build(settings):
     obj.menu_baseline = dict(obj.menu)
     obj.vars, obj.pages, obj.content = {}, {}, Widget()
     obj.mod_order, obj.patch_vars = [], {}
+    obj.gpus, obj.gpu_boxes, obj.igpu_buttons = [], [], []
     obj.scrolled_page = lambda *args: Widget()
     obj.version_warning = lambda *args: None
     obj.refresh_status = lambda *args: None

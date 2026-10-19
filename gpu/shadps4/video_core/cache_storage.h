@@ -26,6 +26,10 @@ public:
         return *Common::Singleton<DataBase>::Instance();
     }
 
+    /// bbport: before Open: a suffix for the cache folder of a GPU that keeps its own cache.
+    void SetDeviceTag(std::string tag) {
+        device_tag = std::move(tag);
+    }
     void Open();
     void Close();
     [[nodiscard]] bool IsOpened() const {
@@ -53,6 +57,7 @@ public:
 private:
     std::jthread io_worker{};
     std::filesystem::path cache_path{};
+    std::string device_tag{};
     std::vector<std::filesystem::path> removals{}; ///< bbport: deleted by FinishPreload
     bool preloaded{};
     bool opened{};

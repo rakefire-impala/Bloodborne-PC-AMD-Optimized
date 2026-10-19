@@ -77,7 +77,7 @@ fps=${BB_FPS:-uncap}
 # and scene targets are copied back: much slower on the Steam Deck and older GPUs). Chosen by
 # BB_LIVE_RES=0/1, else bbport.ini live_resolution=0/1/auto (auto: the GPU check, strong
 # discrete GPUs get them); off when unset. TAA always uses the live path, 1080p output too
-# unless auto picks the startup patch (the live path's copies cost the same there).
+# unless 0 or auto picks the startup patch (the live path's copies cost more there).
 live=${BB_LIVE_RES:-}
 # Bash builtins only: the AppImage's PATH has no sed/grep (a missing one ended run.sh silently).
 if [[ -z $live && -f $BB_CONFIG ]]; then
@@ -87,7 +87,7 @@ if [[ -z $live && -f $BB_CONFIG ]]; then
 fi
 if [[ -z ${BB_RENDER_RES:-} ]]; then
     at_1080p=
-    [[ $live == auto ]] && at_1080p=1
+    [[ $live == 1 ]] || at_1080p=1
     read -r scaled_render scaled_output < <("$PYTHON" scripts/patches.py --print-scaled ${at_1080p:+--at-1080p} --settings "$BB_CONFIG") || true
 fi
 if [[ -z ${scaled_output:-} ]]; then

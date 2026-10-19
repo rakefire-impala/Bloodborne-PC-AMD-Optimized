@@ -1126,10 +1126,25 @@ void TextureCache::GarbageCollectImages() {
             // as full had 220 MiB of it and still refused a 16 MiB buffer. Within 64 MiB of the
             // heap's budget the collector works as if past the pressure mark, so new images and
             // staging blocks find room.
-            if (!forced_budget && levels.usage + 64_MB >= levels.budget) {
+            // Only while VMA's blocks are nearly full too: with hundreds of MiB free inside them
+            // (an RX 5500M at 2291 of 2291 MiB held 544), new images fit there, yet this rule
+            // kept every pass pressured. The collector evicted ~1000 images per 5 s to be
+            // re-uploaded, arenas moved 536 MiB of geometry to system memory (GPU waits of
+            // ~60 ms), and the space both freed sat unused. Below the 128 MiB that arena
+            // promotion leaves free (HasSpareVmaSpace), so the two do not trade the same space.
+            static const bool old_headroom = std::getenv("BB_OLD_HEADROOM") != nullptr;
+            if (!forced_budget && levels.usage + 64_MB >= levels.budget &&
+                (old_headroom || levels.vma_free < 96_MB)) {
                 total_used_memory = std::max(total_used_memory, pressure_gc_memory);
             }
         }
+    }
+    // bbport: BB_FRAME_STATS also prints the image census every 10 s without pressure.
+    static const bool census = std::getenv("BB_FRAME_STATS") != nullptr;
+    if (census && std::chrono::steady_clock::now() - census_time >= std::chrono::seconds(10)) {
+        std::scoped_lock lock{mutex};
+        census_time = std::chrono::steady_clock::now();
+        PrintImageCensus();
     }
     if (total_used_memory < trigger_gc_memory) {
         return;
@@ -1307,6 +1322,8 @@ void TextureCache::GarbageCollectImages() {
                 (unsigned long long)(vma.type_largest_free[buffer_cache.GetArenaMemoryType()] >>
                                      10),
                 instance.DescribeMemory().c_str());
+            PrintImageCensus();
+            census_time = now;
             gc_report_time = now;
             gc_evictions = gc_evicted_bytes = gc_downloads = 0;
             gc_written_tiled = gc_written_bytes = gc_unevictable = 0;
@@ -1314,6 +1331,62 @@ void TextureCache::GarbageCollectImages() {
             gc_passes = gc_passes_quota = 0;
         }
     }
+}
+
+void TextureCache::PrintImageCensus() {
+    // bbport: where image memory goes (guest sizes, every backing): targets vs.
+    // textures, GPU-written ones the collector cannot write back, and by the time
+    // since their last use (GC ticks are submissions, ~60-120 a second).
+    u64 bytes_target = 0, bytes_texture = 0, bytes_stuck = 0, bytes_proxy = 0;
+    std::array<u64, 3> by_age{};
+    u32 count = 0, unregistered = 0;
+    u64 host_bytes = 0, unregistered_bytes = 0;
+    for (const Image& image : slot_images) {
+        u64 host = 0;
+        for (const auto& backing : image.backing_images) {
+            host += backing.image.size_bytes;
+        }
+        if (False(image.flags & ImageFlagBits::Registered)) {
+            ++unregistered;
+            unregistered_bytes += host;
+            continue;
+        }
+        host_bytes += host;
+        const u64 bytes = image.info.guest_size * std::max<size_t>(1, image.backing_images.size());
+        ++count;
+        (image.usage.render_target || image.usage.depth_target ? bytes_target
+                                                               : bytes_texture) += bytes;
+        bytes_stuck += image.SafeToDownload() && !CanWriteBack(image) ? bytes : 0;
+        bytes_proxy += image.scene_proxy ? bytes : 0;
+        const u64 idle = image.lru_touched_tick == ~0ULL ? ~0ULL
+                                                         : gc_tick - image.lru_touched_tick;
+        by_age[idle < 120 ? 0 : idle < 1200 ? 1 : 2] += bytes;
+    }
+    instance.DumpVmaMap();
+    const auto levels = instance.GetMemoryLevels();
+    const u64 arenas = buffer_cache.GetArenaResidentBytes();
+    const u64 arenas_system = buffer_cache.GetArenaSystemBytes();
+    std::printf("Texture cache: %u images, %llu MiB in VRAM (%u unregistered ones %llu MiB), "
+                "guest sizes %llu MiB: targets %llu, textures %llu; "
+                "GPU-written and not evictable %llu; with scene proxies %llu; used in the "
+                "last ~1 s %llu, ~1-10 s ago %llu, longer %llu. Heap %llu of %llu MiB: VMA "
+                "blocks %llu (%llu free), arenas in VRAM %llu, staging in VRAM %llu\n",
+                count, (unsigned long long)(host_bytes >> 20), unregistered,
+                (unsigned long long)(unregistered_bytes >> 20),
+                (unsigned long long)((bytes_target + bytes_texture) >> 20),
+                (unsigned long long)(bytes_target >> 20),
+                (unsigned long long)(bytes_texture >> 20),
+                (unsigned long long)(bytes_stuck >> 20),
+                (unsigned long long)(bytes_proxy >> 20),
+                (unsigned long long)(by_age[0] >> 20),
+                (unsigned long long)(by_age[1] >> 20),
+                (unsigned long long)(by_age[2] >> 20),
+                (unsigned long long)(levels.usage >> 20),
+                (unsigned long long)(levels.budget >> 20),
+                (unsigned long long)(levels.vma_blocks >> 20),
+                (unsigned long long)(levels.vma_free >> 20),
+                (unsigned long long)((arenas - std::min(arenas, arenas_system)) >> 20),
+                (unsigned long long)(runtime.GetStagingPool().DeviceLocalBytes() >> 20));
 }
 
 bool TextureCache::CanWriteBack(const Image& image) const {

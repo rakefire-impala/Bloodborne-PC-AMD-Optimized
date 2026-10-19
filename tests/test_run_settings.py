@@ -102,9 +102,13 @@ class RestartResolutionTests(unittest.TestCase):
                                            caps=0)[0]['BB_RENDER_RES'], '1280x720')
         self.assertIsNone(self.run_restarts(ini_extra=at_1080p + 'live_resolution=auto\n',
                                             caps=1)[0]['BB_RENDER_RES'])
-        # Unset or 0: 1080p keeps the game's sizes (live host targets), as before.
-        self.assertIsNone(self.run_restarts(ini_extra=at_1080p, caps=0)[0]['BB_RENDER_RES'])
-        self.assertIsNone(self.run_restarts(ini_extra=at_1080p + 'live_resolution=0\n',
+        # Unset or 0 (Off, faster): the startup patch at 1080p too; only live changes keep the
+        # game's sizes (live host targets, slower at the same preset).
+        self.assertEqual(self.run_restarts(ini_extra=at_1080p, caps=0)[0]['BB_RENDER_RES'],
+                         '1280x720')
+        self.assertEqual(self.run_restarts(ini_extra=at_1080p + 'live_resolution=0\n',
+                                           caps=1)[0]['BB_RENDER_RES'], '1280x720')
+        self.assertIsNone(self.run_restarts(ini_extra=at_1080p + 'live_resolution=1\n',
                                             caps=0)[0]['BB_RENDER_RES'])
 
     def test_live_resolution_without_sed_or_grep(self):

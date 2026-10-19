@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "bbport_sampler.h"
 #include <cstdlib>
 #include "bbport_threads.h"
 #include "bbport_copy.h"
@@ -159,6 +160,7 @@ private:
 
     void Run(std::stop_token stop) {
         Common::SetCurrentThreadName("bb:DrawRec");
+        BbSampler::RegisterThread("draw recorder");
         on_stage_b = true;
         stage_b_tid.store(static_cast<u32>(gettid()), std::memory_order_release);
         u64 at = 0;

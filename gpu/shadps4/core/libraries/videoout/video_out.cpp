@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <cstdio>
 #include "common/assert.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
@@ -351,7 +353,20 @@ s32 sceVideoOutSubmitEopFlip(s32 handle, u32 buf_id, u32 mode, s64 flip_arg, voi
     Platform::IrqC::Instance()->RegisterOnce(
         Platform::InterruptId::GfxFlip, [=](Platform::InterruptId irq) {
             ASSERT_MSG(irq == Platform::InterruptId::GfxFlip, "An unexpected IRQ occured");
-            ASSERT_MSG(port->buffer_labels[buf_id] == 1, "Out of order flip IRQ");
+            // bbport: the presenter releases a buffer's label when the flip after it is shown
+            // (VideoOutDriver::Flip, after the flip event). Bloodborne paces on that event, not
+            // on the label, so its next frame into this buffer can lock the label just before
+            // that release lands: the release belonged to the buffer's previous use. It ended
+            // the game here ("Out of order flip IRQ"; once per few hours, more often on an
+            // integrated GPU at 60 FPS). This flip's lock stands; the frame was copied at submit.
+            if (port->buffer_labels[buf_id] != 1) {
+                static std::atomic<u32> reported{0};
+                if (reported.fetch_add(1, std::memory_order_relaxed) < 4) {
+                    std::printf("VideoOut: buffer %u released while its next flip was queued; "
+                                "locked again\n", buf_id);
+                }
+                port->buffer_labels[buf_id] = 1;
+            }
             const auto result = driver->SubmitFlip(port, buf_id, flip_arg, true);
             ASSERT_MSG(result, "EOP flip submission failed");
         });

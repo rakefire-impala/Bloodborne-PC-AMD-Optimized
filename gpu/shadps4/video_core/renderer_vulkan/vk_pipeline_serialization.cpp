@@ -357,6 +357,10 @@ void PipelineCache::WarmUp() {
         return;
     }
 
+    // bbport: an integrated GPU keeps its own cache. Its shaders differ (device features, the
+    // motion shaders' buffer addresses), and the incompatible-profile check below would clear
+    // the discrete GPU's cache on every switch between the two (laptops with both).
+    Storage::DataBase::Instance().SetDeviceTag(instance.IsIntegrated() ? "-igpu" : "");
     Storage::DataBase::Instance().Open();
 
     // Check if cache is compatible

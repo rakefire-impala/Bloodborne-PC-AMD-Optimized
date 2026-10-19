@@ -344,6 +344,41 @@ void Scheduler::WaitSubmitted() {
     }
 }
 
+#ifdef _WIN32
+extern "C" __declspec(dllimport) unsigned short __stdcall RtlCaptureStackBackTrace(
+    unsigned long frames_to_skip, unsigned long frames_to_capture, void** back_trace,
+    unsigned long* back_trace_hash);
+extern "C" char __ImageBase;
+#endif
+
+namespace {
+/// bbport: BB_WAIT_TRACE=1: the callers of every wait for the GPU over 15 ms, as addresses in
+/// out/bb-probe.exe (llvm-symbolizer --obj=out/bb-probe.exe <addresses>).
+void TraceLongWait(double ms, u64 tick, u64 current) {
+#ifdef _WIN32
+    static const bool trace = [] {
+        const char* env = std::getenv("BB_WAIT_TRACE");
+        return env && env[0] == '1';
+    }();
+    if (!trace || ms < 15.0) {
+        return;
+    }
+    void* frames[10];
+    const unsigned count = RtlCaptureStackBackTrace(2, 10, frames, nullptr);
+    char text[256];
+    int length = 0;
+    for (unsigned i = 0; i < count && length < int(sizeof(text)) - 24; ++i) {
+        length += std::snprintf(text + length, sizeof(text) - length, " 0x%llx",
+                                (unsigned long long)(reinterpret_cast<uintptr_t>(frames[i]) -
+                                                     reinterpret_cast<uintptr_t>(&__ImageBase) +
+                                                     0x140000000ull));
+    }
+    std::printf("GPU wait trace: %.1f ms for tick %llu (%llu ahead):%s\n", ms,
+                (unsigned long long)tick, (unsigned long long)(current - tick), text);
+#endif
+}
+} // namespace
+
 void Scheduler::Wait(u64 tick) {
     const BbWatch::ScopedStage stage{"waiting for the GPU"};
     if (tick >= work_semaphore.CurrentTick()) {
@@ -351,9 +386,15 @@ void Scheduler::Wait(u64 tick) {
         SubmitInfo info{};
         Flush(info);
     }
-    BbStats::WaitTimer timer{BbStats::tick_wait_ns};
-    BbHitch::Timer hitch_timer{BbHitch::gpu_wait_ns};
-    work_semaphore.Wait(tick);
+    const auto start = std::chrono::steady_clock::now();
+    {
+        BbStats::WaitTimer timer{BbStats::tick_wait_ns};
+        BbHitch::Timer hitch_timer{BbHitch::gpu_wait_ns};
+        work_semaphore.Wait(tick);
+    }
+    TraceLongWait(
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(),
+        tick, work_semaphore.CurrentTick());
 }
 
 void Scheduler::PopPendingOperations() {

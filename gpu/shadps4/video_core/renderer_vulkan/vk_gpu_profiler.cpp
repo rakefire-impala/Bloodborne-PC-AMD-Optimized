@@ -81,13 +81,26 @@ void GpuProfiler::Collect(u32 which) {
     if (result != vk::Result::eSuccess) {
         return;
     }
+    std::unordered_map<u64, double> frame_ms;
     for (u32 i = 0; i + 1 < count; ++i) {
         const double ms = double(stamps[i + 1] - stamps[i]) * period_ns / 1e6;
         auto& total = totals[keys[which][i]];
         total.ms += ms;
         ++total.segments;
+        frame_ms[keys[which][i]] += ms;
     }
     ++frames;
+    // A frame far over the display interval: where its time went (GPU spikes behind hitches).
+    const double span = count > 1 ? double(stamps[count - 1] - stamps[0]) * period_ns / 1e6 : 0;
+    if (span > 25.0) {
+        std::vector<std::pair<u64, double>> top(frame_ms.begin(), frame_ms.end());
+        std::ranges::sort(top, [](const auto& a, const auto& b) { return a.second > b.second; });
+        std::printf("GPU profile: slow frame %.1f ms:", span);
+        for (size_t i = 0; i < std::min<size_t>(top.size(), 6); ++i) {
+            std::printf(" %.1f %s;", top[i].second, described[top[i].first].c_str());
+        }
+        std::printf("\n");
+    }
 }
 
 void GpuProfiler::Print() {

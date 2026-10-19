@@ -408,6 +408,8 @@ private:
     void GarbageCollectSamplers();
     /// bbport: whether a GPU-written image can be written back to guest memory (and so evicted).
     bool CanWriteBack(const Image& image) const;
+    /// bbport: one line on what registered images hold (the 5 s pressure report).
+    void PrintImageCensus();
     /// bbport: writes GPU-written images back to guest memory behind one GPU wait, then frees them.
     void WriteBackAndFree(std::span<const ImageId> images);
 
@@ -431,6 +433,7 @@ private:
     u64 gc_written_tiled = 0, gc_written_bytes = 0, gc_unevictable = 0;
     u64 gc_budget = 0;        ///< bbport: the live budget the thresholds follow (0: none)
     std::chrono::steady_clock::time_point gc_report_time{};
+    std::chrono::steady_clock::time_point census_time{};
     u64 trigger_gc_memory = 0;
     u64 pressure_gc_memory = 0;
     u64 critical_gc_memory = 0;

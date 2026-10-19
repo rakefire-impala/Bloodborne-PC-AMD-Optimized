@@ -133,9 +133,23 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
         (blocks_per_arena_page * num_arena_pages) * sizeof(vk::DeviceAddress);
     fault_manager = std::make_unique<FaultManager>(instance, scheduler, *this, block_shift,
                                                    blocks_per_arena_page * num_arena_pages);
+    // bbport: sparse, with table pages bound on their first write (MakePageTableResident). The
+    // table covers the whole 40-bit address space: 128 MiB of VRAM with 64 KiB blocks, of which
+    // the game's memory needs a few pages (one covers 512 MiB of it). Unbound pages read as 0
+    // (residencyNonResidentStrict), what the fill used to write.
+    const char* sparse_env = std::getenv("BB_SPARSE_PAGETABLE");
+    const bool sparse_table = instance.GetPhysicalDevice()
+                                  .getProperties()
+                                  .sparseProperties.residencyNonResidentStrict &&
+                              !(sparse_env && sparse_env[0] == '0');
     bda_pagetable_buffer = std::make_unique<Buffer>(
-        instance, 0, bda_pagetable_size, MemoryType::DeviceLocal, "BDA Page Table Buffer");
-    runtime.FillBuffer(bda_pagetable_buffer.get(), 0u, bda_pagetable_size, 0u);
+        instance, 0, bda_pagetable_size,
+        sparse_table ? MemoryType::Sparse : MemoryType::DeviceLocal, "BDA Page Table Buffer");
+    if (sparse_table) {
+        pagetable_bound.assign(Common::DivCeil(bda_pagetable_size >> block_shift, u64{64}), 0);
+    } else {
+        runtime.FillBuffer(bda_pagetable_buffer.get(), 0u, bda_pagetable_size, 0u);
+    }
 
     chunk_blocks = static_cast<u32>(ARENA_CHUNK_SIZE >> block_shift);
     ASSERT_MSG(chunk_blocks <= MAX_CHUNK_WORDS * 64, "Arena chunk of {} blocks", chunk_blocks);
@@ -153,8 +167,14 @@ BufferCache::~BufferCache() {
     if (prefetch.allocation) {
         vmaFreeMemory(instance.GetAllocator(), prefetch.allocation);
     }
+    if (prefetch.system_allocation) {
+        vmaFreeMemory(instance.GetAllocator(), prefetch.system_allocation);
+    }
     for (const ArenaChunk& chunk : arena_chunks) {
         vmaFreeMemory(instance.GetAllocator(), chunk.allocation);
+    }
+    for (const VmaAllocation allocation : pagetable_memory) {
+        vmaFreeMemory(instance.GetAllocator(), allocation);
     }
 }
 
@@ -785,6 +805,7 @@ void BufferCache::EnsureResident(u64 first_block, u64 last_block) {
                 owner->BufferDeviceAddress() + ((block << block_shift) - owner->cpu_addr);
         }
         const u64 copy_size = (end - start) * sizeof(vk::DeviceAddress);
+        MakePageTableResident(start, end);
         copies.emplace_back(offset, start * sizeof(vk::DeviceAddress), copy_size);
         offset += copy_size;
         arena_resident_bytes.fetch_add((end - start) << block_shift, std::memory_order_relaxed);
@@ -882,6 +903,44 @@ void SetBits(std::span<u64> words, u32 first, u32 count, bool value) {
     }
 }
 } // namespace
+
+void BufferCache::MakePageTableResident(u64 first, u64 end) {
+    if (pagetable_bound.empty() || first >= end) {
+        return;
+    }
+    const u64 last_page = ((end * sizeof(vk::DeviceAddress)) - 1) >> block_shift;
+    for (u64 page = (first * sizeof(vk::DeviceAddress)) >> block_shift; page <= last_page;
+         ++page) {
+        u64& word = pagetable_bound[page >> 6];
+        const u64 bit = u64{1} << (page & 63);
+        if (word & bit) {
+            continue;
+        }
+        VmaAllocation allocation{};
+        VmaAllocationInfo info{};
+        // VRAM, else system memory: an unbound page would drop the entries written to it.
+        const bool allocated =
+            AllocateChunkMemory(instance.GetAllocator(), arena_memory_type_index, block_size,
+                                block_size, allocation, info) ||
+            (arena_fallback_memory_type_index != ~0u &&
+             AllocateChunkMemory(instance.GetAllocator(), arena_fallback_memory_type_index,
+                                 block_size, block_size, allocation, info));
+        ASSERT_MSG(allocated, "Out of memory for a BDA page table page; {}",
+                   instance.DescribeMemory());
+        pagetable_memory.push_back(allocation);
+        word |= bit;
+        BindsForArena(bda_pagetable_buffer.get())
+            ->binds.push_back(vk::SparseMemoryBind{
+                .resourceOffset = page << block_shift,
+                .size = block_size,
+                .memory = info.deviceMemory,
+                .memoryOffset = info.offset,
+            });
+        // New memory holds anything: zero it after the bind (the submission waits for the
+        // batch), before the entries written in it.
+        runtime.FillBuffer(bda_pagetable_buffer.get(), page << block_shift, block_size, 0u);
+    }
+}
 
 void BufferCache::NoteUse(VAddr address, u64 size) {
     const u32 frame =
@@ -1234,7 +1293,9 @@ u64 BufferCache::DemoteRanges(u64 max_bytes, u64 tick, Pick&& pick) {
         bool complete = true;
         for (u64 need = old.end - old.start; need != 0;) {
             auto piece = TakeFreeBlocks(need, true);
-            if (!piece && AllocateArenaChunk(true)) {
+            // A chunk the worker allocated (asked for here when there is none: the range waits).
+            static const bool sync_chunk = std::getenv("BB_SYNC_SYSTEM_CHUNK") != nullptr;
+            if (!piece && (sync_chunk ? AllocateArenaChunk(true) : AdoptPrefetchedSystemChunk())) {
                 piece = TakeFreeBlocks(need, true);
             }
             u8* const host = piece ? SystemArenaPointer(piece->memory, piece->offset) : nullptr;
@@ -1616,17 +1677,20 @@ void BufferCache::PrefetchLoop() {
     std::unique_lock lock{prefetch.mutex};
     while (true) {
         prefetch.cv.wait_for(lock, std::chrono::seconds(1),
-                             [this] { return prefetch.stop || prefetch.requested; });
+                             [this] {
+                                 return prefetch.stop || prefetch.requested ||
+                                        prefetch.system_requested;
+                             });
         if (prefetch.stop) {
             return;
         }
-        if (!prefetch.requested) {
+        if (!prefetch.requested && !prefetch.system_requested) {
             // Slow-frame entries VideoOut queued (BbHitch), printed off the flip path and
             // outside the lock the recording thread may wait on.
             lock.unlock();
             BbHitch::PrintPending();
             lock.lock();
-            if (prefetch.stop || prefetch.requested) {
+            if (prefetch.stop || prefetch.requested || prefetch.system_requested) {
                 continue;
             }
             const u64 count = BbWatch::submissions.load(std::memory_order_relaxed);
@@ -1649,20 +1713,57 @@ void BufferCache::PrefetchLoop() {
             }
             continue;
         }
+        const bool want_vram = prefetch.requested;
+        const bool want_system = prefetch.system_requested;
         lock.unlock();
         VmaAllocation allocation{};
         VmaAllocationInfo info{};
-        const bool ok = AllocateChunkMemory(instance.GetAllocator(), arena_memory_type_index,
+        const bool ok = want_vram &&
+                        AllocateChunkMemory(instance.GetAllocator(), arena_memory_type_index,
                                             ARENA_CHUNK_SIZE, block_size, allocation, info);
+        // bbport: demotion's system chunk too. Allocated on the recording thread it cost ~20 ms
+        // when VMA needed a new block (vkAllocateMemory), a hitch per new block.
+        VmaAllocation system_allocation{};
+        VmaAllocationInfo system_info{};
+        const bool system_ok =
+            want_system && arena_fallback_memory_type_index != ~0u &&
+            AllocateChunkMemory(instance.GetAllocator(), arena_fallback_memory_type_index,
+                                ARENA_CHUNK_SIZE, block_size, system_allocation, system_info,
+                                false, true);
         lock.lock();
         if (ok) {
             prefetch.allocation = allocation;
             prefetch.memory = info.deviceMemory;
             prefetch.offset = info.offset;
         }
-        prefetch.requested = false;
+        if (system_ok) {
+            prefetch.system_allocation = system_allocation;
+            prefetch.system_memory = system_info.deviceMemory;
+            prefetch.system_offset = system_info.offset;
+            prefetch.system_mapped = system_info.pMappedData;
+        }
+        if (want_vram) {
+            prefetch.requested = false;
+        }
+        if (want_system) {
+            prefetch.system_requested = false;
+        }
         prefetch.cv.notify_all();
     }
+}
+
+bool BufferCache::AdoptPrefetchedSystemChunk() {
+    std::scoped_lock lock{prefetch.mutex};
+    if (!prefetch.system_allocation) {
+        if (!prefetch.system_requested) {
+            prefetch.system_requested = true;
+            prefetch.cv.notify_all();
+        }
+        return false;
+    }
+    AdoptArenaChunk(std::exchange(prefetch.system_allocation, nullptr), prefetch.system_memory,
+                    prefetch.system_offset, true, prefetch.system_mapped);
+    return true;
 }
 
 bool BufferCache::AdoptPrefetchedChunk(bool wait) {
@@ -1925,11 +2026,33 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
     // needs no ordering against another one and waits for nothing.
     std::vector<vk::SparseBufferMemoryBindInfo> buffer_binds;
     buffer_binds.reserve(pending_unbinds.size() + pending_binds.size());
-    for (const auto* list : {&pending_unbinds, &pending_binds}) {
-        for (const auto& binds : *list) {
+    for (auto* list : {&pending_unbinds, &pending_binds}) {
+        for (auto& binds : *list) {
             if (binds.binds.empty()) {
                 continue;
             }
+            // bbport: one bind per run of blocks contiguous in the buffer and in one memory
+            // (pieces of a range taken from a chunk's free run usually are). Each bind costs the
+            // AMD Windows driver up to ~0.7 ms: 34 in a frame made a 50 ms frame. Neighbours in
+            // list order only, so a range bound twice in this batch keeps its last binding.
+            auto& list_binds = binds.binds;
+            static const bool merge_binds = [] {
+                const char* env = std::getenv("BB_MERGE_BINDS");
+                return !(env && env[0] == '0');
+            }();
+            size_t merged = merge_binds ? 0 : list_binds.size() - 1;
+            for (size_t i = merge_binds ? 1 : list_binds.size(); i < list_binds.size(); ++i) {
+                vk::SparseMemoryBind& last = list_binds[merged];
+                const vk::SparseMemoryBind& next = list_binds[i];
+                if (next.resourceOffset == last.resourceOffset + last.size &&
+                    next.memory == last.memory && next.flags == last.flags &&
+                    (!next.memory || next.memoryOffset == last.memoryOffset + last.size)) {
+                    last.size += next.size;
+                } else {
+                    list_binds[++merged] = next;
+                }
+            }
+            list_binds.resize(merged + 1);
             buffer_binds.emplace_back(vk::SparseBufferMemoryBindInfo{
                 .buffer = binds.arena->Handle(),
                 .bindCount = static_cast<u32>(binds.binds.size()),
@@ -1956,7 +2079,11 @@ void BufferCache::SubmitPendingArenaBinds(Vulkan::SubmitInfo& info) {
     };
 
     info.AddWait(signal_sema, signal_tick);
-    auto submit_result = instance.GetGraphicsQueue().bindSparse(sparse_info);
+    vk::Result submit_result;
+    {
+        BbHitch::Timer timer{BbHitch::bind_ns};
+        submit_result = instance.GetGraphicsQueue().bindSparse(sparse_info);
+    }
     // bbport: any failure, not just a lost device. The submission waits for this batch's signal,
     // which a failed batch never gives: the GPU would wait forever (a freeze, not a crash).
     ASSERT_MSG(submit_result == vk::Result::eSuccess, "Sparse binding failed: {}; {}",

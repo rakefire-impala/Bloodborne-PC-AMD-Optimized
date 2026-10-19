@@ -512,6 +512,9 @@ public:
     };
     [[nodiscard]] VmaHeapStats GetVmaHeapStats() const;
 
+    /// bbport: BB_VMA_DUMP=<file>: VMA's detailed JSON map of every allocation (diagnostics).
+    void DumpVmaMap() const;
+
     /// bbport: every heap's usage and budget, and the system commit charge, for messages about
     /// allocation failures and memory pressure.
     [[nodiscard]] std::string DescribeMemory() const;
@@ -525,6 +528,7 @@ public:
         u64 usage = 0;
         u64 budget = 0;
         u64 vma_free = 0;
+        u64 vma_blocks = 0; ///< bytes of VMA's blocks (and dedicated allocations) there
     };
     [[nodiscard]] MemoryLevels GetMemoryLevels() const;
 

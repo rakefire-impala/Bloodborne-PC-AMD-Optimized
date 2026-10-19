@@ -191,9 +191,11 @@ def main():
         scaled_render = scaled_output = None
         live = env.get('BB_LIVE_RES') or ini_value(config, 'live_resolution') or '0'
         if not env.get('BB_RENDER_RES'):
-            # 1080p output keeps the game's sizes unless the GPU check below picks the startup
-            # patch (auto): on those GPUs the live path's per-frame copies cost the same there.
-            at_1080p = ['--at-1080p'] if live == 'auto' else []
+            # 1080p output keeps the game's sizes only for live changes (1, or auto on a GPU the
+            # check below picks for them): elsewhere the live path's per-frame copies and 1080p
+            # post-processing cost more than the preset saves (an integrated Vega at FSR Ultra
+            # Performance: 19 FPS live, against 22 at the larger Balanced size with the patch).
+            at_1080p = ['--at-1080p'] if live in ('auto', '0') else []
             printed = run_script('patches.py', '--print-scaled', *at_1080p, '--settings', config,
                                  capture=True).split()
             if len(printed) == 2:

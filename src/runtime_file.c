@@ -251,6 +251,11 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     if (audio_trace() && strstr(guest,"sound/")) printf("Audio trace: open(%s) -> fd %d, %lld bytes\n",guest,fd,(long long)s.st_size);
     if (open_trace() && (strstr(guest,"/map/") || strstr(guest,"/chr/") || strstr(guest,"/event/") || strstr(guest,"/remo/")))
         printf("Open trace: %s\n",guest);
+    /* BB_TRACE_OPENS=2: every open, with the time (when each loading-screen file arrives). */
+    else if (getenv("BB_TRACE_OPENS") && getenv("BB_TRACE_OPENS")[0]=='2') {
+        struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
+        printf("Open trace: %lld.%03ld %s\n",(long long)t.tv_sec,t.tv_nsec/1000000,guest);
+    }
     const char *mod_trace=getenv("BB_MOD_TRACE"), *mod_root=getenv("BB_MODS_DIR");
     if (mod_trace && mod_trace[0]=='1' && mod_root) {
         char actual[PATH_MAX],root[PATH_MAX];
@@ -366,7 +371,12 @@ static int64_t do_stat(const char *guest,GuestStat *out) {
     int e=translate(guest,path,sizeof(path));
     if (e) return -e;
     if (!out) return -EFAULT;
-    if (host_stat(path,&s)) return -errno;
+    if (host_stat(path,&s)) {
+        e=errno;
+        if (getenv("BB_TRACE_OPENS") && getenv("BB_TRACE_OPENS")[0]=='2') printf("Open trace: stat(%s) -> errno %d\n",guest,e);
+        return -e;
+    }
+    if (getenv("BB_TRACE_OPENS") && getenv("BB_TRACE_OPENS")[0]=='2') printf("Open trace: stat(%s)\n",guest);
     convert_stat(&s,out); return 0;
 }
 static int64_t do_getdents(int fd,char *buffer,uint64_t size,int64_t *basep) {

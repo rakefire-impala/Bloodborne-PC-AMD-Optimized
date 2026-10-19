@@ -1652,6 +1652,35 @@ void TemporalUpscaler::RunScaled() {
     barrier(vk::Image(motion_image), vk::ImageAspectFlagBits::eColor, vk::ImageLayout::eGeneral,
             vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderWrite,
             vk::ImageLayout::eGeneral, all, vk::AccessFlagBits2::eShaderRead);
+    // bbport: the jitter moves the game's viewport by up to half a pixel. On frames it moves
+    // the scene up (left), the last row (column) has no pixel centre inside it and keeps an
+    // old frame's color: the upscaler stretched it into a bright line along the bottom edge,
+    // every other frame (input row 635 of 636 at 118 against ~50). Repeat its neighbour.
+    if (w > 1 && h > 1) {
+        const auto copy_edge = [&](vk::Offset3D src, vk::Offset3D dst, vk::Extent3D extent,
+                                   vk::AccessFlags2 src_access) {
+            barrier(color_image, vk::ImageAspectFlagBits::eColor, vk::ImageLayout::eGeneral, all,
+                    src_access, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eCopy,
+                    vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite);
+            const vk::ImageCopy region{
+                .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                .srcOffset = src,
+                .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                .dstOffset = dst,
+                .extent = extent,
+            };
+            cmdbuf.copyImage(color_image, vk::ImageLayout::eGeneral, color_image,
+                             vk::ImageLayout::eGeneral, region);
+        };
+        copy_edge({s32(w) - 2, 0, 0}, {s32(w) - 1, 0, 0}, {1, h, 1},
+                  vk::AccessFlagBits2::eMemoryWrite);
+        copy_edge({0, s32(h) - 2, 0}, {0, s32(h) - 1, 0}, {w, 1, 1},
+                  vk::AccessFlagBits2::eTransferWrite);
+        barrier(color_image, vk::ImageAspectFlagBits::eColor, vk::ImageLayout::eGeneral,
+                vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferWrite,
+                vk::ImageLayout::eGeneral, all,
+                vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite);
+    }
 
     const auto now = std::chrono::steady_clock::now();
     float frame_ms = std::chrono::duration<float, std::milli>(now - last_frame).count();
@@ -1809,6 +1838,11 @@ void TemporalUpscaler::RunScaled() {
         reset = false;
         dispatched_last_frame = true;
         ExtraSharpen(cmdbuf, vk::Image(ui_image), true, ow, oh);
+        if (const int dump = DumpFrame(); dump >= 0) {
+            DumpImages(instance, scheduler, cmdbuf, dump,
+                       {{vk::Image(ui_image), ow, oh, 4, "fsr_out", "rgba"},
+                        {color_image, source_width, source_height, 4, "input", "rgba"}});
+        }
     }
     barrier(vk::Image(ui_image), vk::ImageAspectFlagBits::eColor, vk::ImageLayout::eGeneral, all,
             rw, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eColorAttachmentOutput,

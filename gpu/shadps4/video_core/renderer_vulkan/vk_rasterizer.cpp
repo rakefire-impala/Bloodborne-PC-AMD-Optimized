@@ -914,6 +914,42 @@ bool Rasterizer::FilterDrawPasses() const {
     return !(mode == Mode::Disable && (depth_copy || stencil_copy));
 }
 
+bool Rasterizer::IsEmptyDraw(const GraphicsPipeline* pipeline) const {
+    // bbport: after PrepareRenderState: no fragment stage, no color or depth/stencil target, and
+    // no stage that writes memory (written buffers, storage images; stream-out pipelines are
+    // never built). The game issues about 13 such full-screen draws a frame (depth test off,
+    // colour off: depth decompression on the PS4, nothing to do for the port's depth images),
+    // and each still rasterized a 16384x16384 area without attachments: ~1 ms a frame on an
+    // integrated Vega with 7 CUs. BB_KEEP_EMPTY_DRAWS=1 records them as before.
+    static const bool keep = [] {
+        const char* env = std::getenv("BB_KEEP_EMPTY_DRAWS");
+        return env && env[0] == '1';
+    }();
+    if (keep || db_desc.first) {
+        return false;
+    }
+    const auto& key = pipeline->GetGraphicsKey();
+    for (s32 cb = 0; cb < std::bit_width(key.mrt_mask); ++cb) {
+        if (cb_descs[cb].first) {
+            return false;
+        }
+    }
+    const auto stages = pipeline->GetStages();
+    if (stages[u32(Shader::SwStage::Fragment)]) {
+        return false;
+    }
+    for (const Shader::Info* info : stages) {
+        if (!info) {
+            continue;
+        }
+        if (info->has_storage_images ||
+            std::ranges::any_of(info->buffers, [](const auto& buffer) { return buffer.is_written; })) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* prepared) {
     RENDERER_TRACE;
     BbWatch::Stage("draw");
@@ -985,6 +1021,12 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         upscaler->OnDraw(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
                          cb_descs[0].first, db_desc.first,
                          UiComposition::NativeViewport(viewport.xscale * 2, viewport.yscale * 2));
+    }
+    // After the upscaler saw it (its UI trigger counts draws by vertex shader).
+    if (IsEmptyDraw(pipeline)) {
+        bind_prepared = nullptr; // as after BindResources: never for a later indirect draw
+        BbStats::empty_draws.fetch_add(1, std::memory_order_relaxed);
+        return;
     }
     const PreparedDraw* draw_prepared = bind_prepared;
     // bbport: vertex and index buffers are resolved while the helper binds textures (their

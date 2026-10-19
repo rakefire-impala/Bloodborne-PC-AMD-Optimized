@@ -113,12 +113,15 @@ void DataBase::Open() {
         // bbport: other bbport builds started from the same launcher settings share the user
         // folder, and their shaders and pipelines under the plain serial name do not build
         // here (the warm-up failed on them). This build keeps its own folder, started once
-        // from the shared one.
+        // from the shared one. A GPU with a device tag (SetDeviceTag) has a folder of its own,
+        // started empty: the shared one holds another GPU's shaders.
         const auto shared_path = GetUserPath(PathType::CacheDir) / game_info.GameSerial();
         cache_path = GetUserPath(PathType::CacheDir) /
-                     (std::string{game_info.GameSerial()} + "-rakefire");
+                     (std::string{game_info.GameSerial()} + "-rakefire" + device_tag);
         std::error_code ec;
-        if (!std::filesystem::exists(cache_path, ec)) {
+        if (!device_tag.empty()) {
+            std::filesystem::create_directories(cache_path, ec);
+        } else if (!std::filesystem::exists(cache_path, ec)) {
             std::filesystem::create_directories(cache_path, ec);
             u32 copied = 0;
             for (const auto& entry : std::filesystem::directory_iterator(shared_path, ec)) {

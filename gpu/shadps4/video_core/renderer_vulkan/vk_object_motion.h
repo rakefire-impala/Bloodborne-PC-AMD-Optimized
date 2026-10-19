@@ -88,7 +88,8 @@ private:
     u32 params_used = 0;
     VideoCore::UniqueImage image;
     vk::UniqueImageView view;
-    u32 image_width = 0, image_height = 0;
+    u32 image_width = 0, image_height = 0; ///< the size of the pass that writes it
+    u32 alloc_width = 0, alloc_height = 0; ///< the image's size (only grows)
     bool written = false; ///< this frame's vectors are in the image
     vk::ImageLayout image_layout = vk::ImageLayout::eUndefined;
 };

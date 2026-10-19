@@ -1,3 +1,4 @@
+#include "bbport_sampler.h"
 #include "bbport_nvidia.h"
 #include "bbport_amd.h"
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
@@ -8,6 +9,7 @@
 
 #include "common/assert.h"
 #include "bbport_background.h"
+#include "bbport_hitch.h"
 #include "common/debug.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
@@ -89,6 +91,7 @@ static void ResetSubmissionLock(Platform::InterruptId irq) {
 
 static void WaitGpuIdle() {
     HLE_TRACE;
+    const BbHitch::Block block{"WaitGpuIdle"};
     std::unique_lock lock{m_wait_idle};
     cv_lock.wait(lock, [] { return submission_lock == 0; });
 }
@@ -2328,6 +2331,8 @@ s32 PS4_SYSV_ABI sceGnmSubmitCommandBuffersForWorkload(u32 workload, u32 count,
                                                        u32* ccb_sizes_in_bytes) {
     HLE_TRACE;
     LOG_DEBUG(Lib_GnmDriver, "called");
+    BbHitch::NoteSubmit();
+    BbSampler::RegisterThread("game submit");
     BbBackground::Wait();
 
     if (!dcb_gpu_addrs || !dcb_sizes_in_bytes) {

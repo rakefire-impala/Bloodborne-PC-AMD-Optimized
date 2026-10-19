@@ -188,7 +188,7 @@ APP_DEFAULTS = {'ui_language': '', 'game_dir': str(PORT_DIR.parent / 'CUSA03173'
                 'vk_validation': False, 'developer_profile': False, 'extra_env': '', 'close_on_play': False,
                 'check_updates': True, 'sacrifice_made': False, 'online': False, 'online_server': 'srv.shadps4.net:31313',
                 'online_webapi': '', 'online_npid': '', 'online_password': '', 'online_upnp': True,
-                'online_community': COMMUNITY_SERVER}
+                'online_community': COMMUNITY_SERVER, 'gpu': '', 'igpu_mode': False, 'gpu_profiles': {}}
 MENU_DEFAULTS = {'menu_language': 'en', 'window_mode': 'launcher', 'borderless_vsync': '0',
                  'dlss_preset': 'default', 'xess_preset': '2', 'show_fps': '1', 'show_dlss_preset': '0',
                  'show_resolution': '0', 'show_frame_generation': '0', 'show_latency': '0',
@@ -265,6 +265,27 @@ FRAME_CAPS = [('-1', ('Auto: display refresh, max 120 (recommended)', 'Авто:
               ('240', ('240  ⚠',)), ('0', ('No limit  ⚠', 'Без ограничения  ⚠'))]
 FRAMES_AHEAD = [('', ('1 (default)', '1 (по умолчанию)')), ('2', ('2',)), ('0', ('Unbounded', 'Без ограничения'))]
 UI_LANGUAGES = bbport_lang.LANGUAGE_NAMES
+# Graphics card (BB_GPU): '' lets the port choose (a discrete GPU first), 'integrated' takes the
+# first integrated GPU, anything else is a device name from bb-gpu-capabilities --list.
+GPU_INTEGRATED = 'integrated'
+# Settings the integrated GPU mode switches as one set: turning it on keeps the current values
+# in settings.json (gpu_profiles 'discrete') and applies its own; turning it off keeps its
+# values (with any changes made meanwhile) for next time and brings the others back.
+GPU_PROFILE_KEYS = [('ini', 'upscaler'), ('ini', 'preset'), ('ini', 'output_res'),
+                    ('ini', 'live_resolution'), ('ini', 'sharpen'), ('ini', 'sharpness'),
+                    ('ini', 'object_motion'), ('ini', 'model_lod'), *(('ini', k) for k, _t, _o in EFFECTS),
+                    ('menu', 'frame_generation'), ('app', 'fps_mode'), ('menu', 'real_fps_limit'),
+                    ('app', 'readbacks'), ('app', 'frames_ahead'), ('app', 'gpu')]
+# The integrated GPU mode's own settings, measured on a Ryzen 5 5600H's Radeon (Vega, 7 CUs) in
+# the Hunter's Dream, uncapped: FSR 3.1 Performance from a 640x360 startup-patched scene to a
+# 1280x720 output that the presenter scales to the screen (FSR 3.1's cost follows its output:
+# 7.4 ms of a 20 ms frame at 1080p, 4.2 ms at 720p), lowest model detail (61-65 FPS; Lower 53-57,
+# the game's 49-51), every game effect, object motion vectors and frame generation off. FSR 4
+# needs INT8 hardware this GPU lacks.
+IGPU_PROFILE = {'upscaler': 'fsr3', 'preset': '3', 'output_res': '1280x720', 'live_resolution': '0',
+                'sharpen': True, 'sharpness': 0.5, 'object_motion': False, 'model_lod': '2',
+                **{key: False for key, _t, _o in EFFECTS}, 'frame_generation': 'off', 'fps_mode': '60',
+                'real_fps_limit': '-1', 'readbacks': '0', 'frames_ahead': '2', 'gpu': GPU_INTEGRATED}
 
 FSR4_COMMIT = 'ae8d628fae208813172446d1e49ed94150b04658'
 FSR4_BASE = f'https://raw.githubusercontent.com/FireBurn/Q2RTX/{FSR4_COMMIT}/baseq2/fsr4_shaders'
@@ -501,6 +522,8 @@ def game_environment(s):
     env['BB_PATCHES_DIR'] = s['patches_dir'] or str(DATA_DIR / 'patches')
     env['BB_PATCHES_CONFIG'] = str(DATA_DIR / 'patches.json')
     env['BB_LANGUAGE'] = s['language']
+    if str(s.get('gpu', '')).strip():
+        env['BB_GPU'] = str(s['gpu']).strip()
     if str(s['player_name']).strip():
         env['BB_USER_NAME'] = str(s['player_name']).strip()
     env['BB_FULLSCREEN'] = '1' if s['fullscreen'] else '0'
@@ -719,6 +742,7 @@ class Launcher:
         self.banner_source = self.banner_image = None
         self.ui_calls = queue.Queue()  # work for the Tk thread from helper threads
         self.mod_order, self.mod_vars, self.patch_vars = [], {}, {}
+        self.gpus, self.gpu_boxes, self.igpu_buttons = [], [], []  # detect_gpu fills the list
         root.title('Bloodborne: Optimized for mobile discrete AMD systems — rakefire impala')
         root.configure(bg=BG)
         self.dpi = root.winfo_fpixels('1i') / 96.0
@@ -730,7 +754,8 @@ class Launcher:
         self.show('play')
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.after(100, self.drain_output)
-        threading.Thread(target=self.detect_gpu, daemon=True).start()
+        self.start_gpu_detection()
+        self.var('gpu', 'app').trace_add('write', self.start_gpu_detection)
         if self.app.get('check_updates', True) and not COOP_TEST:
             threading.Thread(target=self.check_update, daemon=True).start()
         if not self.app.get('sacrifice_made'):
@@ -937,6 +962,10 @@ class Launcher:
         s.configure('TSpinbox', foreground=TEXT, arrowcolor=GOLD, insertcolor=TEXT, padding=4)
         s.configure('TButton', background=CARD, foreground=TEXT, padding=(12, 6), borderwidth=1)
         s.map('TButton', background=[('active', LINE), ('disabled', PANEL)], foreground=[('disabled', MUTED)])
+        s.configure('ToggleOn.TButton', background=BLOOD, foreground=GOLD, padding=(12, 6), borderwidth=1,
+                    bordercolor=GOLD)
+        s.map('ToggleOn.TButton', background=[('active', BLOOD_HI), ('disabled', PANEL)],
+              foreground=[('disabled', MUTED)])
         s.configure('Play.TButton', background=GOLD, foreground=BG, font=('Georgia', 15, 'bold'),
                     padding=(36, 10), borderwidth=1)
         s.map('Play.TButton', background=[('active', '#e6d6bc'), ('disabled', CARD)],
@@ -1113,9 +1142,9 @@ class Launcher:
             widget.row_hint.grid(row=r + 1, column=1, sticky='w', pady=(2, 2))
         return widget
 
-    def warning_icon(self, parent, text):
+    def warning_icon(self, parent, text, background=PANEL):
         """A (!) mark that shows `text` while the pointer is over it (or it has the focus)."""
-        icon = self.tk.Label(parent, text='(!)', bg=PANEL, fg=GOLD, font=('Segoe UI', 10, 'bold'),
+        icon = self.tk.Label(parent, text='(!)', bg=background, fg=GOLD, font=('Segoe UI', 10, 'bold'),
                              cursor='question_arrow', takefocus=True)
         tip = {}
 
@@ -1266,12 +1295,30 @@ class Launcher:
         bar.pack(fill='x', side='bottom')
         bar.pack_propagate(False)
         self.status = tk.Label(bar, text='', bg=BG, fg=MUTED, font=('Segoe UI', 10), anchor='w', justify='left')
-        self.status.pack(side='left', padx=self.px(20))
-        bar.bind('<Configure>', lambda e: self.status.configure(wraplength=max(self.px(120), e.width-self.px(360))))
         self.play_button = ttk.Button(bar, text=_('PLAY', 'ИГРАТЬ'), style='Play.TButton', command=self.play)
         self.play_button.pack(side='right', padx=(10, 24), pady=11)
         self.stop_button = ttk.Button(bar, text=_('Stop', 'Остановить'), command=self.stop, state='disabled')
         self.stop_button.pack(side='right', pady=11)
+        # The integrated GPU mode switch, next to PLAY on every page.
+        self.warning_icon(bar, _(
+            'iGPU mode plays on the integrated graphics (the processor\'s GPU) with the fastest '
+            'settings: FSR 3.1 Performance to 720p scaled to your screen, the game effects off, lowest '
+            'model detail, no frame generation, GPU readbacks off. Your current settings come back '
+            'when you turn it off; changes you make while it is on are kept for the next time. '
+            'Graphics → Graphics card.',
+            'Режим iGPU: игра на встроенной графике (GPU процессора) с самыми быстрыми настройками: '
+            'FSR 3.1 Performance в 720p, растянутые на экран, эффекты игры выключены, минимальная '
+            'детализация, без генерации кадров, чтение GPU выключено. Текущие настройки вернутся, '
+            'когда вы его выключите; изменения, сделанные в этом режиме, сохранятся до следующего '
+            'раза. Графика → Видеокарта.'
+        ), background=BG).pack(side='right', padx=(0, 14))
+        igpu = self.igpu_button(bar)
+        igpu.pack(side='right', padx=(0, 6), pady=11)
+        # The status takes what the buttons leave (packed last, so they keep their full width).
+        self.status.pack(side='left', padx=self.px(20))
+        bar_buttons = (self.play_button, self.stop_button, igpu)
+        bar.bind('<Configure>', lambda e: self.status.configure(wraplength=max(
+            self.px(120), e.width - sum(w.winfo_reqwidth() for w in bar_buttons) - self.px(120))))
         self.content = tk.Frame(right, bg=PANEL)
         self.content.pack(fill='both', expand=True)
 
@@ -1339,6 +1386,7 @@ class Launcher:
         quick.pack(fill='x')
         ttk.Label(quick, text=_('Quick settings', 'Основное'), style='Section.TLabel').grid(
             row=0, column=0, columnspan=2, sticky='w', pady=(0, 2))
+        self.row(quick, _('Graphics card', 'Видеокарта'), self.gpu_choice(quick, 26))
         self.row(quick, _('Frame rate', 'Частота кадров'), self.choice(quick, 'fps_mode', 'app', FPS_MODES, 26))
         self.row(quick, _('Upscaler', 'Апскейлер'), self.choice(quick, 'upscaler', 'ini', UPSCALERS, 26))
         self.quick_preset_row = self.row(quick, _('Preset', 'Пресет'),
@@ -1466,7 +1514,34 @@ class Launcher:
         f = self.scrolled_page('graphics', _('Graphics', 'Графика'),
                                _('Stored in bbport.ini; the in-game menu (Insert or L3+R3) changes the same values.',
                                  'Хранится в bbport.ini; в игре меняется через меню (Insert или L3+R3).'))
-        self.section(f, _('Upscaling', 'Апскейлинг'), top=4)
+        self.section(f, _('Graphics card', 'Видеокарта'), top=4)
+        self.row(f, _('Graphics card', 'Видеокарта'), self.gpu_choice(f),
+                 _('The GPU the game renders on. Auto takes a discrete GPU first. On a laptop with two, the '
+                   'integrated one uses less power and less heat, and is slower. Each GPU keeps its own '
+                   'shader cache, so switching does not rebuild the other one\'s.',
+                   'GPU, на котором рисуется игра. Авто выбирает сначала дискретную. На ноутбуке с двумя '
+                   'встроенная тратит меньше энергии и меньше греется, но медленнее. У каждой свой кэш '
+                   'шейдеров: переключение не пересобирает кэш другой.'))
+        holder = ttk.Frame(f)
+        self.igpu_button(holder).pack(side='left')
+        ttk.Button(holder, text=_('Restore its defaults', 'Вернуть его настройки по умолчанию'),
+                   command=self.reset_igpu_profile).pack(side='left', padx=(6, 0))
+        self.row(f, _('Integrated GPU mode', 'Режим встроенной графики'), holder,
+                 _('One switch for the integrated GPU: it selects it and sets the fastest options for it — '
+                   'FSR 3.1 Performance to a 1280 × 720 output scaled to your screen (FSR costs a third of '
+                   'the frame at 1080p on these GPUs), sharpening on, object motion vectors and frame '
+                   'generation off, all game effects off, lowest model detail (Lower keeps small plants such '
+                   'as flowers, for about 10% FPS), 60 FPS, GPU readbacks off. Turning it off brings back the '
+                   'settings you had; its own, with any changes you make while it is on, are kept for the '
+                   'next time.',
+                   'Один переключатель для встроенной графики: выбирает её и ставит для неё самые быстрые '
+                   'настройки — FSR 3.1 Performance в вывод 1280 × 720, растянутый на экран (в 1080p FSR '
+                   'занимает треть кадра на таких GPU), резкость включена, векторы движения объектов и '
+                   'генерация кадров выключены, все эффекты игры выключены, минимальная детализация '
+                   '(«Ниже» сохраняет мелкие растения, например цветы, ценой около 10% FPS), 60 FPS, чтение '
+                   'GPU выключено. При выключении возвращаются ваши прежние настройки; его собственные, с '
+                   'изменениями, сделанными в этом режиме, сохраняются до следующего раза.'))
+        self.section(f, _('Upscaling', 'Апскейлинг'))
         self.row(f, _('Upscaler', 'Апскейлер'), self.choice(f, 'upscaler', 'ini', UPSCALERS),
                  _("Temporal upscaling with the game's own motion vectors. FSR 4 needs its assets (below) and "
                    'a GPU with INT8 dot products; otherwise the game falls back to FSR 3.1 by itself.',
@@ -1936,35 +2011,160 @@ class Launcher:
         upscaler = dict(UPSCALERS).get(self.var('upscaler', 'ini').get(), ('?',))[0].split(' (')[0]
         output = self.var('output_res', 'ini').get().replace('x', ' × ')
         online = _('Online') if self.var('online', 'app').get() else _('Offline')
-        return f'{_(*fps)}   ·   {upscaler}   ·   {output}   ·   {online}'
+        igpu = '   ·   ' + _('iGPU mode', 'Режим iGPU') if self.app.get('igpu_mode') else ''
+        return f'{_(*fps)}   ·   {upscaler}   ·   {output}   ·   {online}{igpu}'
 
-    def detect_gpu(self):
+    def start_gpu_detection(self, *_args):
+        """Checks the graphics card the game will use (again after the choice changes)."""
+        self.gpu_generation = getattr(self, 'gpu_generation', 0) + 1
+        threading.Thread(target=self.detect_gpu, args=(self.var('gpu', 'app').get(), self.gpu_generation),
+                         daemon=True).start()
+
+    def detect_gpu(self, choice, generation):
         exe = PORT_DIR / 'bin' / 'bb-gpu-capabilities.exe'
         if not exe.is_file():
             exe = PORT_DIR / 'out' / 'bb-gpu-capabilities.exe'
         env = dict(os.environ)
+        env.pop('BB_GPU_ID', None)
+        env['BB_GPU'] = choice
         if not (exe.parent / 'SDL3.dll').is_file():
             clang64 = Path(os.environ.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64' / 'bin'
             env['PATH'] = f'{clang64}{os.pathsep}{env.get("PATH", "")}'
         text = _('• Graphics card: not checked', '• Видеокарта: не проверена')
+        gpus, antilag = None, None
         try:
-            result = subprocess.run([str(exe), '--live-resolution'], capture_output=True, text=True, timeout=30,
+            # kind, MiB, Vulkan 1.3, selected, name (tab-separated; tools/gpu_capabilities.c)
+            result = subprocess.run([str(exe), '--list'], capture_output=True, text=True, timeout=30,
                                     env=env, creationflags=NO_WINDOW)
-            names = [line[5:].split(':')[0] for line in result.stderr.splitlines() if line.startswith('GPU: ')]
-            if names:
-                text = _('✓ Graphics card: {}', '✓ Видеокарта: {}').format(names[0])
-            elif result.returncode:
+            gpus = []
+            for line in result.stdout.splitlines():
+                parts = line.split('\t')
+                if len(parts) == 5 and parts[1].isdecimal():
+                    gpus.append({'kind': parts[0], 'mib': int(parts[1]), 'vulkan13': parts[2] == '1',
+                                 'selected': parts[3] == '1', 'name': parts[4].strip()})
+            used = next((gpu for gpu in gpus if gpu['selected']), None)
+            if used and used['vulkan13']:
+                kind = {'discrete': _('discrete', 'дискретная'),
+                        'integrated': _('integrated', 'встроенная')}.get(used['kind'], used['kind'])
+                text = _('✓ Graphics card: {}', '✓ Видеокарта: {}').format(f"{used['name']} ({kind})")
+            elif result.returncode or used:
                 text = _('✗ No Vulkan 1.3 graphics card found (update the driver)',
                          '✗ Не найдена видеокарта с Vulkan 1.3 (обновите драйвер)')
             capability = subprocess.run([str(exe), '--amd-antilag'], capture_output=True, text=True,
                                         timeout=30, env=env, creationflags=NO_WINDOW)
             if capability.returncode == 0 and capability.stdout.strip() in ('0', '1'):
-                available = capability.stdout.strip() == '1'
-                self.ui_calls.put(lambda: self.amd_antilag_check.configure(state='normal' if available else 'disabled'))
+                antilag = capability.stdout.strip() == '1'
         except (OSError, subprocess.TimeoutExpired):
             pass
-        self.gpu_text = text
-        self.ui_calls.put(self.refresh_status)
+
+        def done():
+            if generation != self.gpu_generation:
+                return  # the choice changed again meanwhile; that check reports
+            self.gpu_text = text
+            if gpus is not None:
+                self.gpus = gpus
+                for show in self.gpu_boxes:
+                    show()
+            if antilag is not None:
+                self.amd_antilag_check.configure(state='normal' if antilag else 'disabled')
+            self.refresh_status()
+        self.ui_calls.put(done)
+
+    # ---- graphics card and integrated GPU mode -----------------------------------------------
+    def gpu_options(self):
+        """(value, label) pairs of the Graphics card choice: Auto, then each Vulkan device."""
+        options = [('', _('Auto (a discrete GPU first)', 'Авто (сначала дискретная)'))]
+        for gpu in self.gpus:
+            kind = {'discrete': _('discrete', 'дискретная'),
+                    'integrated': _('integrated', 'встроенная')}.get(gpu['kind'], gpu['kind'])
+            if not gpu['vulkan13']:
+                kind += ', ' + _('no Vulkan 1.3', 'нет Vulkan 1.3')
+            options.append((gpu['name'], f"{gpu['name']} ({kind})"))
+        current = self.var('gpu', 'app').get()
+        if current == GPU_INTEGRATED:
+            options.append((current, _('Integrated GPU', 'Встроенная видеокарта')))
+        elif current and current not in [value for value, _label in options]:
+            options.append((current, _('{} (not found)', '{} (не найдена)').format(current)))
+        return options
+
+    def gpu_choice(self, parent, width=38):
+        var = self.var('gpu', 'app')
+        box = self.ttk.Combobox(parent, state='readonly', width=width)
+
+        def show(*_args):
+            options = self.gpu_options()
+            box.choices = [value for value, _label in options]
+            box.configure(values=[label for _value, label in options])
+            box.current(box.choices.index(var.get()) if var.get() in box.choices else 0)
+        box.bind('<<ComboboxSelected>>', lambda _e: var.set(box.choices[box.current()]))
+        var.trace_add('write', show)
+        show()
+        self.gpu_boxes.append(show)
+        return box
+
+    def igpu_button(self, parent):
+        """The integrated GPU mode switch (a toggle button)."""
+        button = self.ttk.Button(parent, command=lambda: self.set_igpu_mode(not self.app.get('igpu_mode')))
+        self.igpu_buttons.append(button)
+        self.show_igpu_mode()
+        return button
+
+    def show_igpu_mode(self):
+        on = bool(self.app.get('igpu_mode'))
+        for button in self.igpu_buttons:
+            button.configure(style='ToggleOn.TButton' if on else 'TButton',
+                             text=_('✓ iGPU mode: on', '✓ Режим iGPU: включён') if on else
+                             _('iGPU mode: off', 'Режим iGPU: выключен'))
+
+    def profile_values(self):
+        values = {}
+        for store, key in GPU_PROFILE_KEYS:
+            try:
+                values[key] = self.var(key, store).get()
+            except self.tk.TclError:  # an unfinished number
+                pass
+        return values
+
+    def apply_profile(self, values):
+        for store, key in GPU_PROFILE_KEYS:
+            if key in values:
+                flag = key in INI_FLAGS if store == 'ini' else key in MENU_FLAGS if store == 'menu' \
+                    else isinstance(APP_DEFAULTS.get(key), bool)
+                self.var(key, store).set(bool(values[key]) if flag else values[key])
+
+    def igpu_profile(self, saved=None):
+        """The integrated GPU mode's settings: saved ones over the defaults, on this PC's iGPU."""
+        values = {**IGPU_PROFILE, **(saved or {})}
+        integrated = [gpu['name'] for gpu in self.gpus if gpu['kind'] == 'integrated' and gpu['vulkan13']]
+        if values['gpu'] == GPU_INTEGRATED and integrated:
+            values['gpu'] = integrated[0]
+        return values
+
+    def set_igpu_mode(self, on):
+        """Integrated GPU mode: the integrated GPU with the fastest settings. The settings it
+        replaces come back when it is turned off; its own (with changes made while it was on)
+        are kept for the next time."""
+        if on == bool(self.app.get('igpu_mode')):
+            return
+        profiles = dict(self.app.get('gpu_profiles') or {})
+        profiles['discrete' if on else 'integrated'] = self.profile_values()
+        values = self.igpu_profile(profiles.get('integrated')) if on else profiles.get('discrete', {'gpu': ''})
+        self.app['gpu_profiles'] = profiles
+        self.app['igpu_mode'] = on
+        self.apply_profile(values)
+        self.show_igpu_mode()
+        self.collect()
+        self.refresh_status()
+
+    def reset_igpu_profile(self):
+        """Back to the integrated GPU mode's own defaults."""
+        profiles = dict(self.app.get('gpu_profiles') or {})
+        profiles.pop('integrated', None)
+        self.app['gpu_profiles'] = profiles
+        if self.app.get('igpu_mode'):
+            self.apply_profile(self.igpu_profile())
+            self.collect()
+            self.refresh_status()
 
     def refresh_fsr4(self):
         total, missing = len(fsr4_files()), len(fsr4_missing())

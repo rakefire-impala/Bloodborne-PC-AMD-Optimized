@@ -210,6 +210,7 @@ private:
 
     bool FilterDraw();
     bool FilterDrawPasses() const;
+    bool IsEmptyDraw(const GraphicsPipeline* pipeline) const;
     /// Everything of a direct draw after the pipeline selection (GPU thread or stage B).
     void DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw* used_prepared,
                     bool is_indexed, u32 index_offset);

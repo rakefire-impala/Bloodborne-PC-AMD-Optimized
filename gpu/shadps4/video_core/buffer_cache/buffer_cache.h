@@ -179,6 +179,9 @@ private:
         boost::container::small_vector<vk::SparseMemoryBind, 32> binds;
     };
 
+    /// bbport: binds (and zeroes) the page table pages holding entries [first, end).
+    void MakePageTableResident(u64 first, u64 end);
+
     ArenaBinds* BindsForArena(const Buffer* arena) {
         auto it = std::ranges::find(pending_binds, arena, &ArenaBinds::arena);
         if (it != pending_binds.end()) {
@@ -264,6 +267,10 @@ private:
 
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;
+    /// bbport: the page table is sparse: one bit per table page (block_size bytes of entries)
+    /// bound to memory, and that memory. Pages are bound on their first entry write.
+    std::vector<u64> pagetable_bound;
+    std::vector<VmaAllocation> pagetable_memory;
 
     std::array<const Buffer*, MAX_ARENA_PAGES> address_space{};
     u64 arena_page_bits{MAX_ARENA_PAGE_BITS};
@@ -456,11 +463,19 @@ private:
         VmaAllocation allocation{}; ///< a ready chunk, adopted by the recording thread
         vk::DeviceMemory memory{};
         u64 offset{};
+        /// bbport: the same for a system-memory chunk (demotion's destination).
+        bool system_requested = false;
+        VmaAllocation system_allocation{};
+        vk::DeviceMemory system_memory{};
+        u64 system_offset{};
+        void* system_mapped{};
     };
     ChunkPrefetch prefetch;
     std::thread prefetch_thread;
     void PrefetchLoop();
     bool AdoptPrefetchedChunk(bool wait);
+    /// bbport: adopts the worker's system-memory chunk; without one, asks for it and fails.
+    bool AdoptPrefetchedSystemChunk();
 
     std::atomic<u64> arena_resident_bytes{};
     std::atomic<u64> arena_chunk_bytes{}, arena_system_bytes{};

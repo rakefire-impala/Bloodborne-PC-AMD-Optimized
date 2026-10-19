@@ -164,20 +164,39 @@ u32 ObjectMotion::PrepareDraw(const DrawInfo& draw) {
 }
 
 void ObjectMotion::EnsureImage(u32 width, u32 height) {
-    if (image && width == image_width && height == image_height) {
+    // bbport: passes of different sizes write motion vectors (the image holds the last one's).
+    // The image only grows: readers fetch texels in [0, size), and a render area may be smaller
+    // than its attachments. It was recreated, behind scheduler.Finish(), whenever the size
+    // changed: on an RX 5500M that drained the GPU queue mid-frame several times a second
+    // (34-50 ms frames, the game waiting in sceGnmSubmitDone).
+    static const bool recreate = std::getenv("BB_MOTION_RECREATE") != nullptr;
+    if (recreate && image && (width != image_width || height != image_height)) {
+        scheduler.Finish();
+        alloc_width = alloc_height = 0; // recreated below at this size
+    }
+    if (image && width <= alloc_width && height <= alloc_height) {
+        if (width != image_width || height != image_height) {
+            image_width = width;
+            image_height = height;
+            written = false;
+        }
         return;
     }
     const auto device = instance.GetDevice();
     if (image) {
-        scheduler.Finish();
+        // Queued work may still use the old image: released once the GPU is past it.
+        scheduler.DeferOperation(
+            [old_image = std::move(image), old_view = std::move(view)]() mutable {});
     }
+    alloc_width = std::max(alloc_width, width);
+    alloc_height = std::max(alloc_height, height);
     view.reset();
     image_layout = vk::ImageLayout::eUndefined;
     image = VideoCore::UniqueImage(device, instance.GetAllocator());
     image.Create(vk::ImageCreateInfo{
         .imageType = vk::ImageType::e2D,
         .format = vk::Format::eR32G32B32A32Sfloat,
-        .extent = {width, height, 1},
+        .extent = {alloc_width, alloc_height, 1},
         .mipLevels = 1,
         .arrayLayers = 1,
         .samples = vk::SampleCountFlagBits::e1,

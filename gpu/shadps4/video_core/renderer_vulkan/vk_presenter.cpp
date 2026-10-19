@@ -616,9 +616,19 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         swapchain.WindowPolicyChanged()) {
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
     }
+    // bbport: no swapchain while the surface is 0x0 (Swapchain::Create; SDL can still report the
+    // window's size while it is minimized): skip quietly, as for a minimized window.
+    if (swapchain.GetWidth() == 0) {
+        discard_unpresented();
+        return;
+    }
 
     if (!swapchain.AcquireNextImage()) {
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
+        if (swapchain.GetWidth() == 0) {
+            discard_unpresented();
+            return;
+        }
         if (!swapchain.AcquireNextImage()) {
             // User resizes the window too fast and GPU can't keep up. Skip this frame.
             LOG_WARNING(Render_Vulkan, "Skipping frame!");
@@ -681,14 +691,22 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
             cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
                                    vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlagBits::eByRegion,
                                    {}, {}, pre_barriers);
-            const vk::ClearColorValue black{std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}};
-            cmdbuf.clearColorImage(swapchain_image, vk::ImageLayout::eTransferDstOptimal, black, color_range);
-            const vk::MemoryBarrier clear_done{
-                .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
-                .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
-            };
-            cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eTransfer,
-                                   vk::DependencyFlagBits::eByRegion, clear_done, {}, {});
+            // bbport: black bars only where the frame leaves them; the frame normally follows the
+            // swapchain's size and covers it (a full-screen clear is 8 MiB of writes a frame at
+            // 1080p, which an integrated GPU's shared memory pays for).
+            const vk::Rect2D fit = FitImage(frame->width, frame->height, extent.width, extent.height);
+            if (fit.offset.x != 0 || fit.offset.y != 0 || fit.extent != extent) {
+                const vk::ClearColorValue black{std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f}};
+                cmdbuf.clearColorImage(swapchain_image, vk::ImageLayout::eTransferDstOptimal, black,
+                                       color_range);
+                const vk::MemoryBarrier clear_done{
+                    .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+                    .dstAccessMask = vk::AccessFlagBits::eTransferWrite,
+                };
+                cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                                       vk::PipelineStageFlagBits::eTransfer,
+                                       vk::DependencyFlagBits::eByRegion, clear_done, {}, {});
+            }
             cmdbuf.blitImage(source_image, vk::ImageLayout::eTransferSrcOptimal, swapchain_image,
                              vk::ImageLayout::eTransferDstOptimal,
                              MakeImageBlitFit(frame->width, frame->height, extent.width, extent.height),

@@ -92,6 +92,8 @@ public:
         return needs_hdr;
     }
     bool WindowPolicyChanged() const;
+    /// bbport: the window's surface has a size (0x0 while minimized on Windows).
+    bool SurfaceHasArea() const;
 
 private:
     /// Selects the best available swapchain image format
@@ -133,6 +135,7 @@ private:
     u32 image_index = 0;
     u32 frame_index = 0;
     bool needs_recreation = true;
+    bool reported_empty_surface = false;
     bool needs_hdr = false;    // The game requested HDR swapchain
     bool supports_hdr = false; // SC supports HDR output
     int window_mode = -1;

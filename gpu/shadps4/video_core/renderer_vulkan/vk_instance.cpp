@@ -4,7 +4,10 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <array>
+#include <cctype>
+#include <cstdlib>
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
@@ -20,6 +23,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
 
+#include <cstdio>
 #include <vk_mem_alloc.h>
 
 namespace Vulkan {
@@ -31,6 +35,39 @@ std::vector<vk::PhysicalDevice> EnumeratePhysicalDevices(vk::UniqueInstance& ins
     ASSERT_MSG(devices_result == vk::Result::eSuccess, "Failed to enumerate physical devices: {}",
                vk::to_string(devices_result));
     return std::move(devices);
+}
+
+/// bbport: the device BB_GPU asks for (the launcher's "Graphics card"), or -1 for the ranking.
+/// "integrated" or "discrete" take the first such device, anything else is a device name
+/// (case-insensitive). An index would not do: Windows orders devices by its per-app graphics
+/// preference, so the index of a GPU can change between runs.
+s32 RequestedDevice(const std::vector<vk::PhysicalDevice>& devices) {
+    const char* env = std::getenv("BB_GPU");
+    const auto lower = [](std::string text) {
+        std::ranges::transform(text, text.begin(), [](unsigned char c) { return std::tolower(c); });
+        return text;
+    };
+    const std::string wanted = lower(env ? env : "");
+    if (wanted.empty() || wanted == "auto") {
+        return -1;
+    }
+    for (size_t i = 0; i < devices.size(); ++i) {
+        const auto props = devices[i].getProperties();
+        if (props.apiVersion < TargetVulkanApiVersion) {
+            continue;
+        }
+        const bool match = wanted == "integrated"
+                               ? props.deviceType == vk::PhysicalDeviceType::eIntegratedGpu
+                           : wanted == "discrete"
+                               ? props.deviceType == vk::PhysicalDeviceType::eDiscreteGpu
+                               : lower(props.deviceName.data()) == wanted;
+        if (match) {
+            std::printf("GPU: using %s (BB_GPU=%s)\n", props.deviceName.data(), env);
+            return static_cast<s32>(i);
+        }
+    }
+    std::printf("GPU: no Vulkan 1.3 device matches BB_GPU=%s; using the default choice\n", env);
+    return -1;
 }
 
 std::vector<std::string> GetSupportedExtensions(vk::PhysicalDevice physical) {
@@ -118,6 +155,9 @@ Instance::Instance(const Frontend::WindowSystemInfo& window_info, s32 physical_d
     ASSERT_MSG(num_physical_devices > 0, "No physical devices found");
     LOG_INFO(Render_Vulkan, "Found {} physical devices", num_physical_devices);
 
+    if (physical_device_index < 0) {
+        physical_device_index = RequestedDevice(physical_devices);
+    }
     if (physical_device_index < 0) {
         std::vector<
             std::tuple<size_t, vk::PhysicalDeviceProperties2, vk::PhysicalDeviceMemoryProperties>>
@@ -933,6 +973,20 @@ Instance::VmaHeapStats Instance::GetVmaHeapStats() const {
     return stats;
 }
 
+void Instance::DumpVmaMap() const {
+    static const char* path = std::getenv("BB_VMA_DUMP");
+    if (!path || !path[0]) {
+        return;
+    }
+    char* json = nullptr;
+    vmaBuildStatsString(allocator, &json, VK_TRUE);
+    if (std::FILE* file = std::fopen(path, "wb")) {
+        std::fputs(json, file);
+        std::fclose(file);
+    }
+    vmaFreeStatsString(allocator, json);
+}
+
 void Instance::RefreshAllocatorBudget(u32 frame) const {
     if (supports_memory_budget) {
         vmaSetCurrentFrameIndex(allocator, frame);
@@ -952,6 +1006,7 @@ Instance::MemoryLevels Instance::GetMemoryLevels() const {
         levels.usage += budget.heapUsage[heap];
         levels.budget += budget.heapBudget[heap];
         levels.vma_free += vma[heap].statistics.blockBytes - vma[heap].statistics.allocationBytes;
+        levels.vma_blocks += vma[heap].statistics.blockBytes;
     };
     if (IsIntegrated()) {
         for (const size_t heap : valid_heaps) {

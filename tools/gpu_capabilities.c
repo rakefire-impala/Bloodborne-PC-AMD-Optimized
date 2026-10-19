@@ -4,6 +4,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <vulkan/vulkan.h>
+#ifdef _WIN32
+#define strcasecmp _stricmp
+#else
+#include <strings.h>
+#endif
 
 static VkDeviceSize largest_local_heap(VkPhysicalDevice device) {
     VkPhysicalDeviceMemoryProperties memory;
@@ -50,6 +55,32 @@ static int has_extension(VkPhysicalDevice device, const char *name) {
     return found;
 }
 
+static const char *device_kind(VkPhysicalDeviceType type) {
+    switch (type) {
+    case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return "discrete";
+    case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return "integrated";
+    case VK_PHYSICAL_DEVICE_TYPE_CPU: return "cpu";
+    default: return "other";
+    }
+}
+
+/* BB_GPU as vk_instance.cpp reads it: "integrated", "discrete" or a device name (any case),
+ * the first Vulkan 1.3 device that matches; -1 for none (the default ranking). */
+static int requested_device(VkPhysicalDevice *devices, uint32_t count) {
+    const char *wanted = getenv("BB_GPU");
+    if (!wanted || !wanted[0] || !strcasecmp(wanted, "auto")) return -1;
+    for (uint32_t i = 0; i < count; ++i) {
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(devices[i], &props);
+        if (props.apiVersion < VK_API_VERSION_1_3) continue;
+        if (!strcasecmp(wanted, "integrated") ? props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU
+            : !strcasecmp(wanted, "discrete") ? props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU
+            : !strcasecmp(wanted, props.deviceName))
+            return (int)i;
+    }
+    return -1;
+}
+
 static int live_resolution_suits(VkPhysicalDevice device) {
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(device, &props);
@@ -67,6 +98,7 @@ static int live_resolution_suits(VkPhysicalDevice device) {
 int main(int argc, char **argv) {
     const int live_mode = argc > 1 && !strcmp(argv[1], "--live-resolution");
     const int anti_lag_mode = argc > 1 && !strcmp(argv[1], "--amd-antilag");
+    const int list_mode = argc > 1 && !strcmp(argv[1], "--list");
     const VkApplicationInfo app = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
         .pApplicationName = "bbport scene scaling probe",
@@ -94,9 +126,10 @@ int main(int argc, char **argv) {
         vkDestroyInstance(instance, NULL);
         return 1;
     }
-    /* Match vk_instance.cpp's default ranking or its explicit BB_GPU_ID index. */
+    /* Match vk_instance.cpp: its explicit BB_GPU_ID index, then BB_GPU, then its ranking. */
     VkPhysicalDevice selected = devices[0];
     const char *gpu_id = getenv("BB_GPU_ID");
+    const int requested = requested_device(devices, count);
     if (gpu_id && atoi(gpu_id) >= 0) {
         const unsigned long index = strtoul(gpu_id, NULL, 10);
         if (index >= count) {
@@ -106,9 +139,26 @@ int main(int argc, char **argv) {
             return 1;
         }
         selected = devices[index];
+    } else if (requested >= 0) {
+        selected = devices[requested];
     } else {
         for (uint32_t i = 1; i < count; ++i)
             if (better_device(devices[i], selected)) selected = devices[i];
+    }
+    if (list_mode) {
+        /* --list (the launcher's "Graphics card" choices): one line per device,
+         * kind<TAB>MiB of device memory<TAB>Vulkan 1.3 (1/0)<TAB>selected (1/0)<TAB>name. */
+        for (uint32_t i = 0; i < count; ++i) {
+            VkPhysicalDeviceProperties props;
+            vkGetPhysicalDeviceProperties(devices[i], &props);
+            printf("%s\t%llu\t%d\t%d\t%s\n", device_kind(props.deviceType),
+                   (unsigned long long)(largest_local_heap(devices[i]) >> 20),
+                   props.apiVersion >= VK_API_VERSION_1_3, devices[i] == selected,
+                   props.deviceName);
+        }
+        free(devices);
+        vkDestroyInstance(instance, NULL);
+        return 0;
     }
     if (live_mode) {
         printf("%d\n", live_resolution_suits(selected));

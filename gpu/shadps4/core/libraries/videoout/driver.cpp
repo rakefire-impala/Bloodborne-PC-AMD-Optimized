@@ -1,3 +1,4 @@
+#include "bbport_sampler.h"
 #include "bbport_nvidia.h"
 #include "bbport_amd.h"
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
@@ -316,7 +317,8 @@ void VideoOutDriver::Flip(const Request& req) {
         }();
         struct Counters {
             u64 image_bytes, images, buffer_bytes, evictions, evicted_bytes, compiles, compile_ns,
-                gpu_wait_ns, copy_wait_ns, arena_chunks, sparse_binds, staging_blocks, fallbacks;
+                gpu_wait_ns, copy_wait_ns, arena_chunks, sparse_binds, staging_blocks, fallbacks, bind_ns,
+                fault_ns;
         };
         const auto sample = [] {
             return Counters{BbStats::image_upload_bytes.load(), BbStats::images_registered.load(),
@@ -325,13 +327,20 @@ void VideoOutDriver::Flip(const Request& req) {
                             BbHitch::compile_ns.load(), BbHitch::gpu_wait_ns.load(),
                             BbHitch::copy_wait_ns.load(), BbHitch::arena_chunks.load(),
                             BbHitch::sparse_binds.load(), BbHitch::staging_blocks.load(),
-                            BbHitch::vram_fallbacks.load()};
+                            BbHitch::vram_fallbacks.load(), BbHitch::bind_ns.load(),
+                            BbStats::t_write_faults.load() + BbStats::t_read_faults.load()};
         };
         static Counters last = sample();
         static Clock::time_point last_flip = Clock::now(), window = last_flip;
         static u32 recorded = 0;
         const auto now = Clock::now();
         const Counters cur = sample();
+        const double submit_gap_ms =
+            BbHitch::submit_gap_max_ns.exchange(0, std::memory_order_relaxed) / 1e6;
+        const double block_ms = BbHitch::block_ns.exchange(0, std::memory_order_relaxed) / 1e6;
+        const double block_max_ms =
+            BbHitch::block_max_ns.exchange(0, std::memory_order_relaxed) / 1e6;
+        const char* block_name = BbHitch::block_max_name.exchange("-", std::memory_order_relaxed);
         const double ms = std::chrono::duration<double, std::milli>(now - last_flip).count();
         if (threshold_ms > 0.0 && ms > threshold_ms) {
             if (now - window >= std::chrono::seconds(5)) {
@@ -340,6 +349,7 @@ void VideoOutDriver::Flip(const Request& req) {
             }
             if (recorded < 6) {
                 ++recorded;
+                BbSampler::ReportWindow(last_flip, now, ms);
                 BbHitch::Push({
                     .frame_ms = ms,
                     .image_mb = (cur.image_bytes - last.image_bytes) / 1e6,
@@ -348,6 +358,12 @@ void VideoOutDriver::Flip(const Request& req) {
                     .compile_ms = (cur.compile_ns - last.compile_ns) / 1e6,
                     .gpu_wait_ms = (cur.gpu_wait_ns - last.gpu_wait_ns) / 1e6,
                     .copy_wait_ms = (cur.copy_wait_ns - last.copy_wait_ns) / 1e6,
+                    .bind_ms = (cur.bind_ns - last.bind_ns) / 1e6,
+                    .submit_gap_ms = submit_gap_ms,
+                    .block_ms = block_ms,
+                    .block_max_ms = block_max_ms,
+                    .block_name = block_name,
+                    .fault_ms = (cur.fault_ns - last.fault_ns) / 1e6,
                     .new_images = cur.images - last.images,
                     .evictions = cur.evictions - last.evictions,
                     .compiles = cur.compiles - last.compiles,
@@ -507,7 +523,8 @@ void VideoOutDriver::Flip(const Request& req) {
                         "%.0f write faults/s, %lld hot pages; GPU thread %.2f us/draw, "
                         "%.0f draws/frame, idle %.1f%%; blocked: recorder %.1f%%, host copies "
                         "%.1f%% (%.0f/frame), copy threads %.1f%%, GPU ticks %.1f%%; "
-                        "reduced-size draws %.0f/frame of %.0f in the scene\n",
+                        "reduced-size draws %.0f/frame of %.0f in the scene; %.0f empty "
+                        "draws/frame skipped\n",
                         frames / window, worst_ms, EmulatorSettings.GetVblankFrequency(), compiles,
                         compile_ns / 1e6, static_cast<unsigned long long>(direct),
                         faults / window, static_cast<long long>(BbStats::hot_pages.load()),
@@ -519,7 +536,8 @@ void VideoOutDriver::Flip(const Request& req) {
                         BbStats::copy_threads_wait_ns.exchange(0) / (window * 1e7),
                         BbStats::tick_wait_ns.exchange(0) / (window * 1e7),
                         frames ? double(BbStats::reduced_draws.exchange(0)) / frames : 0.0,
-                        frames ? double(BbStats::scene_draws.exchange(0)) / frames : 0.0);
+                        frames ? double(BbStats::scene_draws.exchange(0)) / frames : 0.0,
+                        frames ? double(BbStats::empty_draws.exchange(0)) / frames : 0.0);
             // Frame pacing: spread of the guest flip intervals (judder that the mean hides).
             if (intervals.size() > 2) {
                 std::vector<double> sorted = intervals;
