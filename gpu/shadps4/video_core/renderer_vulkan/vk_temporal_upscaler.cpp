@@ -1356,17 +1356,31 @@ void TemporalUpscaler::OnColorTarget(VideoCore::ImageId color) {
 void TemporalUpscaler::OnDraw(u64 vs_hash, VideoCore::ImageId color,
                               VideoCore::ImageId depth, bool native_viewport) {
     if (!Scaled() && vs_hash == ui_trigger_vs) done_this_frame = true;
-    if (!Scaled() || !color) {
+    if (!Scaled()) {
         return;
     }
     if (ui_phase) {
-        // A UI movie can start without stencil and enable it for later text/masks.
-        if (color == ui_color && depth && depth != ui_depth) {
+        // A UI movie can start without stencil and enable it for later text/masks. A mask is
+        // drawn into the stencil alone (no color target) before the draws it clips: it must
+        // reach the UI depth too, or it lands in the guest's render-size depth and the masked
+        // draws fail the test against the cleared UI stencil (item icons of the loading
+        // screen, which composes without a scene depth).
+        const auto ui_stencil = [&] {
+            const auto& image = texture_cache.GetImage(depth);
+            const auto& target = texture_cache.GetImage(ui_color);
+            return image.info.props.has_stencil &&
+                   image.info.size.width == target.info.size.width &&
+                   image.info.size.height == target.info.size.height;
+        };
+        if (depth && depth != ui_depth && (color ? color == ui_color : ui_stencil())) {
             EnsureUiResources(ui_width, ui_height, ui_format,
                               texture_cache.GetImage(depth).info.pixel_format);
             PrepareUiDepth(depth);
             ui_depth = depth;
         }
+        return;
+    }
+    if (!color) {
         return;
     }
     const auto& image = texture_cache.GetImage(color);
