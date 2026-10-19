@@ -166,13 +166,16 @@ TWEAKS = [
     ('tweak_ragdoll', ('Dark Souls-style ragdoll physics (corpses fly further)',
                        'Физика тел как в Dark Souls (тела отлетают дальше)'), False),
 ]
-# Quality of life: off by default. skip_intro is a game patch (patches.py); qol_lamp_travel makes
-# the launch add generated talk/event scripts (scripts/lamp_travel.py, through mods.py).
+# Quality of life: off by default. skip_intro is a game patch (patches.py); qol_lamp_travel,
+# qol_lamp_save and qol_boss_retry make the launch add generated talk/event scripts
+# (scripts/lamp_travel.py, scripts/boss_retry.py, through mods.py).
 QOL = [
     ('skip_intro', ('Skip the intro logos and movie', 'Пропуск заставок при запуске'), False),
     ('qol_lamp_travel', ('Travel from any lamp to any other lamp', 'Путешествие от любого фонаря к любому другому'),
      False),
+    ('qol_lamp_save', ('Lamps save the game', 'Фонари сохраняют игру'), False),
     ('qol_safe_menu', ('The world pauses while the start menu is open', 'Мир замирает, пока открыто меню'), False),
+    ('qol_boss_retry', ('Retry a boss fight after dying in it', 'Повтор боя с боссом после смерти'), False),
 ]
 INI_FLAGS = {'sharpen', 'object_motion', 'show_fps', *(k for k, _t, _o in EFFECTS + EXTRAS + QOL + CHEATS + TWEAKS)}
 INI_DEFAULTS = {'upscaler': 'fsr4', 'preset': '1', 'sharpen': '1', 'sharpness': '0.50',
@@ -1771,14 +1774,24 @@ class Launcher:
                                  'У фонаря меню путешествия показывает Сон охотника и все надгробия: выберите '
                                  'зажжённый фонарь, чтобы отправиться прямо туда. Только в одиночной игре. '
                                  'Создаётся из ваших файлов игры при запуске.'),
-            'qol_safe_menu': _('Opening the start menu freezes enemies, their projectiles, the world\'s sounds and '
-                               'effects such as fire and fog until you close it; the menu keeps its sounds, and '
+            'qol_lamp_save': _('Using a lamp saves the game right away. Made from your game files at start.',
+                               'Касание фонаря сразу сохраняет игру. Создаётся из ваших файлов игры при запуске.'),
+            'qol_safe_menu': _('Opening the start menu pauses the whole world until you close it: your character, '
+                               'enemies and their projectiles, elevators and other moving objects, the camera, the '
+                               'world\'s sounds and effects such as fire and fog. The menu keeps its sounds, and '
                                'inventory, equipment and items work as usual. Single player only (co-op is never '
-                               'paused). Falls, poison and other harm not caused by enemies are not paused.',
-                               'Открытое стартовое меню останавливает врагов, их снаряды, звуки мира и эффекты вроде '
-                               'огня и тумана, пока вы его не закроете; звуки меню остаются, инвентарь, снаряжение и '
+                               'paused).',
+                               'Открытое стартовое меню ставит на паузу весь мир, пока вы его не закроете: '
+                               'персонажа, врагов и их снаряды, лифты и другие движущиеся объекты, камеру, звуки '
+                               'мира и эффекты вроде огня и тумана. Звуки меню остаются, инвентарь, снаряжение и '
                                'предметы работают как обычно. Только в одиночной игре (кооператив не ставится на '
-                               'паузу). Падения, яд и прочий вред не от врагов не останавливаются.'),
+                               'паузу).'),
+            'qol_boss_retry': _('After dying to a story boss (not to NPC hunters), once you are back at a lamp you are '
+                                'asked whether to retry the fight; retrying takes you to the boss\'s fog gate. Single '
+                                'player, outside the Chalice Dungeons. Made from your game files at start.',
+                                'После смерти от сюжетного босса (не от NPC-охотников), когда вы снова у фонаря, '
+                                'игра спросит, повторить ли бой; повтор переносит к туманным воротам босса. Только в '
+                                'одиночной игре, вне Подземелий Чаши. Создаётся из ваших файлов игры при запуске.'),
         }
         for key, title, _on in QOL:
             self.check(f, key, 'ini', _(*title), hints.get(key))

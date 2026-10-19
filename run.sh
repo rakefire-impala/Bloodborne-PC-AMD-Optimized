@@ -41,16 +41,24 @@ game=${BB_GAME_DIR:-../CUSA03173}
 if [[ ! -f $game/eboot.bin ]]; then echo "No eboot.bin in $game (set BB_GAME_DIR)." >&2; exit 1; fi
 original_game=$game
 lamp_travel=${BB_LAMP_TRAVEL:-$(sed -n 's/^qol_lamp_travel=//p' "$BB_CONFIG" 2>/dev/null | tail -n1 | grep . || echo 0)}
+lamp_save=${BB_LAMP_SAVE:-$(sed -n 's/^qol_lamp_save=//p' "$BB_CONFIG" 2>/dev/null | tail -n1 | grep . || echo 0)}
+boss_retry=${BB_BOSS_RETRY:-$(sed -n 's/^qol_boss_retry=//p' "$BB_CONFIG" 2>/dev/null | tail -n1 | grep . || echo 0)}
 game=$("$PYTHON" scripts/mods.py "$game" --out "$out" \
     --mods-dir "${BB_MODS_DIR:-$data/mods}" --config "${BB_MODS_CONFIG:-$data/mods.json}" \
-    --enabled "${BB_MODS_ENABLED:-1}" --lamp-travel "$lamp_travel")
-# The lamp travel menu's lamps and texts, written by the generator once the layer is complete.
-if [[ $lamp_travel == 1 && -f $out/qol-lamp-travel/lamp_menu.txt ]]; then
-    export BB_LAMP_MENU=$(realpath "$out/qol-lamp-travel/lamp_menu.txt")
+    --enabled "${BB_MODS_ENABLED:-1}" --lamp-travel "$lamp_travel" --lamp-save "$lamp_save" \
+    --boss-retry "$boss_retry")
+# The lamp travel menu and the boss retry list, written by the generators once complete.
+if [[ $lamp_travel == 1 && -f $out/qol/lamp_menu.txt ]]; then
+    export BB_LAMP_MENU=$(realpath "$out/qol/lamp_menu.txt")
 else
     unset BB_LAMP_MENU
 fi
-# Safe menu (src/runtime_pause.c): the start menu stops enemies and projectiles.
+if [[ $boss_retry == 1 && -f $out/qol/boss_retry.txt ]]; then
+    export BB_BOSS_RETRY_LIST=$(realpath "$out/qol/boss_retry.txt")
+else
+    unset BB_BOSS_RETRY_LIST
+fi
+# Safe menu (src/runtime_pause.c): the start menu stops the world.
 export BB_SAFE_MENU=${BB_SAFE_MENU:-$(sed -n 's/^qol_safe_menu=//p' "$BB_CONFIG" 2>/dev/null | tail -n1 | grep . || echo 0)}
 # A private merged view lasts for this launch, including restarts. Cleanup only our own view.
 if [[ $game != "$(realpath "$original_game")" ]]; then

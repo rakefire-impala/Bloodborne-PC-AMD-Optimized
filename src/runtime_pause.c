@@ -1,9 +1,18 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later
  * Safe menu (launcher: Quality of Life, BB_SAFE_MENU=1): while the start menu is open in single
- * player, enemies, projectiles, the world's sounds and its effects (fire, fog, ...) stand still;
- * the player and the menus (with their sounds) run as usual.
+ * player, the whole world stands still: the player, enemies, projectiles, elevators and other
+ * map objects, the camera, event scripts, the world's sounds and its effects (fire, fog, ...);
+ * the menus (with their sounds) run as usual.
  *
- * Enemies use the game's own debug freeze ("Switch All No Update", 1.09 image 0x19230b0): bit
+ * The world stops the way it does while a cutscene plays. The field's update (1.09 image
+ * 0x193ac10) decides once per frame whether the world runs: not during a cutscene, otherwise
+ * unless the field is ending (byte +0x153). It keeps the answer at +0x152, which the other world
+ * task reads as well; when it is 0, characters (the player too), the camera, attacks, bullets
+ * and the map's objects get no update. The instructions that compute it (0x193b1ff) jump to a
+ * stub that also answers "stopped" while paused; +0x153 itself is left alone, as other code
+ * reads it to leave the area.
+ *
+ * Enemies also use the game's own debug freeze ("Switch All No Update", 1.09 image 0x19230b0): bit
  * 0x400 of each character's debug flags (ChrIns +0x3b0 -> +0x20 -> word +0x200) makes the
  * character update skip it. Like the debug switch, every character set but the last two (the
  * players') is frozen. Only characters frozen here are thawed, so the debug menu's own freezes
@@ -12,8 +21,9 @@
  * another (0x19381e0), the attack manager's update (hit objects: lifetime and hits of bullets
  * and attacks) and SprjBulletManager's update (creation phases, emitters). A projectile fired
  * as the menu opens resumes its flight afterwards; nothing moves, hits or expires meanwhile.
- * The player is not made invulnerable: falls, poison and the like keep the game's own
- * behaviour, so the menu cannot be used to escape them. Effects: the scene's update (0x22ff340)
+ * (The stopped world skips these as well; the per-character and per-call stops came first and
+ * stay.) Nothing is made invulnerable: a fall or poison simply waits for the menu to close.
+ * Effects: the scene's update (0x22ff340)
  * has an unused switch (+0x5ce) that gives everything after it, the particle effects among
  * them, no time; they keep being drawn as they are. Sounds: see sound_update.
  *
@@ -47,6 +57,7 @@ enum {
     SCENE = 0x54b0b30,           /* the graphics scene *: +0x5ce effects get no time when set */
     SCENE_VTABLE = 0x53b9080,
     SCENE_STILL = 0x22ff434,     /* scene update: cmp byte [rbx+0x5ce],0; je; vxorps xmm0 (dt = 0) */
+    WORLD_RUNS = 0x193b1ff,      /* field update: mov r12b,[r13+0x153]; xor r12b,1 (11 bytes) */
     MENU_OPEN = 2,
     NO_UPDATE = 0x400,
     MAX_FROZEN = 4096,
@@ -254,6 +265,13 @@ void runtime_pause_install(void *image, size_t size, const char *app_version) {
         {SCENE_STILL, 13, {0x80,0xbb,0xce,0x05,0x00,0x00,0x00,0x74,0x04,0xc5,0xf8,0x57,0xc0}},
         /* An accessor of the scene: lea r13,[scene]. */
         {0xefcb76, 7, {0x4c,0x8d,0x2d,0xb3,0x3f,0x5b,0x04}},
+        /* Whether the world runs: computed into r12b, kept at +0x152 and tested before the
+         * characters and the bullets; the other world task tests +0x152. */
+        {WORLD_RUNS, 11, {0x45,0x8a,0xa5,0x53,0x01,0x00,0x00,0x41,0x80,0xf4,0x01}},
+        {0x193b345, 7, {0x45,0x88,0xa5,0x52,0x01,0x00,0x00}},
+        {0x193b5ce, 5, {0x45,0x84,0xe4,0x0f,0x84}},
+        {0x193bb09, 5, {0x45,0x84,0xe4,0x74,0x40}},
+        {0x193822d, 10, {0x41,0x80,0xbe,0x52,0x01,0x00,0x00,0x00,0x74,0x14}},
     };
     const char *enabled = getenv("BB_SAFE_MENU");
     if (!enabled || strcmp(enabled, "1")) return;
@@ -285,15 +303,37 @@ void runtime_pause_install(void *image, size_t size, const char *app_version) {
         if (distance < INT32_MIN || distance > INT32_MAX) return;
         rel[i] = (int32_t)distance;
     }
+    /* Whether the world runs: the 11 bytes it replaced; movabs rax,&paused; cmp byte [rax],0;
+     * je +3; xor r12d,r12d (as the cutscene path); movabs rax,back; jmp rax. RAX and the flags
+     * are written before they are read after it. */
+    unsigned char *world = page + 32 * HOOKS, *w = world;
+    {
+        const uintptr_t flag_address = (uintptr_t)&paused, back = (uintptr_t)image + WORLD_RUNS + 11;
+        memcpy(w, code + WORLD_RUNS, 11); w += 11;
+        *w++ = 0x48; *w++ = 0xb8; memcpy(w, &flag_address, 8); w += 8;
+        *w++ = 0x80; *w++ = 0x38; *w++ = 0x00; *w++ = 0x74; *w++ = 0x03; *w++ = 0x45; *w++ = 0x31; *w++ = 0xe4;
+        *w++ = 0x48; *w++ = 0xb8; memcpy(w, &back, 8); w += 8; *w++ = 0xff; *w++ = 0xe0;
+    }
+    const int64_t world_distance = (int64_t)(uintptr_t)world - (int64_t)(uintptr_t)(code + WORLD_RUNS + 5);
+    if (world_distance < INT32_MIN || world_distance > INT32_MAX) return;
 #ifdef _WIN32
     DWORD old;
     if (!VirtualProtect(page, 4096, PAGE_EXECUTE_READ, &old)) return;
     FlushInstructionCache(GetCurrentProcess(), page, 4096);
 #else
     if (mprotect(page, 4096, PROT_READ | PROT_EXEC)) return;
-    __builtin___clear_cache((char *)page, (char *)page + 32 * HOOKS);
+    __builtin___clear_cache((char *)page, (char *)w);
 #endif
     for (int i = 0; i < HOOKS; ++i) memcpy((unsigned char *)image + hooks[i].site + 1, &rel[i], 4);
+    {
+        /* jmp stub; a 6-byte nop over the rest. */
+        static const unsigned char nop6[6] = {0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00};
+        unsigned char *site = (unsigned char *)image + WORLD_RUNS;
+        const int32_t rel32 = (int32_t)world_distance;
+        site[0] = 0xe9;
+        memcpy(site + 1, &rel32, 4);
+        memcpy(site + 5, nop6, sizeof(nop6));
+    }
     /* EventSystemI::update starts with a jump to a stub: push rdi; call sound_update; pop rdi;
      * the 13 bytes it replaced (push rbp ... push rbx); jump back. */
     {
@@ -317,7 +357,7 @@ void runtime_pause_install(void *image, size_t size, const char *app_version) {
     }
     game = image;
     active = 1;
-    puts("Safe menu: verified 1.09; enemies, projectiles, sounds and effects stop while the start menu is open");
+    puts("Safe menu: verified 1.09; the world stops while the start menu is open");
 }
 
 void runtime_pause_poll(void) {

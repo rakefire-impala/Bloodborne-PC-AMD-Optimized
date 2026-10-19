@@ -154,19 +154,26 @@ def main():
         fail(f'No eboot.bin in {game} (set BB_GAME_DIR).')
     original_game = game.resolve()
     lamp_travel = env.get('BB_LAMP_TRAVEL') or ini_value(config, 'qol_lamp_travel') or '0'
+    lamp_save = env.get('BB_LAMP_SAVE') or ini_value(config, 'qol_lamp_save') or '0'
+    boss_retry = env.get('BB_BOSS_RETRY') or ini_value(config, 'qol_boss_retry') or '0'
     game = Path(run_script('mods.py', game, '--out', out,
                            '--mods-dir', env.get('BB_MODS_DIR', data / 'mods'),
                            '--config', env.get('BB_MODS_CONFIG', data / 'mods.json'),
                            '--enabled', env.get('BB_MODS_ENABLED', '1'),
-                           '--lamp-travel', lamp_travel,
+                           '--lamp-travel', lamp_travel, '--lamp-save', lamp_save, '--boss-retry', boss_retry,
                            capture=True).strip())
-    # The lamp travel menu's lamps and texts, written by the generator once the layer is complete.
-    lamp_menu = out / 'qol-lamp-travel' / 'lamp_menu.txt'
+    # The lamp travel menu and the boss retry list, written by the generators once complete.
+    lamp_menu = out / 'qol' / 'lamp_menu.txt'
     if lamp_travel == '1' and lamp_menu.is_file():
         env['BB_LAMP_MENU'] = str(lamp_menu.resolve())
     else:
         env.pop('BB_LAMP_MENU', None)
-    # Safe menu (src/runtime_pause.c): the start menu stops enemies and projectiles.
+    retry_list = out / 'qol' / 'boss_retry.txt'
+    if boss_retry == '1' and retry_list.is_file():
+        env['BB_BOSS_RETRY_LIST'] = str(retry_list.resolve())
+    else:
+        env.pop('BB_BOSS_RETRY_LIST', None)
+    # Safe menu (src/runtime_pause.c): the start menu stops the world.
     env['BB_SAFE_MENU'] = env.get('BB_SAFE_MENU') or ini_value(config, 'qol_safe_menu') or '0'
     mod_view = game if game.resolve() != original_game else None
     try:

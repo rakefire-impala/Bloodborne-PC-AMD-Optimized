@@ -225,7 +225,11 @@ def main():
     parser.add_argument('--config', type=Path)
     parser.add_argument('--enabled', choices=('0', '1'), default='1')
     parser.add_argument('--lamp-travel', choices=('0', '1'), default='0',
-                        help='add the generated lamp-to-lamp travel layer (lamp_travel.py)')
+                        help='lamp-to-lamp travel in the generated layer (lamp_travel.py)')
+    parser.add_argument('--lamp-save', choices=('0', '1'), default='0',
+                        help='lamps save the game, in the generated layer (lamp_travel.py)')
+    parser.add_argument('--boss-retry', choices=('0', '1'), default='0',
+                        help='retrying boss fights, in the generated layer (boss_retry.py)')
     args = parser.parse_args()
     layers = []
     if args.enabled == '1':
@@ -239,35 +243,69 @@ def main():
         else:
             for name in selected(args.mods_dir, args.config):
                 layers.append((name, args.mods_dir / name))
-    if args.lamp_travel == '1':
-        # A game version or mod the generator does not understand: play without it.
-        try:
-            layers.append(lamp_travel_layer(args.game, args.out, layers))
-        except (OSError, ValueError, struct.error) as error:
-            print(f'Lamp travel: off ({error})', file=sys.stderr)
+    layer = qol_layer(args.game, args.out, layers, args.lamp_travel == '1', args.lamp_save == '1',
+                      args.boss_retry == '1')
+    if layer:
+        layers.append(layer)
     print(build_overlay(args.game, args.out, layers))
 
 
-def lamp_travel_layer(game, out, layers):
-    """Generated last, from the files the other layers leave in effect (so a mod's talk or event
-    scripts are patched rather than replaced)."""
+class Generated:
+    """The files in effect, with what an earlier generator wrote to the layer taking precedence
+    (both patch the common event script)."""
+
+    def __init__(self, layer: Path, files):
+        self.layer, self.files = layer, files
+
+    def __call__(self, relative):
+        written = self.layer / 'dvdroot_ps4' / relative
+        return written.read_bytes() if written.is_file() else self.files(relative)
+
+    def __getattr__(self, name):
+        return getattr(self.files, name)
+
+
+def qol_layer(game, out, layers, travel, save, retry):
+    """The Quality of Life features made of game files, generated last from the files the other
+    layers leave in effect (so a mod's talk or event scripts are patched rather than replaced).
+    A game version or mod a generator does not understand: play without that feature."""
+    if not (travel or save or retry):
+        return None
+    import boss_retry
     import lamp_travel
     from patches import game_app_version
-    # The talk scripts wait for the port's menu, which reads the event flags of the 1.09
-    # executable only (src/runtime_lamp.c): another version would leave the dialog waiting.
-    version = game_app_version(game)
-    if version != '01.09':
-        raise ValueError(f'game version {version}; the travel menu needs 01.09')
     in_effect = {}
     for _name, root in layers:
         for relative, source in mod_files(root):
             in_effect[relative.as_posix()] = source
-    target = Path(out).resolve() / 'qol-lamp-travel'
+    target = Path(out).resolve() / 'qol'
     shutil.rmtree(target, ignore_errors=True)
-    count = lamp_travel.generate(lamp_travel.GameFiles(game, in_effect), target,
-                                 lamp_travel.game_language())
-    print(f'Lamp travel: {count} lamps can travel to other lamps', file=sys.stderr)
-    return ('Lamp travel (generated)', target)
+    files = Generated(target, lamp_travel.GameFiles(game, in_effect))
+    language = lamp_travel.game_language()
+    # Travel and retrying wait for the port, which reads the event flags of the 1.09 executable
+    # only (src/runtime_lamp.c, runtime_retry.c): another version would leave the dialog waiting.
+    version = game_app_version(game)
+    if version != '01.09' and (travel or retry):
+        print(f'Lamp travel, boss retry: off (game version {version}; they need 01.09)', file=sys.stderr)
+        travel = retry = False
+    if travel or save:
+        try:
+            count = lamp_travel.generate(files, target, language, travel, save)
+            if travel:
+                print(f'Lamp travel: {count} lamps can travel to other lamps', file=sys.stderr)
+            if save:
+                print(f'Lamp save: {count} lamps save the game', file=sys.stderr)
+        except (OSError, ValueError, struct.error) as error:
+            print(f'Lamp travel, lamp save: off ({error})', file=sys.stderr)
+            shutil.rmtree(target, ignore_errors=True)
+    if retry:
+        try:
+            count = boss_retry.generate(files, target, language)
+            print(f'Boss retry: {count} boss fog gates', file=sys.stderr)
+        except (OSError, ValueError, struct.error) as error:
+            print(f'Boss retry: off ({error})', file=sys.stderr)
+            (target / boss_retry.RETRY_FILE).unlink(missing_ok=True)
+    return ('Quality of life (generated)', target) if (target / 'dvdroot_ps4').is_dir() else None
 
 
 if __name__ == '__main__':

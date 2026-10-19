@@ -26,7 +26,7 @@ no CJK glyphs). The titles use Georgia when Windows has it. Single player only (
 only then), and the Hunter's Dream keeps its headstones unchanged.
 
 How it is made: at launch, `scripts/mods.py` runs `scripts/lamp_travel.py` on the files in effect
-(the game's, or a mod's) and mounts the result as the last mod layer (`out/qol-lamp-travel/`):
+(the game's, or a mod's) and mounts the result as the last mod layer (`out/qol/`, shared with lamp saving and boss retry):
 
 - every lamp's talk script (`script/talk/<map>.talkesdbnd.dcx`): the dialog asks the port for a
   choice through event flags 6920-6971 (no game file uses 6920-6999): it clears them, marks its own
@@ -53,35 +53,54 @@ would then wait for a menu that never opens (turn the option off in that case). 
 the formats involved (DCX, BND4, talk and event scripts); `tests/test_fsformats.py` and
 `tests/test_lamp_travel.py` check them against the game files (`BB_GAME_DIR`).
 
+## Lamps save the game
+
+`qol_lamp_save=1` in `bbport.ini` (or `BB_LAMP_SAVE=1`). Using a lamp saves the game at once. The
+generator (`scripts/lamp_travel.py`, with or without travel) makes each lamp's dialog set event flag
+6985, and common event 7260 waits for it, clears it and requests a save (`2000[05]`, the
+instruction the game's own events use).
+
 ## The world pauses while the start menu is open ("safe menu")
 
 `qol_safe_menu=1` in `bbport.ini` (or `BB_SAFE_MENU=1`). While the start menu is open (any of its
-pages: inventory, equipment, status, ...), enemies, their projectiles, the world's sounds and its
-effects (fire, fog, ...) stand still until it closes; the menus, their sounds and items work as
-usual (using an item closes the menu, as in the game). Single player only: as host, while joining
+pages: inventory, equipment, status, ...), the whole world stands still until it closes: your
+character, enemies and their projectiles, elevators and other map objects, the camera, event
+scripts, the world's sounds and its effects (fire, fog, ...). The menus, their sounds and items work
+as usual (using an item closes the menu, as in the game). Single player only: as host, while joining
 or as a guest, nothing pauses.
 
-- Enemies get the game's own debug freeze ("Switch All No Update"): bit `0x400` of each
-  character's debug flags (`ChrIns +0x3b0 -> +0x20`, word `+0x200`), on every character set but the
-  last two, which hold the players. Only characters frozen by the port are thawed.
-- Projectiles: three calls return at once while paused: `SprjBulletManager`'s step (spawn
-  requests, each bullet's update and flight), the attack manager's update (lifetime and hits of
-  bullets and attacks) and `SprjBulletManager`'s update (creation phases, emitters). A projectile
-  fired just as the menu opens hangs in the air and resumes its flight once the menu closes: it
-  can neither hit you while you are in the menu nor be dodged by opening it.
-- Sounds (FMOD Ex, run on its own thread): at the start of `EventSystemI::update` the event
-  channel groups playing under each category are paused, and resumed when the menu closes. Whole
-  categories are not paused: the menu's sounds share "SE" with the world's, so sounds started
-  while the menu is open (the menu's) play. A reverb tail fades out over about a second.
+- The world stops the way it does during a cutscene. The field's update (1.09 `0x193ac10`) decides
+  each frame whether the world runs (not during a cutscene, otherwise unless the field is ending,
+  byte `+0x153`) and keeps the answer at `+0x152`, which the other world task reads too. The
+  instructions computing it (`0x193b1ff`) jump to a stub that also answers "stopped" while paused.
+  Verified: the player cannot walk or turn the camera; the Hemwick elevator stopped mid-ride.
+- Enemies also get the game's own debug freeze ("Switch All No Update", bit `0x400` of each
+  character's debug flags) and projectiles three skipped calls; both came first and stay.
+- Sounds (FMOD Ex): the event channel groups playing under each category are paused at the start
+  of `EventSystemI::update` and resumed when the menu closes; the menu's own sounds play.
 - Effects: the graphics scene's update has an unused switch (scene `+0x5ce`) that gives the
-  particle effects and the rest of its updates no time; they are drawn as they are.
-- The player is not made invulnerable: falls, poison and other harm not caused by enemies keep the
-  game's behaviour, so opening the menu cannot be used to escape them.
+  particle effects no time; they are drawn as they are.
+- Nothing is made invulnerable: a fall or poison simply waits for the menu to close.
 
-`src/runtime_pause.c` checks the 1.09 executable byte for byte before hooking (the menu state at
-menu manager `+0x54` = 2, `SprjSessionManager +0x124` for IsHost/IsTryJoinSession/IsClient, and
-the code it relies on); otherwise it logs `Safe menu: executable/version guard failed` and the
-menu does not pause.
+`src/runtime_pause.c` checks the 1.09 executable byte for byte before hooking; otherwise it logs
+`Safe menu: executable/version guard failed` and the menu does not pause.
+
+## Retry a boss fight after dying in it
+
+`qol_boss_retry=1` in `bbport.ini` (or `BB_BOSS_RETRY=1`). After a death to a story boss (a boss bar
+naming a boss, not an NPC hunter) behind a fog gate, once you are on your feet again the overlay asks
+"Retry the fight?" (Cross/A/Enter: retry; Circle/B/Esc: not now). Retrying puts you at the boss's
+fog gate: a short warp when you are in its map, otherwise a respawn-point warp to a lamp of that
+map (that warp takes lamps only) and the short warp on arrival. Single player, 1.09 only, outside
+the Chalice Dungeons (their maps are generated).
+
+`scripts/boss_retry.py` finds the gates in the map event scripts (the host event turning the player
+toward a point with the fog walk, animation 101130; its defeat flag and the region inside the fog)
+and adds, per gate: a map event that writes the gate's number to flags 6989-6996 and sets 6988
+when you walk in while the boss lives, and common events 7400-7599 that warp on flag 6986 with the
+gate's number. `src/runtime_retry.c` reads the boss bars like the Discord presence, notices the
+death (player HP 0 during the fight) and asks; the list is `out/qol/boss_retry.txt`
+(`BB_BOSS_RETRY_LIST`).
 
 ## Planned, not implemented yet
 

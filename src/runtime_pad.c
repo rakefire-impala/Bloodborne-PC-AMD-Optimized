@@ -316,6 +316,7 @@ static ABI int32_t pad_read_state(int32_t handle, PadData *data) {
     bbgpu_before_input();
     runtime_lamp_poll(); /* the game's own thread: event flags are read and set here */
     runtime_pause_poll();
+    runtime_retry_poll();
     runtime_discord_poll();
     pthread_mutex_lock(&lock);
     sample(data); ++reads;

@@ -3,6 +3,9 @@
 // lit lamp), its lamps in the headstone's order ("???" until lit, the lamp the player stands at
 // marked), and the Hunter's Dream on Square. Texts are the game's own, in the game's language
 // (scripts/lamp_travel.py writes them to lamp_menu.txt).
+//
+// The boss retry prompt (src/runtime_retry.c) shares its look: the boss's name, a question, and
+// Cross to retry or Circle to decline.
 #include "bbport_lamp_menu.h"
 
 #include <algorithm>
@@ -51,6 +54,11 @@ int result = BBGPU_LAMP_PENDING;
 Device device = Device::Keyboard;
 bool detect_device = false;
 bool stick_x_held = false, stick_y_held = false;
+
+// The open retry prompt, under the same mutex.
+std::atomic<bool> prompt_shown{false};
+std::string prompt_boss, prompt_question, prompt_retry, prompt_decline;
+int prompt_result = BBGPU_RETRY_PENDING;
 
 bool TabVisible(int t) {
     for (int i : tabs[t].lamps) {
@@ -232,6 +240,110 @@ bool Hovered(ImVec2 a, ImVec2 b) {
     return m.x >= a.x && m.x < b.x && m.y >= a.y && m.y < b.y;
 }
 
+// --- the retry prompt ---
+
+void Answer(int value) {
+    prompt_result = value;
+    prompt_shown = false;
+}
+
+bool PromptEvent(const SDL_Event& event) {
+    ImGuiIO& io = ImGui::GetIO();
+    switch (event.type) {
+    case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+        device = DeviceOf(event.gbutton.which);
+        if (event.gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH) Answer(1);
+        if (event.gbutton.button == SDL_GAMEPAD_BUTTON_EAST) Answer(0);
+        return true;
+    case SDL_EVENT_KEY_DOWN:
+        device = Device::Keyboard;
+        if (event.key.repeat) return true;
+        switch (event.key.key) {
+        case SDLK_RETURN: case SDLK_KP_ENTER: case SDLK_SPACE: Answer(1); break;
+        case SDLK_ESCAPE: case SDLK_BACKSPACE: case SDLK_LSHIFT: Answer(0); break;
+        default: break;
+        }
+        return true;
+    case SDL_EVENT_MOUSE_MOTION: {
+        SDL_Window* window = SDL_GetWindowFromID(event.motion.windowID);
+        const float density = window ? SDL_GetWindowPixelDensity(window) : 1.0f;
+        io.AddMousePosEvent(event.motion.x * density, event.motion.y * density);
+        return true;
+    }
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+    case SDL_EVENT_MOUSE_BUTTON_UP: {
+        SDL_Window* window = SDL_GetWindowFromID(event.button.windowID);
+        const float density = window ? SDL_GetWindowPixelDensity(window) : 1.0f;
+        io.AddMousePosEvent(event.button.x * density, event.button.y * density);
+        if (event.button.button == SDL_BUTTON_LEFT) io.AddMouseButtonEvent(0, event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
+        return true;
+    }
+    case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+    case SDL_EVENT_MOUSE_WHEEL:
+    case SDL_EVENT_KEY_UP:
+    case SDL_EVENT_GAMEPAD_BUTTON_UP:
+    case SDL_EVENT_TEXT_INPUT:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void PromptDraw() {
+    if (detect_device) {
+        detect_device = false;
+        int count = 0;
+        SDL_JoystickID* ids = SDL_GetGamepads(&count);
+        device = ids && count > 0 ? DeviceOf(ids[0]) : Device::Keyboard;
+        SDL_free(ids);
+    }
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const ImVec2 screen = viewport->Size, origin = viewport->Pos;
+    const float s = std::max(0.5f, std::min(screen.y / 1080.0f, screen.x / 1920.0f));
+    ImDrawList* d = ImGui::GetForegroundDrawList();
+    const float panel_w = std::min(900.0f * s, screen.x - 32.0f * s);
+    const float x0 = origin.x + (screen.x - panel_w) * 0.5f, x1 = x0 + panel_w;
+    const float top = origin.y + screen.y * 0.5f - 130.0f * s, bottom = top + 230.0f * s;
+
+    // The lamp menu's band, lower and without the dimming: the world stays visible behind it.
+    const float fade = 120.0f * s;
+    const ImU32 band = IM_COL32(4, 4, 6, 205), clear = IM_COL32(4, 4, 6, 0);
+    d->AddRectFilled(ImVec2(x0 + fade, top - 20 * s), ImVec2(x1 - fade, bottom + 20 * s), band);
+    d->AddRectFilledMultiColor(ImVec2(x0, top - 20 * s), ImVec2(x0 + fade, bottom + 20 * s), clear, band, band, clear);
+    d->AddRectFilledMultiColor(ImVec2(x1 - fade, top - 20 * s), ImVec2(x1, bottom + 20 * s), band, clear, clear, band);
+    Rule(d, x0 + 40 * s, x1 - 40 * s, top, s);
+    Rule(d, x0 + 40 * s, x1 - 40 * s, bottom, s);
+
+    const float title_size = 34.0f * s, question_size = 27.0f * s;
+    const ImVec2 title = TextSize(title_size, prompt_boss.c_str());
+    Text(d, title_size, ImVec2((x0 + x1 - title.x) * 0.5f, top + 28 * s), BrightColor, prompt_boss.c_str());
+    const ImVec2 asked = TextSize(question_size, prompt_question.c_str());
+    Text(d, question_size, ImVec2((x0 + x1 - asked.x) * 0.5f, top + 88 * s), TextColor, prompt_question.c_str());
+    d->AddLine(ImVec2(x0 + 60 * s, top + 140 * s), ImVec2(x1 - 60 * s, top + 140 * s), IM_COL32(150, 142, 124, 120),
+               std::max(1.0f, s));
+
+    // The two choices, each clickable.
+    const float key_size = 25.0f * s, gap = 64.0f * s, glyph = 34.0f * s;
+    const float retry_w = glyph + TextSize(key_size, prompt_retry.c_str()).x;
+    const float decline_w = glyph + TextSize(key_size, prompt_decline.c_str()).x;
+    float kx = (x0 + x1 - retry_w - gap - decline_w) * 0.5f;
+    const float ky = top + 185.0f * s;
+    const bool clicked = ImGui::IsMouseClicked(0);
+    for (int choice = 1; choice >= 0; --choice) {
+        const std::string& label = choice ? prompt_retry : prompt_decline;
+        const float w = choice ? retry_w : decline_w;
+        const ImVec2 a(kx - 8 * s, ky - 22 * s), b(kx + w + 8 * s, ky + 22 * s);
+        const bool hover = Hovered(a, b);
+        if (clicked && hover) {
+            Answer(choice);
+            return;
+        }
+        Glyph(d, ImVec2(kx + 14 * s, ky), s, choice ? Button::Select : Button::Back);
+        Text(d, key_size, ImVec2(kx + glyph, ky - key_size * 0.6f), hover ? BrightColor : TextColor, label.c_str());
+        kx += w + gap;
+    }
+}
+
 } // namespace
 
 void LoadFont(ImFontAtlas* atlas) {
@@ -248,11 +360,12 @@ void LoadFont(ImFontAtlas* atlas) {
 }
 
 bool IsOpen() {
-    return shown;
+    return shown || prompt_shown;
 }
 
 bool HandleEvent(const SDL_Event& event) {
     std::scoped_lock lock{mutex};
+    if (prompt_shown) return PromptEvent(event);
     if (!shown) return false;
     ImGuiIO& io = ImGui::GetIO();
     switch (event.type) {
@@ -324,6 +437,10 @@ bool HandleEvent(const SDL_Event& event) {
 
 void Draw() {
     std::scoped_lock lock{mutex};
+    if (prompt_shown) {
+        PromptDraw();
+        return;
+    }
     if (!shown || tabs.empty()) return;
     if (detect_device) {
         detect_device = false;
@@ -535,5 +652,32 @@ extern "C" int bbgpu_lamp_menu_result(void) {
     if (shown) return BBGPU_LAMP_PENDING;
     const int value = result;
     result = BBGPU_LAMP_PENDING;
+    return value;
+}
+
+extern "C" void bbgpu_retry_prompt_open(const char* boss, const char* question, const char* retry,
+                                        const char* decline) {
+    std::scoped_lock lock{mutex};
+    prompt_boss = boss ? boss : "";
+    prompt_question = question ? question : "";
+    prompt_retry = retry ? retry : "";
+    prompt_decline = decline ? decline : "";
+    prompt_result = BBGPU_RETRY_PENDING;
+    detect_device = true;
+    prompt_shown = true;
+    std::printf("Boss retry: asking about %s\n", prompt_boss.c_str());
+}
+
+extern "C" void bbgpu_retry_prompt_close(void) {
+    std::scoped_lock lock{mutex};
+    prompt_shown = false;
+    prompt_result = BBGPU_RETRY_PENDING;
+}
+
+extern "C" int bbgpu_retry_prompt_result(void) {
+    std::scoped_lock lock{mutex};
+    if (prompt_shown) return BBGPU_RETRY_PENDING;
+    const int value = prompt_result;
+    prompt_result = BBGPU_RETRY_PENDING;
     return value;
 }

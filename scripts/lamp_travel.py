@@ -21,6 +21,10 @@ What this adds, in a mod layer that replaces whole files:
   travel animation and warps (the Dream keeps its own handlers);
 - lamp_menu.txt beside dvdroot_ps4: the menu's lamps and texts for the port (BB_LAMP_MENU).
 Lamps show the travel dialog only in single player, so co-op never sets these flags.
+
+Saving at lamps (save=True, with or without travel): the lamp's dialog also sets LAMP_SAVE, and
+common event 7260 waits for it, clears it and requests a save (2000[05], as the game's own events
+do after a boss or a shortcut).
 """
 import argparse
 import os
@@ -50,6 +54,8 @@ TRAVEL_GROUP, CHECK_GROUP = 0x7FFFFF80, 0x7FFFFF8F
 # and sets the lamp picked (or MENU_DREAM) and then MENU_DONE.
 MENU_REQUEST, MENU_DONE, MENU_DREAM, MENU_LAMPS = 6920, 6921, 6922, 6928
 MENU_LAMP_LIMIT = 6984
+LAMP_SAVE = 6985               # set by every lamp's dialog when saving at lamps
+SAVE_EVENT = 7260              # ours, in common.emevd
 # Game language (BB_LANGUAGE, the PS4 system language) -> message folder. The overlay's font has
 # no CJK glyphs: those languages get the English names.
 MESSAGE_FOLDERS = {0: 'engus', 1: 'engus', 2: 'frafr', 3: 'spaes', 4: 'deude', 5: 'itait', 6: 'nldnl',
@@ -213,22 +219,26 @@ def lamp_identity(esd: F.Esd):
     return None
 
 
-def patch_lamp(esd: F.Esd, here, tabs, check_src, check_group):
-    """Turn the lamp's "Return to the Hunter's Dream?" dialog into the port's travel menu."""
+def dialog_state(esd: F.Esd):
+    """The state showing the lamp's "Return to the Hunter's Dream?" dialog."""
     for gid, first, count in esd.groups:
         for si in range(first, first + count):
             for ci in esd.commands(esd.states[si]['entry']):
                 if esd.cmds[ci][:2] == [1, 17] and DREAM_QUESTION in [F.ez_eval(a) for a in esd.cmd_args(ci)]:
-                    dialog = si
-                    break
-            else:
-                continue
-            break
-        else:
-            continue
-        break
-    else:
-        raise ValueError('no "Return to the Hunter\'s Dream?" dialog')
+                    return si
+    raise ValueError('no "Return to the Hunter\'s Dream?" dialog')
+
+
+def patch_save(esd: F.Esd):
+    """The lamp's dialog asks for a save as it opens."""
+    dialog = dialog_state(esd)
+    entry = [(esd.cmds[i][0], esd.cmds[i][1], esd.cmd_args(i)) for i in esd.commands(esd.states[dialog]['entry'])]
+    esd.replace_state(dialog, entry=[set_flag(LAMP_SAVE, 1)] + entry)
+
+
+def patch_lamp(esd: F.Esd, here, tabs, check_src, check_group, save=False):
+    """Turn the lamp's "Return to the Hunter's Dream?" dialog into the port's travel menu."""
+    dialog = dialog_state(esd)
     ok = cancel = None
     for c in esd.state_conds(dialog):
         ev = esd.expression(esd.conds[c]['eval'])
@@ -247,7 +257,7 @@ def patch_lamp(esd: F.Esd, here, tabs, check_src, check_group):
     # and its warp flag set (the event script warps): the dialog ends as when cancelled.
     def nested(evaluator, target):
         return esd.add_cond(evaluator, subs=[esd.add_cond(TRUE, target=target)])
-    esd.replace_state(dialog, entry=[(6, TRAVEL_GROUP, [])], while_=wait,
+    esd.replace_state(dialog, entry=[set_flag(LAMP_SAVE, 1)] * save + [(6, TRAVEL_GROUP, [])], while_=wait,
                       conds=[nested(EV_CALL_RESULT(1), cancel), nested(EV_CALL_RESULT(2), ok),
                              nested(EV_CALL_DONE, cancel)])
 
@@ -287,6 +297,17 @@ def patch_common(common: F.Emevd, warps):
                                for slot, (flag, region) in enumerate(warps)])
 
 
+def add_save_event(common: F.Emevd):
+    """Event 7260: wait for LAMP_SAVE, clear it, request a save, start over."""
+    common.add_event(SAVE_EVENT, [
+        (3, 0, bytes([0, 1, 0, 0]) + struct.pack('<i', LAMP_SAVE)),  # wait for the flag
+        (2003, 2, struct.pack('<ii', LAMP_SAVE, 0)),
+        (2000, 5, bytes(4)),                                       # save request
+        (1000, 4, struct.pack('<i', 1)),                           # restart
+    ])
+    common.append_to_event(0, [(2000, 0, struct.pack('<3i', 0, SAVE_EVENT, 0))])
+
+
 def menu_texts(source, language):
     """{message id: text} of the event texts and key guide in the game language (English if
     unavailable)."""
@@ -319,24 +340,26 @@ def write_menu(path: Path, tabs, texts):
     path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
 
 
-def generate(source, out: Path, language=1):
+def generate(source, out: Path, language=1, travel=True, save=False):
     """source(relative path) -> bytes of the file in effect (mods included). Writes the layer
-    under out/dvdroot_ps4 and the menu to out/lamp_menu.txt; returns the number of lamps changed."""
-    dream_talk = F.Bnd4(F.Dcx(source(DREAM_TALK)).data)
-    headstones, check_src, check_group = [], None, None
-    for name, msg in HEADSTONES:
-        i = dream_talk.find(name)
-        if i is None:
-            continue
-        esd = F.Esd(dream_talk.files[i][1])
-        headstones.append(Headstone(esd, msg))
-        if check_src is None:
-            check_src, check_group = esd, headstones[-1].check_group
-    if not headstones:
-        raise ValueError('no headstones in the Hunter\'s Dream talk scripts')
-    tabs = menu_lamps(headstones)
-    warps = destinations(F.Emevd(F.Dcx(source(DREAM_EVENTS)).data))
-    texts = menu_texts(source, language)
+    under out/dvdroot_ps4 and, with travel, the menu to out/lamp_menu.txt; returns the number of
+    lamps changed."""
+    if travel:
+        dream_talk = F.Bnd4(F.Dcx(source(DREAM_TALK)).data)
+        headstones, check_src, check_group = [], None, None
+        for name, msg in HEADSTONES:
+            i = dream_talk.find(name)
+            if i is None:
+                continue
+            esd = F.Esd(dream_talk.files[i][1])
+            headstones.append(Headstone(esd, msg))
+            if check_src is None:
+                check_src, check_group = esd, headstones[-1].check_group
+        if not headstones:
+            raise ValueError('no headstones in the Hunter\'s Dream talk scripts')
+        tabs = menu_lamps(headstones)
+        warps = destinations(F.Emevd(F.Dcx(source(DREAM_EVENTS)).data))
+        texts = menu_texts(source, language)
 
     root = out / 'dvdroot_ps4'
     lamps = 0
@@ -351,7 +374,10 @@ def generate(source, out: Path, language=1):
             here = lamp_identity(esd)
             if here is None:
                 continue
-            patch_lamp(esd, here, tabs, check_src, check_group)
+            if travel:
+                patch_lamp(esd, here, tabs, check_src, check_group, save)
+            else:
+                patch_save(esd)
             entry[1] = esd.write()
             changed = True
             lamps += 1
@@ -360,10 +386,14 @@ def generate(source, out: Path, language=1):
             (root / talk).write_bytes(dcx.write(bnd.write()))
     common_dcx = F.Dcx(source(COMMON_EVENTS))
     common = F.Emevd(common_dcx.data)
-    patch_common(common, warps)
+    if travel:
+        patch_common(common, warps)
+    if save:
+        add_save_event(common)
     (root / COMMON_EVENTS).parent.mkdir(parents=True, exist_ok=True)
     (root / COMMON_EVENTS).write_bytes(common_dcx.write(common.write()))
-    write_menu(out / MENU_FILE, tabs, texts)  # last: its presence means the layer is complete
+    if travel:
+        write_menu(out / MENU_FILE, tabs, texts)  # last: its presence means the layer is complete
     return lamps
 
 
@@ -385,6 +415,12 @@ class GameFiles:
         names |= {k.split('/')[-1] for k in self.replaced if k.startswith('dvdroot_ps4/script/talk/')
                   and k.endswith('.talkesdbnd.dcx')}
         return sorted(f'script/talk/{n}' for n in names)
+
+    def event_scripts(self):
+        names = {p.name for p in (self.game / 'dvdroot_ps4/event').glob('*.emevd.dcx')}
+        names |= {k.split('/')[-1] for k in self.replaced if k.startswith('dvdroot_ps4/event/')
+                  and k.endswith('.emevd.dcx')}
+        return sorted(f'event/{n}' for n in names)
 
 
 def game_language():

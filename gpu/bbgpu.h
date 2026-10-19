@@ -45,6 +45,13 @@ int bbgpu_lamp_menu_load(const char *path, int *request, int *done, int *dream,
 void bbgpu_lamp_menu_open(const unsigned char *lit, int here);
 void bbgpu_lamp_menu_close(void);
 int bbgpu_lamp_menu_result(void);
+/* Boss retry prompt (src/runtime_retry.c, drawn with the lamp menu): open shows the boss's name,
+ * the question and the two choices (UTF-8); result returns BBGPU_RETRY_PENDING while the player
+ * chooses, then 1 (retry) or 0 (not now). It holds the game's pad input neutral too. */
+enum { BBGPU_RETRY_PENDING = -1 };
+void bbgpu_retry_prompt_open(const char *boss, const char *question, const char *retry, const char *decline);
+void bbgpu_retry_prompt_close(void);
+int bbgpu_retry_prompt_result(void);
 /* Number of symbols registered by the vendored libraries (diagnostics). */
 unsigned bbgpu_symbol_count(void);
 /* Completed and current cooperative pause time; the window event loop keeps running. */
