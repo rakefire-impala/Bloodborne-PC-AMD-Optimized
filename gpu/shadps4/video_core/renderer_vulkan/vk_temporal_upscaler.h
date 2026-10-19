@@ -66,6 +66,11 @@ public:
     /// Before a compute dispatch: the post-processing combine shader triggers the upscale.
     void OnDispatch(u64 cs_hash);
 
+    /// bbport: before the display pass, while the scene depth is still this frame's. Scaled
+    /// presets upscale at the first UI draw; a frame that drew none (cutscenes between
+    /// subtitles) is upscaled here, or the presenter would show the game's own stretched scene.
+    void OnSceneEnd();
+
     /// Start of a frame in the command stream (display pass).
     bool OnFrameStart();
     bool RasterScaling() const;

@@ -275,6 +275,14 @@ bool TemporalUpscaler::RasterScaling() const {
     return !scaled_session && scene_targets.Reduced() && !done_this_frame;
 }
 
+void TemporalUpscaler::OnSceneEnd() {
+    if (!Scaled() || ui_phase || done_this_frame || !ldr_target || !camera_motion.Ready() ||
+        !Active() || failed) {
+        return;
+    }
+    RunScaled();
+}
+
 bool TemporalUpscaler::OnFrameStart() {
     completed_fg_source=fg_source;
     fg_source={};

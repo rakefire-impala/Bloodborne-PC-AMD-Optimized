@@ -77,9 +77,12 @@ uintptr_t runtime_ajm_resolve(const char *name);
 void runtime_ajm_report(void);
 uintptr_t runtime_audio_resolve(const char *name);
 void runtime_audio_report(void);
-/* Discord Rich Presence (runtime_discord.c): started before the game runs; told of every
+/* Discord Rich Presence (runtime_discord.c): started before the game runs. On 1.09 the area
+ * and boss fights are read from the game, polled by the pad; otherwise it is told of every
  * guest file the game opens (map layouts give the area). */
+void runtime_discord_install(void *image, size_t size, const char *app_version);
 void runtime_discord_start(void);
+void runtime_discord_poll(void);
 void runtime_discord_note_open(const char *path);
 /* Lamp travel menu (runtime_lamp.c): checks the executable and BB_LAMP_MENU; polled by the pad. */
 void runtime_lamp_install(void *image, size_t size, const char *app_version);

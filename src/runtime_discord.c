@@ -2,10 +2,16 @@
  * library implements: a named pipe on Windows, a Unix socket elsewhere, frames of opcode,
  * length and JSON). No library or DLL: Discord not running just means no presence.
  *
- * The area comes from the map layouts the game loads (map/MapStudio/mAA_BB_CC_DD.msb): the
- * game's place-name IDs follow the same numbering (2410 Central Yharnam is m24_01), and the
- * developers' comments in map/worldmsblist.worldloadlistlist agree (m27 "forest", m36 "fishing
- * village"). A load that brings several blocks of one map shows the map's general name.
+ * The area is the map block the player is in (mAA_BB): the game's place-name IDs follow the
+ * same numbering (2410 Central Yharnam is m24_01), and the developers' comments in
+ * map/worldmsblist.worldloadlistlist agree (m27 "forest", m36 "fishing village"). On 1.09 it is
+ * read from the game on its own thread (runtime_discord_poll), as the script binding
+ * GetLastBlockId does. Map layouts opened are only a fallback for other executables: the game
+ * also opens neighbouring maps it streams in (m27 and m24_00 from the Tomb of Oedon).
+ *
+ * Boss fights: the HUD's three boss bars (EMEVD 2003[11]) are slots in the menu manager holding
+ * the boss's name ID (NPC names) and character handle. A bar counts while its character has HP
+ * left, the HUD's own lookup; the presence then reads "Fighting <boss>" with the fight's time.
  *
  * BB_DISCORD=0 turns it off; BB_DISCORD_APP_ID=<id> uses another Discord application. Image
  * keys ("bloodborne" large, zones[] below small) are the asset names of that application. */
@@ -55,16 +61,69 @@ static const Zone zones[] = {
     {36, -1, "Fishing Hamlet", "fishing_hamlet"},
 };
 
+/* NPC names (item.msgbnd NPC名.fmg, English): the name IDs boss bars show. */
+static const struct { int id; const char *name; } npc_names[] = {
+    {1000, "Madman's Escort"}, {1010, "Forgotten Madman"}, {6400, "Old Hunter Henryk"},
+    {6500, "Valtr, Master of the League"}, {6505, "Valtr, Beast Eater"},
+    {6530, "Yamamura the Wanderer"}, {6540, "Younger Madaras Twin"},
+    {6550, "Mensis Scholar Damian"}, {6600, "Henriett"}, {6640, "Defector Antal"},
+    {7040, "Tomb Prospector Olek"}, {7045, "Tomb Prospector Gremia"}, {7060, "Beastclaw Jozef"},
+    {7160, "Queen Killer"}, {7300, "Vitus"}, {7310, "Madman Wallar"},
+    {101000, "Degenerate Beast"}, {106000, "Brainsucker"}, {127000, "Maneater Boar"},
+    {209000, "Blood-starved Beast"}, {209010, "Blood-starved Beast"},
+    {210000, "The Witch of Hemwick"}, {212010, "Shadow of Yharnam"},
+    {212020, "Shadow of Yharnam"}, {212030, "Shadow of Yharnam"},
+    {216000, "Keeper of the Old Lords"}, {218000, "Loran Silverbeast"},
+    {232000, "Martyr Logarius"}, {251000, "Ebrietas, Daughter of the Cosmos"},
+    {251010, "Ebrietas, Daughter of the Cosmos"}, {257000, "Celestial Emissary"},
+    {257010, "Celestial Emissary"}, {271000, "Father Gascoigne"}, {272000, "Father Gascoigne"},
+    {304000, "Merciless Watcher"}, {304001, "Watcher Chieftain"}, {304002, "Merciless Watcher"},
+    {304003, "Merciless Watcher"}, {305000, "Pthumerian Descendant"},
+    {305001, "Pthumerian Descendant"}, {305002, "Pthumerian Elder"},
+    {306000, "Pthumerian Bride"}, {306001, "Yharnam, Pthumerian Queen"},
+    {313000, "Undead Giant"}, {403000, "Living Failures"}, {450000, "Laurence, the First Vicar"},
+    {451000, "Ludwig the Accursed"}, {451005, "Ludwig, the Holy Blade"},
+    {452000, "Lady Maria of the Astral Clocktower"}, {453000, "Orphan of Kos"},
+    {454000, "Orphan of Kos"}, {500000, "Cleric Beast"}, {501000, "Watchdog of the Old Lords"},
+    {502000, "Vicar Amelia"}, {504000, "Loran Darkbeast"}, {504010, "Abhorrent Beast"},
+    {507000, "The One Reborn"}, {508000, "Darkbeast Paarl"}, {508010, "Loran Darkbeast"},
+    {509000, "Bloodletting Beast"}, {509010, "Bloodletting Beast"},
+    {510000, "Rom, the Vacuous Spider"}, {510010, "Rom, the Vacuous Spider"},
+    {511000, "Great One Beast"}, {512000, "Amygdala"}, {512010, "Amygdala"},
+    {540000, "Moon Presence"}, {551000, "Mergo's Wet Nurse"}, {551010, "Mergo's Wet Nurse"},
+    {750000, "Beast-possessed Soul"}, {802000, "Slug Princess"}, {803000, "Heroine Doll"},
+    {804000, "Gehrman, the First Hunter"}, {805000, "Gehrman, the First Hunter"},
+    {899000, "Micolash, Host of the Nightmare"}, {899010, "Vileblood Hunter Alfred"},
+    {900020, "The Vileblood"}, {900030, "The Executioners"}, {900040, "Hunter of Hunters"},
+    {901040, "Nameless Tomb Prospector"}, {901060, "Izzy's Admirer"},
+    {901070, "Nameless Madman"}, {901110, "Bone Ash Hunter Carla"},
+    {901150, "Drifting Vileblood Leo"}, {901160, "Ardeo Man"}, {901170, "Defeated Hunter"},
+    {901180, "Choir Intelligencer Edgar"},
+};
+
 /* Map layouts opened by the game; a gap of LOAD_GAP_NS starts a new load. */
 #define LOAD_GAP_NS 3000000000ull
 #define MAX_BLOCKS 16
+/* Out of the world this long (not a loading screen): the title screen or its menus. */
+#define MENUS_AFTER_NS 45000000000ull
 static pthread_mutex_t state_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct { int map, block; } loaded[MAX_BLOCKS];
 static int loaded_count;
 static uint64_t last_layout_ns;
 static const Zone *zone; /* current area, NULL before the first map */
+static int boss = -1;    /* name ID of the boss bar being fought, -1 when none */
+static long long fight_start;
 static int started;
 static char app_id[32];
+
+/* The 1.09 game state the poll reads; game is NULL when the executable check failed. */
+enum {
+    WORLD_CHR_MAN = 0x553e878, /* WorldChrMan *: +0x60 local player, +0x850 character sets */
+    BLOCK_LIST = 0x553b148,    /* +0x20 index of the player's block, +0x10 -> +0x18 count, +0x20 entries */
+    MENU_MAN = 0x5562878,      /* menu manager *: boss bars at +0x1658, 3 x {name ID, handle, ...} */
+    BOSS_BARS = 0x1658,
+};
+static unsigned char *game;
 
 static uint64_t now_ns(void) {
     struct timespec t;
@@ -89,9 +148,10 @@ static const Zone *find_zone(int map, int block) {
     return whole;
 }
 
-/* Called for every guest file the game opens: cheap unless it is a map layout. */
+/* Called for every guest file the game opens: cheap unless it is a map layout. Only used when
+   the poll cannot read the player's block. */
 void runtime_discord_note_open(const char *path) {
-    if (!started || !path) return;
+    if (!started || game || !path) return;
     const char *msb = strstr(path, ".msb");
     if (!msb || msb - path < 12) return;
     const char *m = msb - 12; /* mAA_BB_CC_DD */
@@ -131,6 +191,133 @@ void runtime_discord_note_open(const char *path) {
     if (next) zone = next;
     pthread_mutex_unlock(&state_lock);
     if (changed) printf("Discord: area %s (map layouts:%s)\n", next->name, list);
+}
+
+/* ---- Game state (1.09) --------------------------------------------------------------------- */
+static uintptr_t load(uintptr_t address) {
+    uintptr_t value;
+    memcpy(&value, (const void *)address, sizeof(value));
+    return value;
+}
+static int32_t load32(uintptr_t address) {
+    int32_t value;
+    memcpy(&value, (const void *)address, sizeof(value));
+    return value;
+}
+static int pointer_ok(uintptr_t p) { return p >= 65536; }
+
+void runtime_discord_install(void *image, size_t size, const char *app_version) {
+    static const struct { size_t offset; unsigned char length; unsigned char bytes[64]; } checks[] = {
+        /* GetLastBlockId: lea rcx,[block list]; ... movsxd rcx,[rdx+0x20]; mov rdx,[rdx+0x10];
+         * cmp [rdx+0x18],ecx; mov rdx,[rdx+0x20]; entry rcx*0xa0; mov ecx,[rdx+rcx+8]. */
+        {0x1332db8, 47, {0x48,0x8d,0x0d,0x89,0x83,0x20,0x04,0x48,0x8b,0x11,0x48,0x85,0xd2,0x74,0x31,
+                         0x48,0x63,0x4a,0x20,0x48,0x85,0xc9,0x78,0x28,0x48,0x8b,0x52,0x10,0x39,0x4a,
+                         0x18,0x7e,0x1f,0x48,0x8b,0x52,0x20,0x48,0x8d,0x0c,0x89,0x48,0xc1,0xe1,0x05,
+                         0x8b,0x4c}},
+        /* The boss bar setter (EMEVD 2003[11]): slot <= 2, [menu+4*5*slot+0x165c] = handle,
+         * [+0x1658] = name ID. */
+        {0x131ef3f, 52, {0x83,0xfb,0x02,0x77,0x2f,0x4c,0x8b,0x3d,0x2d,0x39,0x24,0x04,0x31,0xd2,0x89,
+                         0xf7,0xe8,0x4c,0xa8,0x0a,0x00,0x48,0x85,0xc0,0x74,0x1a,0x48,0x63,0xcb,0x8b,
+                         0x40,0x08,0x48,0x8d,0x0c,0x89,0x41,0x89,0x84,0x8f,0x5c,0x16,0x00,0x00,0x45,
+                         0x89,0xb4,0x8f,0x58,0x16,0x00,0x00}},
+        /* The boss bar's HUD: handle bits 14-19 select WorldChrMan +0x850 + 8 * set, bits 0-13
+         * an entry of 0x38; ChrIns +0x3b0 -> +0x20 -> HP at +0xf8. */
+        {0x164c3e2, 62, {0xc4,0xe2,0x68,0xf7,0xd0,0x48,0x8b,0x71,0x08,0x8b,0x76,0x18,0x83,0xc6,0x02,
+                         0x39,0xf2,0x0f,0x8d,0xf3,0x02,0x00,0x00,0x89,0xd2,0x48,0x8b,0x8c,0xd1,0x50,
+                         0x08,0x00,0x00,0x48,0x85,0xc9,0x0f,0x84,0xe0,0x02,0x00,0x00,0x25,0xff,0x3f,
+                         0x00,0x00,0x3b,0x01,0x0f,0x8d,0xd3,0x02,0x00,0x00,0x48,0x6b,0xc0,0x38,0x48,
+                         0x03,0x41}},
+        {0x164c427, 31, {0x48,0x8b,0x00,0x48,0x85,0xc0,0x0f,0x84,0xb9,0x02,0x00,0x00,0x48,0x8b,0x80,
+                         0xb0,0x03,0x00,0x00,0x48,0x8b,0x40,0x20,0xc5,0xfa,0x2a,0x80,0xf8,0x00,0x00,
+                         0x00}},
+    };
+    const unsigned char *code = image;
+    int ok = app_version && !strcmp(app_version, "01.09") && size > MENU_MAN + 8;
+    for (size_t i = 0; ok && i < sizeof(checks) / sizeof(checks[0]); ++i)
+        ok = memcmp(code + checks[i].offset, checks[i].bytes, checks[i].length) == 0;
+    if (!ok) {
+        puts("Discord: executable/version guard failed; areas from map loads, no boss fights");
+        return;
+    }
+    game = image;
+}
+
+/* The block the player is in, as GetLastBlockId reads it: 0xAABBCCDD for mAA_BB_CC_DD. */
+static int player_block(int32_t *id) {
+    const uintptr_t list = load((uintptr_t)game + BLOCK_LIST);
+    if (!pointer_ok(list)) return 0;
+    const int32_t index = load32(list + 0x20);
+    const uintptr_t blocks = load(list + 0x10);
+    if (index < 0 || !pointer_ok(blocks) || index >= load32(blocks + 0x18)) return 0;
+    const uintptr_t entries = load(blocks + 0x20);
+    if (!pointer_ok(entries)) return 0;
+    *id = load32(entries + (uintptr_t)index * 0xa0 + 8);
+    return *id != -1;
+}
+
+/* The first boss bar whose character still has HP; its name ID, or -1. */
+static int fought_boss(uintptr_t world) {
+    const uintptr_t menu = load((uintptr_t)game + MENU_MAN);
+    const uintptr_t info = load(world + 8);
+    if (!pointer_ok(menu) || !pointer_ok(info)) return -1;
+    const int32_t sets = load32(info + 0x18) + 2;
+    for (int slot = 0; slot < 3; ++slot) {
+        const int32_t name = load32(menu + BOSS_BARS + 20 * slot);
+        const uint32_t handle = (uint32_t)load32(menu + BOSS_BARS + 20 * slot + 4);
+        if (name < 0 || handle == 0xffffffffu) continue;
+        const int32_t set = (int32_t)((handle >> 14) & 0x3f), entry = (int32_t)(handle & 0x3fff);
+        if (set >= sets) continue;
+        const uintptr_t characters = load(world + 0x850 + 8 * (uintptr_t)set);
+        if (!pointer_ok(characters) || entry >= load32(characters)) continue;
+        const uintptr_t entries = load(characters + 8);
+        if (!pointer_ok(entries)) continue;
+        const uintptr_t chr = load(entries + (uintptr_t)entry * 0x38);
+        const uintptr_t modules = pointer_ok(chr) ? load(chr + 0x3b0) : 0;
+        const uintptr_t stats = pointer_ok(modules) ? load(modules + 0x20) : 0;
+        if (pointer_ok(stats) && load32(stats + 0xf8) > 0) return name;
+    }
+    return -1;
+}
+
+static const char *npc_name(int id) {
+    for (size_t i = 0; i < sizeof(npc_names) / sizeof(*npc_names); ++i)
+        if (npc_names[i].id == id) return npc_names[i].name;
+    return NULL;
+}
+
+/* Called on the game's own thread once per pad read (as the lamp menu and safe menu are). */
+void runtime_discord_poll(void) {
+    static unsigned reads;
+    static uint64_t left_world;
+    if (!started || !game || ++reads % 15) return;
+    const uintptr_t world = load((uintptr_t)game + WORLD_CHR_MAN);
+    const int in_world = pointer_ok(world) && pointer_ok(load(world + 0x60));
+    int32_t block = -1;
+    const Zone *here = NULL;
+    if (in_world && player_block(&block)) here = find_zone((block >> 24) & 0xff, (block >> 16) & 0xff);
+    const int fought = in_world ? fought_boss(world) : -1;
+    const uint64_t now = now_ns();
+    if (in_world) left_world = 0;
+    else if (!left_world) left_world = now;
+    pthread_mutex_lock(&state_lock);
+    const Zone *before = zone;
+    const int boss_before = boss;
+    if (here) zone = here;
+    else if (!in_world && now - left_world > MENUS_AFTER_NS) zone = NULL;
+    /* A second phase (another bar name) is the same fight. */
+    if (fought >= 0 && boss < 0) fight_start = (long long)time(NULL);
+    boss = fought;
+    const Zone *after = zone;
+    pthread_mutex_unlock(&state_lock);
+    if (after != before) {
+        if (after) printf("Discord: area %s (m%02d_%02d)\n", after->name, (block >> 24) & 0xff, (block >> 16) & 0xff);
+        else puts("Discord: in the menus");
+    }
+    if (fought != boss_before) {
+        const char *name = fought >= 0 ? npc_name(fought) : NULL;
+        if (fought >= 0) printf("Discord: fighting %s (name %d)\n", name ? name : "a boss", fought);
+        else puts("Discord: boss fight over");
+    }
 }
 
 /* ---- IPC ----------------------------------------------------------------------------------- */
@@ -296,23 +483,21 @@ static void append_json_string(char *out, size_t size, const char *text) {
     }
     out[at] = '\0';
 }
-static void presence_json(char *out, size_t size, const Zone *current, long long start, unsigned long nonce) {
-    char details[64], state[96], image[64];
-    if (current) {
-        snprintf(details, sizeof(details), "Exploring");
-        snprintf(state, sizeof(state), "%s", current->name);
-        snprintf(image, sizeof(image), "%s", current->image);
+static void presence_json(char *out, size_t size, const Zone *current, int fought, long long start,
+                          unsigned long nonce) {
+    char details[96];
+    if (fought >= 0) {
+        const char *name = npc_name(fought);
+        snprintf(details, sizeof(details), "Fighting %s", name ? name : "a boss");
     } else {
-        snprintf(details, sizeof(details), "In the menus");
-        state[0] = '\0';
-        snprintf(image, sizeof(image), "bloodborne");
+        snprintf(details, sizeof(details), "%s", current ? "Exploring" : "In the menus");
     }
     snprintf(out, size, "{\"cmd\":\"SET_ACTIVITY\",\"nonce\":\"%lu\",\"args\":{\"pid\":%lu,\"activity\":{\"details\":\"",
              nonce, process_id());
     append_json_string(out, size, details);
-    if (state[0]) {
+    if (current) {
         strncat(out, "\",\"state\":\"", size - strlen(out) - 1);
-        append_json_string(out, size, state);
+        append_json_string(out, size, current->name);
     }
     /* The cover art large; the area's image in the small circle, its name on hover. */
     char rest[512];
@@ -320,7 +505,7 @@ static void presence_json(char *out, size_t size, const Zone *current, long long
              "\"large_text\":\"Bloodborne\"", start);
     strncat(out, rest, size - strlen(out) - 1);
     if (current) {
-        snprintf(rest, sizeof(rest), ",\"small_image\":\"%s\",\"small_text\":\"", image);
+        snprintf(rest, sizeof(rest), ",\"small_image\":\"%s\",\"small_text\":\"", current->image);
         strncat(out, rest, size - strlen(out) - 1);
         append_json_string(out, size, current->name);
         strncat(out, "\"", size - strlen(out) - 1);
@@ -334,7 +519,7 @@ static void *presence_thread(void *unused) {
     unsigned long nonce = 0;
     int connected = 0, refused = 0, reported_absent = 0;
     const Zone *sent = NULL;
-    int sent_any = 0;
+    int sent_boss = -1, sent_any = 0;
     uint64_t next_attempt = 0, last_sent = 0;
     for (;; sleep_ms(2000)) {
         const uint64_t now = now_ns();
@@ -360,11 +545,16 @@ static void *presence_thread(void *unused) {
         }
         pthread_mutex_lock(&state_lock);
         const Zone *current = zone;
+        const int fought = boss;
+        const long long fought_since = fight_start;
         pthread_mutex_unlock(&state_lock);
         /* Discord accepts 5 updates per 20 s: one per change, at most every 4 s. */
-        if ((sent_any && current == sent) || (sent_any && now - last_sent < 4000000000ull)) continue;
+        if ((sent_any && current == sent && fought == sent_boss) ||
+            (sent_any && now - last_sent < 4000000000ull))
+            continue;
         char json[1024];
-        presence_json(json, sizeof(json), current, start, ++nonce);
+        /* A fight shows its own time; exploring shows the session's. */
+        presence_json(json, sizeof(json), current, fought, fought >= 0 ? fought_since : start, ++nonce);
         if (!send_frame(OP_FRAME, json) || !drain(1000)) {
             ipc_close();
             connected = 0;
@@ -372,6 +562,7 @@ static void *presence_thread(void *unused) {
             continue;
         }
         sent = current;
+        sent_boss = fought;
         sent_any = 1;
         last_sent = now;
     }

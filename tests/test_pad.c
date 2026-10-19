@@ -18,6 +18,8 @@ static int capture;
 int bbgpu_overlay_captures_input(void) { return capture; }
 void bbgpu_before_input(void) {}
 void runtime_lamp_poll(void) {}
+void runtime_pause_poll(void) {}
+void runtime_discord_poll(void) {}
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *name) {
     (void)table; (void)count; (void)name;
     return 0;
