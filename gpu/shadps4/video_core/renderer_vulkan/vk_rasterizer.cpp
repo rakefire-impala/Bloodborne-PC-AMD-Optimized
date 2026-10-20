@@ -1457,9 +1457,12 @@ void Rasterizer::SplitSubmission() {
     // and flips of a frame generation pair waited behind half a frame of draws, and in flip
     // mode (fullscreen, or a window Windows promotes) presents piled up (47 real FPS, uneven).
     // BB_FG_SPLIT_DRAWS=<n> draws per submission, 0 = one per guest submission as before.
+    // Each boundary costs the GPU idle time (a queue switch): 128 (~6 per frame) gave 58-59
+    // real FPS with frame-to-frame stddev 1.4-1.7 ms in exclusive fullscreen where 32 (~21 per
+    // frame) gave 57.5-58 and 2.4 ms (Hunter's Dream, RX 5500M, total cap 120).
     static const u32 every = [] {
         const char* env = std::getenv("BB_FG_SPLIT_DRAWS");
-        return env ? u32(std::max(0, std::atoi(env))) : 32u;
+        return env ? u32(std::max(0, std::atoi(env))) : 128u;
     }();
     if (!every || BbSettings::Get().frame_generation_active < 2 ||
         ++draws_since_submission < every) {
