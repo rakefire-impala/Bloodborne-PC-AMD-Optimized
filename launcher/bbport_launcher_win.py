@@ -206,6 +206,34 @@ CHEAT_MULTIPLIERS = [('1', ('Off', 'Выключено'))] + [(str(n), (f'x{n}',
 MOVEMENT_MULTIPLIERS = [CHEAT_MULTIPLIERS[0], ('1.5', ('x1.5', 'x1.5'))] + CHEAT_MULTIPLIERS[1:]
 FRAME_GENERATORS = [('off', ('Off', 'Выключено')), ('fsr', ('FSR Frame Generation (2x)', 'FSR Frame Generation (2x)')),
                     ('nvidia', ('NVIDIA DLSS Frame Generation / MFG', 'NVIDIA DLSS Frame Generation / MFG'))]
+# FSR frame generation runs in exclusive fullscreen with the frame-time patch and a total FPS cap;
+# the launcher locks these while it is selected. Measured on an RX 5500M: composed presentation
+# (windowed, borderless) shows at most one image per refresh and drops some while the GPU is fully
+# busy (about 80 of 108 frames per second reached the screen); FG's own GPU time can push the real
+# rate below a fixed 30/60/90 patch's, and those then run the game in slow motion.
+FSR_FG_SETTINGS = (('window_mode', 'menu', 'fullscreen'), ('fps_mode', 'app', 'uncap'),
+                   ('limit_generated_fps', 'menu', True))
+FSR_FG_TOTAL_CAP = '120'
+FSR_FG_NOTE = (
+    'FSR Frame Generation runs in exclusive fullscreen with the Unlocked frame rate, so Window mode '
+    'and Frame rate are locked while it is on. In a window or borderless, Windows shows at most one '
+    'image per display refresh and drops frames while the graphics card is fully busy, so many '
+    'generated frames never reach the screen; exclusive fullscreen shows every one. Generating '
+    'frames also takes GPU time: with the fixed 30/60/90 FPS patches, any drop below their rate '
+    'runs the game in slow motion, while Unlocked keeps normal game speed at any frame rate. Set '
+    'the total FPS cap no higher than your monitor\'s refresh rate: 120 is 60 real + 60 generated.',
+    'FSR Frame Generation работает в эксклюзивном полноэкранном режиме с частотой «Без '
+    'ограничения», поэтому режим окна и частота кадров заблокированы, пока она включена. В окне и '
+    'без рамки Windows показывает не больше одного кадра за обновление монитора и пропускает кадры, '
+    'когда видеокарта загружена полностью, — многие сгенерированные кадры не доходят до экрана; '
+    'эксклюзивный полный экран показывает каждый. Генерация кадров также занимает время GPU: с '
+    'патчами 30/60/90 FPS любое падение ниже их частоты замедляет игру, а «Без ограничения» '
+    'сохраняет нормальную скорость игры при любой частоте. Задайте общий лимит FPS не выше частоты '
+    'монитора: 120 — это 60 реальных + 60 сгенерированных.')
+FSR_FG_LOCKED = ('Window mode and Frame rate are locked while FSR Frame Generation is on '
+                 '(Graphics → Frame Generation explains why).',
+                 'Режим окна и частота кадров заблокированы, пока включена FSR Frame Generation '
+                 '(причина — в разделе «Графика» → «Генерация кадров»).')
 REFLEX_MODES = [('off', ('Off', 'Выключено')), ('on', ('On', 'Включено')), ('boost', ('On + Boost', 'Включено + Boost'))]
 NVIDIA_MULTIPLIERS = [(str(n-1), (f'{n}x', f'{n}x')) for n in range(2, 7)]
 BACKGROUND_MODES = [('run', ('Keep running', 'Продолжать работу')),
@@ -397,6 +425,17 @@ def menu_values(settings):
     if values['window_mode'] == 'launcher':
         values['window_mode'] = launcher_window_mode(settings)
     return values
+
+
+def fsr_frame_generation_launch(settings, menu):
+    """FSR_FG_SETTINGS for a launch without the launcher window (--play): the settings to start
+    with and the menu values to save. The in-game menu can select FSR FG after the launcher."""
+    if menu.get('frame_generation') != 'fsr':
+        return settings, {}
+    changes = {} if menu.get('window_mode') == 'fullscreen' else {'window_mode': 'fullscreen'}
+    if menu.get('limit_generated_fps') != '1':
+        changes.update(limit_generated_fps='1', generated_fps_limit=FSR_FG_TOTAL_CAP)
+    return {**settings, 'fps_mode': 'uncap', 'window_mode': 'fullscreen', 'fullscreen': True}, changes
 
 
 def save_menu(changes):
@@ -959,8 +998,9 @@ class Launcher:
         s.map('TCheckbutton', background=[('active', PANEL)], foreground=[('disabled', MUTED)])
         s.configure('Warning.TLabel', background='#2a1d12', foreground='#e3b25a', padding=(10, 6))
         s.configure('TCombobox', arrowcolor=GOLD, foreground=TEXT, padding=4)
-        s.map('TCombobox', fieldbackground=[('readonly', CARD)], foreground=[('readonly', TEXT)],
-              selectbackground=[('readonly', CARD)], selectforeground=[('readonly', TEXT)])
+        s.map('TCombobox', fieldbackground=[('readonly', CARD)], foreground=[('disabled', MUTED), ('readonly', TEXT)],
+              selectbackground=[('readonly', CARD)], selectforeground=[('disabled', MUTED), ('readonly', TEXT)],
+              arrowcolor=[('disabled', MUTED)])
         s.configure('TEntry', foreground=TEXT, insertcolor=TEXT, padding=4)
         s.configure('TSpinbox', foreground=TEXT, arrowcolor=GOLD, insertcolor=TEXT, padding=4)
         s.configure('TButton', background=CARD, foreground=TEXT, padding=(12, 6), borderwidth=1)
@@ -1034,8 +1074,9 @@ class Launcher:
         return box
 
     def frame_generation_choice(self, parent, width=38):
-        choices = [(key, ('NVIDIA DLSS FG / MFG', 'NVIDIA DLSS FG / MFG') if key == 'nvidia' else labels)
-                   for key, labels in FRAME_GENERATORS] if width < 30 else FRAME_GENERATORS
+        short = {'nvidia': ('NVIDIA DLSS FG / MFG',), 'fsr': ('FSR FG (2x)',)}
+        choices = [(key, short.get(key, labels)) for key, labels in FRAME_GENERATORS] \
+            if width < 30 else FRAME_GENERATORS
         box = self.choice(parent, 'frame_generation', 'menu', choices, width=width)
         upscaler = self.var('upscaler', 'ini')
         def availability(*_args):
@@ -1043,6 +1084,51 @@ class Launcher:
         upscaler.trace_add('write', availability)
         availability()
         return box
+
+    def fsr_fg_lock(self, widget, unlocked='readonly'):
+        """A control FSR frame generation locks (FSR_FG_SETTINGS); `unlocked` is its usual state."""
+        if not hasattr(self, 'fsr_fg_locked'):
+            self.fsr_fg_locked = []
+        self.fsr_fg_locked.append((widget, unlocked))
+        return widget
+
+    def fsr_fg_shown(self, widget):
+        """A note shown only while FSR frame generation is selected (gridded already)."""
+        if not hasattr(self, 'fsr_fg_notes'):
+            self.fsr_fg_notes = []
+        self.fsr_fg_notes.append(widget)
+        return widget
+
+    def watch_frame_generation(self):
+        """Selecting FSR frame generation applies FSR_FG_SETTINGS (with a total cap of
+        FSR_FG_TOTAL_CAP to start from) and locks them; another choice brings back the values
+        from before."""
+        self.before_fsr_fg, self.fg_seen = {}, self.var('frame_generation', 'menu').get()
+        self.var('frame_generation', 'menu').trace_add('write', lambda *_a: self.enforce_frame_generation())
+        self.enforce_frame_generation()
+
+    def enforce_frame_generation(self):
+        current = self.var('frame_generation', 'menu').get()
+        selected, self.fg_seen = current != self.fg_seen, current
+        fsr = current == 'fsr'
+        cap = self.var('generated_fps_limit', 'menu')
+        for key, store, value in FSR_FG_SETTINGS:
+            var = self.var(key, store)
+            if fsr and var.get() != value:
+                self.before_fsr_fg.setdefault(key, var.get())
+                var.set(value)
+                selected = selected or key == 'limit_generated_fps'
+            elif not fsr and key in self.before_fsr_fg:
+                var.set(self.before_fsr_fg.pop(key))
+        if fsr and selected:
+            self.before_fsr_fg.setdefault('generated_fps_limit', cap.get())
+            cap.set(FSR_FG_TOTAL_CAP)
+        elif not fsr and 'generated_fps_limit' in self.before_fsr_fg:
+            cap.set(self.before_fsr_fg.pop('generated_fps_limit'))
+        for widget, unlocked in getattr(self, 'fsr_fg_locked', []):
+            widget.configure(state='disabled' if fsr else unlocked)
+        for widget in getattr(self, 'fsr_fg_notes', []):
+            widget.grid() if fsr else widget.grid_remove()
 
     def fps_cap_control(self, parent, key, store, minimum, maximum, enabled_key=None,
                         options=None):
@@ -1390,7 +1476,8 @@ class Launcher:
         ttk.Label(quick, text=_('Quick settings', 'Основное'), style='Section.TLabel').grid(
             row=0, column=0, columnspan=2, sticky='w', pady=(0, 2))
         self.row(quick, _('Graphics card', 'Видеокарта'), self.gpu_choice(quick, 26))
-        self.row(quick, _('Frame rate', 'Частота кадров'), self.choice(quick, 'fps_mode', 'app', FPS_MODES, 26))
+        self.row(quick, _('Frame rate', 'Частота кадров'),
+                 self.fsr_fg_lock(self.choice(quick, 'fps_mode', 'app', FPS_MODES, 26)))
         self.row(quick, _('Upscaler', 'Апскейлер'), self.choice(quick, 'upscaler', 'ini', UPSCALERS, 26))
         self.quick_preset_row = self.row(quick, _('Preset', 'Пресет'),
                                          self.choice(quick, 'preset', 'ini', PRESETS, 26))
@@ -1403,8 +1490,10 @@ class Launcher:
             self.show_row(self.quick_preset_row, provider != 'xess')
             self.show_row(self.quick_xess_row, provider == 'xess')
             self.show_row(self.quick_dlss_row, provider == 'dlss')
-        self.row(quick, _('Frame Generation', 'Генерация кадров'),
-                 self.frame_generation_choice(quick, 26))
+        quick_fg = self.ttk.Frame(quick)
+        self.frame_generation_choice(quick_fg, 22).grid(row=0, column=0)
+        self.fsr_fg_shown(self.warning_icon(quick_fg, _(*FSR_FG_NOTE))).grid(row=0, column=1, padx=(6, 0))
+        self.row(quick, _('Frame Generation', 'Генерация кадров'), quick_fg)
         quick_multiplier = self.choice(quick, 'nvidia_generated_frames', 'menu', NVIDIA_MULTIPLIERS, 26)
         self.quick_fg_multiplier_row = quick_multiplier
         self.row(quick, _('NVIDIA FG multiplier', 'Множитель NVIDIA FG'), quick_multiplier)
@@ -1417,7 +1506,8 @@ class Launcher:
                 else:
                     widget.grid_remove()
         self.row(quick, _('Output', 'Разрешение'), self.choice(quick, 'output_res', 'ini', OUTPUTS, 26))
-        self.row(quick, _('Window mode', 'Режим окна'), self.choice(quick, 'window_mode', 'menu', WINDOW_MODES, 26))
+        self.row(quick, _('Window mode', 'Режим окна'),
+                 self.fsr_fg_lock(self.choice(quick, 'window_mode', 'menu', WINDOW_MODES, 26)))
         readbacks = self.ttk.Frame(quick)
         self.choice(readbacks, 'readbacks', 'app', READBACKS, 22).pack(side='left')
         self.warning_icon(readbacks, _(
@@ -1588,6 +1678,10 @@ class Launcher:
                  self.frame_generation_choice(f),
                  _('FSR FG adds one interpolated frame between real frames. Supports SDR and HDR10 with a temporal upscaler. The normal FPS limit counts real frames: 75 can produce 150 with FG 2x.',
                    'FSR FG добавляет один промежуточный кадр. Поддерживает SDR и HDR10 с временным апскейлером. Обычный лимит относится к реальным кадрам: 75 даёт до 150 с FG 2x.'))
+        fsr_note = self.ttk.Label(f, text=_(*FSR_FG_NOTE), style='Warning.TLabel', wraplength=self.px(540),
+                                  justify='left')
+        fsr_note.grid(row=self.next_row(f), column=1, sticky='w', pady=(2, 4))
+        self.fsr_fg_shown(fsr_note)
         multiplier_choice = self.choice(f, 'nvidia_generated_frames', 'menu', NVIDIA_MULTIPLIERS)
         def multiplier_state(*_args):
             multiplier_choice.configure(state='readonly' if self.var('frame_generation', 'menu').get() == 'nvidia' else 'disabled')
@@ -1604,8 +1698,9 @@ class Launcher:
         self.amd_antilag_check = self.check(f, 'amd_antilag', 'menu', 'AMD Anti-Lag 2',
                    _('Reduces input latency on supported Radeon GPUs through VK_AMD_anti_lag. Independent of the upscaler and FSR FG; unavailable drivers keep the normal path.',
                      'Снижает задержку ввода на совместимых Radeon через VK_AMD_anti_lag. Независимо от апскейлера и FSR FG; без поддержки используется обычный режим.'))
-        self.check(f, 'limit_generated_fps', 'menu',
-                   _('Limit total FPS with Frame Generation', 'Лимит общих FPS с генерацией кадров'))
+        self.fsr_fg_lock(self.check(f, 'limit_generated_fps', 'menu',
+                                    _('Limit total FPS with Frame Generation', 'Лимит общих FPS с генерацией кадров')),
+                         'normal')
         holder = self.fps_cap_control(f, 'generated_fps_limit', 'menu', 30, 1000,
                                       enabled_key='limit_generated_fps')
         self.row(f, _('Total FPS cap', 'Общий лимит FPS'), holder,
@@ -1677,7 +1772,7 @@ class Launcher:
                    'The foreground frame cap is kept.',
                    'При потере фокуса: приостановить всю игру в Windows или ограничить FPS в фоне. '
                    'Основной лимит FPS сохраняется.'))
-        self.row(f, _('Frame rate', 'Режим'), self.choice(f, 'fps_mode', 'app', FPS_MODES),
+        self.row(f, _('Frame rate', 'Режим'), self.fsr_fg_lock(self.choice(f, 'fps_mode', 'app', FPS_MODES)),
                  _("Community patches for game version 1.09. Unlocked makes the game use the real frame time. "
                    'Other game versions always run at 30 FPS (the patches would corrupt them).',
                    'Патчи сообщества для версии 1.09. «Без ограничения» — игра использует реальное время кадра. '
@@ -1692,9 +1787,13 @@ class Launcher:
                  _('1 keeps frame pacing even; more can raise FPS when the graphics card is the limit.',
                    '1 — ровная подача кадров; больше может поднять FPS, если упирается в видеокарту.'))
         self.section(f, _('Window', 'Окно'))
-        self.row(f, _('Window mode', 'Режим окна'), self.choice(f, 'window_mode', 'menu', WINDOW_MODES),
+        self.row(f, _('Window mode', 'Режим окна'), self.fsr_fg_lock(self.choice(f, 'window_mode', 'menu', WINDOW_MODES)),
                  _('Borderless uses the desktop resolution and refresh rate, with fast Alt-Tab.',
                    'Режим без рамки использует разрешение и частоту рабочего стола, с быстрым Alt-Tab.'))
+        locked_note = self.ttk.Label(f, text=_(*FSR_FG_LOCKED), style='Warning.TLabel', wraplength=self.px(540),
+                                     justify='left')
+        locked_note.grid(row=self.next_row(f), column=1, sticky='w', pady=(2, 2))
+        self.fsr_fg_shown(locked_note)
         self.borderless_vsync_check = ttk.Checkbutton(f,
             text=_('V-sync in borderless', 'V-sync без рамки'), variable=self.var('borderless_vsync', 'menu'))
         self.borderless_vsync_check.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(4, 0))
@@ -1720,6 +1819,8 @@ class Launcher:
         self.row(f, _('In-game menu language', 'Язык внутриигрового меню'),
                  self.choice(f, 'menu_language', 'menu', MENU_LANGUAGES),
                  _('Language of the R3+L3 / Insert settings menu.', 'Язык меню настроек R3+L3 / Insert.'))
+        # Every control FSR frame generation locks exists now (Play, Graphics, Display).
+        self.watch_frame_generation()
 
     def update_window_controls(self):
         borderless = self.var('window_mode', 'menu').get() == 'borderless'
@@ -2277,6 +2378,8 @@ class Launcher:
         for commit in getattr(self, 'fps_cap_committers', []):
             commit()
         self.refresh_menu_settings()
+        if hasattr(self, 'before_fsr_fg'):  # the in-game menu may have changed a locked setting
+            self.enforce_frame_generation()
         menu_changes = {}
         for key, var in self.vars.items():
             try:
@@ -2641,6 +2744,8 @@ def play_without_window(settings):
     """--play: the game with the saved settings (shortcuts, Steam). Output goes to the console
     when there is one and to <saves folder>/last_run.log."""
     attach_stdio()
+    settings, menu_changes = fsr_frame_generation_launch(settings, load_menu())
+    save_menu(menu_changes)
     diagnostic = DiagnosticSession(settings)
     try:
         process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=diagnostic.environment(game_environment(settings)),

@@ -143,8 +143,26 @@ with tempfile.TemporaryDirectory(prefix='bbport-launcher-') as directory:
             fg = next(w for w in Widget.nodes if w.kwargs.get('values') ==
                       [launcher._(*text) for _value, text in launcher.FRAME_GENERATORS])
             assert obj.vars['frame_generation'].get() == 'off' and fg.kwargs['state'] == 'readonly'
+            fsr_notes = [w for w in Widget.nodes if w.kwargs.get('text') in
+                         (launcher._(*launcher.FSR_FG_NOTE), launcher._(*launcher.FSR_FG_LOCKED))]
+            assert len(fsr_notes) == 2 and not any(w.visible for w in fsr_notes)
+            obj.vars['fps_mode'].set('60')
             fg.choose(1); obj.collect()
             assert launcher.load_menu()['frame_generation'] == 'fsr'
+            # FSR FG: exclusive fullscreen, Unlocked and a total cap of 120, locked and explained.
+            assert obj.vars['window_mode'].get() == 'fullscreen' and obj.vars['fps_mode'].get() == 'uncap'
+            assert obj.vars['limit_generated_fps'].get() and obj.vars['generated_fps_limit'].get() == '120'
+            assert home.kwargs['state'] == display.kwargs['state'] == 'disabled'
+            assert all(w.visible for w in fsr_notes)
+            assert {k: launcher.load_menu()[k] for k in ('window_mode', 'limit_generated_fps', 'generated_fps_limit')} \
+                == {'window_mode': 'fullscreen', 'limit_generated_fps': '1', 'generated_fps_limit': '120'}
+            env = launcher.game_environment(obj.app)
+            assert (env['BB_FPS'], env['BB_FULLSCREEN'], env['BB_LAUNCHER_WINDOW_MODE']) == ('uncap', '1', 'fullscreen')
+            # The cap stays adjustable; the in-game menu's window change is taken back.
+            obj.vars['generated_fps_limit'].set('100')
+            menu.write_text(launcher.menu_path().read_text().replace('window_mode=fullscreen', 'window_mode=windowed'))
+            obj.collect()
+            assert launcher.load_menu()['window_mode'] == 'fullscreen' and launcher.load_menu()['generated_fps_limit'] == '100'
             obj.vars['upscaler'].set('off')
             assert fg.kwargs['state'] == 'disabled' and obj.vars['frame_generation'].get() == 'fsr'
             for upscaler in ('fsr3', 'taa', 'dlss'):
@@ -157,6 +175,12 @@ with tempfile.TemporaryDirectory(prefix='bbport-launcher-') as directory:
             obj.vars['upscaler'].set('fsr4')
             fg.choose(0); obj.collect()
             assert launcher.load_menu()['frame_generation'] == 'off'
+            # Another choice brings back the values from before FSR FG and unlocks them.
+            assert obj.vars['window_mode'].get() == 'borderless' and obj.vars['fps_mode'].get() == '60'
+            assert not obj.vars['limit_generated_fps'].get() and obj.vars['generated_fps_limit'].get() == '144'
+            assert home.kwargs['state'] == display.kwargs['state'] == 'readonly'
+            assert not any(w.visible for w in fsr_notes)
+            obj.vars['fps_mode'].set('uncap')
             multiplier = next(w for w in Widget.nodes if w.kwargs.get('values') ==
                               [launcher._(*text) for _value, text in launcher.NVIDIA_MULTIPLIERS])
             reflex = next(w for w in Widget.nodes if w.kwargs.get('values') ==
@@ -376,3 +400,13 @@ s = dict(launcher.APP_DEFAULTS, fps_mode='75', frame_cap='120')
 assert launcher.game_environment(s)['BB_FPS'] == 'uncap'
 assert launcher.game_environment(s)['BB_FPS_LIMIT'] == '75'
 assert '75' in dict(launcher.FPS_MODES) and '75' in dict(launcher.FRAME_CAPS)
+
+# --play (shortcuts, Steam) applies FSR FG's settings too, keeping a total cap already chosen.
+fsr_menu = {**launcher.MENU_DEFAULTS, 'frame_generation': 'fsr', 'window_mode': 'borderless'}
+started, changes = launcher.fsr_frame_generation_launch(dict(s, window_mode='borderless'), fsr_menu)
+assert changes == {'window_mode': 'fullscreen', 'limit_generated_fps': '1', 'generated_fps_limit': '120'}
+env = launcher.game_environment(started)
+assert (env['BB_FPS'], env['BB_FULLSCREEN'], env['BB_LAUNCHER_WINDOW_MODE']) == ('uncap', '1', 'fullscreen')
+assert launcher.fsr_frame_generation_launch(s, {**fsr_menu, 'window_mode': 'fullscreen',
+                                                'limit_generated_fps': '1'})[1] == {}
+assert launcher.fsr_frame_generation_launch(s, launcher.MENU_DEFAULTS) == (s, {})

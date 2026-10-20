@@ -569,8 +569,10 @@ void FrameSettings() {
              "Снижает задержку ввода через драйвер Radeon Vulkan. Работает независимо от апскейлера и FSR FG.") :
         Text("AMD Anti-Lag 2 needs a Radeon GPU and a driver with VK_AMD_anti_lag support.",
              "AMD Anti-Lag 2 требует Radeon и драйвер с поддержкой VK_AMD_anti_lag."));
-    Hint(Text("FSR FG adds one interpolated frame between real frames, in SDR or HDR10. The normal FPS limit counts real frames: 75 can produce 150 with FG 2x. Background FPS caps disable generation.",
-              "FSR FG добавляет промежуточный кадр в SDR или HDR10. Обычный лимит относится к реальным кадрам: 75 даёт до 150 с FG 2x. При лимите FPS в фоне генерация отключается."));
+    Hint(Text("FSR FG adds one interpolated frame between real frames, in SDR or HDR10. The normal FPS limit counts real frames: 75 can produce 150 with FG 2x. Background FPS caps disable generation. "
+              "The launcher starts FSR FG in exclusive fullscreen with the Unlocked frame rate: in a window Windows drops frames while the GPU is busy, and the fixed FPS patches slow the game down below their rate.",
+              "FSR FG добавляет промежуточный кадр в SDR или HDR10. Обычный лимит относится к реальным кадрам: 75 даёт до 150 с FG 2x. При лимите FPS в фоне генерация отключается. "
+              "Лаунчер запускает FSR FG в эксклюзивном полноэкранном режиме с частотой «Без ограничения»: в окне Windows пропускает кадры, когда GPU загружен, а фиксированные патчи FPS замедляют игру ниже своей частоты."));
     Checkbox(Text("Limit total FPS with Frame Generation###limit_generated_fps",
                   "Лимит общих FPS с генерацией кадров###limit_generated_fps"),s.limit_generated_fps);
     ImGui::BeginDisabled(!s.limit_generated_fps);
