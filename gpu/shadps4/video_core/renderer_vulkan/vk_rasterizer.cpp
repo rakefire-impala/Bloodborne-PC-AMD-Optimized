@@ -1151,6 +1151,15 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             });
         }
     }
+    // bbport: a motion draw without vectors this frame (still, or no history) draws with the
+    // plain twin: the same pass, without the motion varyings, stores and output. Its pixels
+    // keep what the motion target held; the compose pass rejects that by depth, as for any
+    // draw without motion. ~Half of the motion draws in the Hunter's Dream are still.
+    if (motion_draw && push_data.motion_param == 0) {
+        if (const auto* twin = pipeline->StillTwin()) {
+            pipeline = twin;
+        }
+    }
     pipeline->BindResources(set_writes, push_data);
     // bbport: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
     // full-screen quad leaves an edge column unwritten).

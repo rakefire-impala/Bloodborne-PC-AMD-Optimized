@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <boost/container/static_vector.hpp>
 #include <xxhash.h>
 
@@ -102,6 +103,17 @@ public:
         return key;
     }
 
+    /// bbport: a motion pipeline's plain twin (key.motion_vectors 2): the same attachments
+    /// with the motion slot unwritten, the stages without motion varyings, stores or output.
+    /// Draws without vectors this frame use it (Rasterizer::DrawRecord); null until the
+    /// selection thread made it (PipelineCache::GetStillTwin).
+    const GraphicsPipeline* StillTwin() const noexcept {
+        return still_twin.load(std::memory_order_acquire);
+    }
+    void SetStillTwin(const GraphicsPipeline* twin) const noexcept {
+        still_twin.store(twin, std::memory_order_release);
+    }
+
     /// Gets the attributes and bindings for vertex inputs.
     template <typename Attribute, typename Binding>
     void GetVertexInputs(VertexInputs<Attribute>& attributes, VertexInputs<Binding>& bindings,
@@ -115,6 +127,7 @@ private:
 private:
     GraphicsPipelineKey key;
     std::optional<const Shader::Gcn::FetchShaderData> fetch_shader{};
+    mutable std::atomic<const GraphicsPipeline*> still_twin{nullptr};
 };
 
 struct ClipDistanceShaderKey {

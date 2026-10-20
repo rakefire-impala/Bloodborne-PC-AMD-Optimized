@@ -93,6 +93,9 @@ struct PipelineSelection {
     std::optional<Shader::Gcn::FetchShaderData> fetch_shader{};
     GraphicsPipelineKey graphics_key{};
     bool motion = false;
+    /// bbport: with `motion`, the plain stages selected first (the still twin's).
+    std::array<size_t, MaxShaderStages> plain_stage_hashes{};
+    std::array<vk::ShaderModule, MaxShaderStages> plain_modules{};
     DrawIndirectParams draw_indirect_params{};
     struct PrepWorker* worker{}; ///< set: read-only selection for a draw-preparation worker
 };
@@ -137,6 +140,8 @@ public:
     /// bbport: GPU-thread side: the pipeline for a prepared draw after checking that registers
     /// and flattened user data match; null to take the regular path.
     const GraphicsPipeline* TryPreparedPipeline(const PreparedDraw& prepared);
+    /// bbport: the plain twin of the motion pipeline `sel` just selected (made once).
+    const GraphicsPipeline* GetStillTwin();
 
     /// bbport: the prepared draw the last GetGraphicsPipeline used, or null (regular path).
     [[nodiscard]] const PreparedDraw* UsedPrepared() const noexcept {

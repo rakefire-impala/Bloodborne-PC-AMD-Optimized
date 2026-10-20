@@ -418,6 +418,9 @@ const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& p
         return nullptr;
     }
     const auto* pipeline = it->second.get();
+    if (pipeline->GetGraphicsKey().motion_vectors == 1 && !pipeline->StillTwin()) {
+        return nullptr; // the full selection makes its twin
+    }
     const auto& fetch = pipeline->GetFetchShader();
     if (fetch && !fetch->attributes.empty() &&
         !prepared.vertex.Matches(pipeline->GetStage(Shader::SwStage::Vertex), *fetch)) {
@@ -469,7 +472,39 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
                 }
             }
         }
+    }
+    const auto* pipeline = it->second.get();
+    if (sel.motion && pipeline->GetGraphicsKey().motion_vectors == 1 && !pipeline->StillTwin()) {
+        pipeline->SetStillTwin(GetStillTwin());
+    }
+    if (is_new) {
         sel.fetch_shader.reset();
+    }
+    return pipeline;
+}
+
+const GraphicsPipeline* PipelineCache::GetStillTwin() {
+    // The motion key with the plain stages; the motion attachment keeps its format (the same
+    // render pass) and is not written.
+    GraphicsPipelineKey twin_key = sel.graphics_key;
+    twin_key.stage_hashes = sel.plain_stage_hashes;
+    twin_key.motion_vectors = 2;
+    twin_key.write_masks[Shader::MotionVectors::Output] = {};
+    const auto [it, is_new] = graphics_pipelines.try_emplace(twin_key);
+    if (is_new) {
+        const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(twin_key);
+        LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x} (still twin)", pipeline_hash);
+        CompileTimer timer;
+        // Plain runtime infos: only the motion flags differ (motion stages are VS + FS).
+        auto runtime_infos = sel.runtime_infos;
+        runtime_infos[u32(Shader::SwStage::Vertex)].hw.vs.motion_vectors = false;
+        runtime_infos[u32(Shader::SwStage::Fragment)].hw.fs.motion_vectors = 0;
+        GraphicsPipeline::SerializationSupport sdata{};
+        it.value() = std::make_unique<GraphicsPipeline>(
+            instance, scheduler, desc_heap, profile, twin_key, *pipeline_cache, sel.infos,
+            runtime_infos, sel.fetch_shader, sel.plain_modules, sdata, false);
+        RegisterPipelineData(twin_key, pipeline_hash, sdata);
+        ++num_new_pipelines;
     }
     return it->second.get();
 }
@@ -617,6 +652,11 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
         }();
         if (all_motion) {
             sel.motion = true;
+        }
+        if (sel.motion && !sel.worker) {
+            // The plain stages stay compiled: the still twin draws with them (GetStillTwin).
+            sel.plain_stage_hashes = key.stage_hashes;
+            sel.plain_modules = sel.modules;
         }
         if (sel.motion && !RefreshGraphicsStages(sel)) {
             return false;
