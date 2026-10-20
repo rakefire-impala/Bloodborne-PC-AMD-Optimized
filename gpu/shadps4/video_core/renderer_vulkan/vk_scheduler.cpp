@@ -29,7 +29,8 @@ namespace Vulkan {
 std::mutex Scheduler::submit_mutex;
 
 Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
-    : instance{instance}, work_semaphore{instance}, command_pool{instance, &work_semaphore} {
+    : instance{instance}, queue{instance.GetGraphicsQueue()}, work_semaphore{instance},
+      command_pool{instance, &work_semaphore} {
     // bbport: BB_VK_RECORD_THREAD=0 records on the calling thread.
     const char* env = std::getenv("BB_VK_RECORD_THREAD");
     if (threaded_recording && !(env && env[0] == '0')) {
@@ -495,7 +496,10 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     };
 
     ImGui::Core::TextureManager::Submit();
-    auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
+    auto submit_result = queue.submit(submit_info, info.fence);
+    if (queue == instance.GetGraphicsQueue()) {
+        graphics_submissions.fetch_add(1, std::memory_order_relaxed);
+    }
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
 
     work_semaphore.Refresh();

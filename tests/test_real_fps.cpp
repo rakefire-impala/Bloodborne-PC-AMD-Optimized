@@ -28,6 +28,11 @@ int main() {
     s.real_fps_limit=30;assert(EffectiveFrameLimit(120)==30);
     s.variable_frame_time=false;s.window_focused=true;s.real_fps_limit=120;
     assert(EffectiveFrameLimit(60)==60); // A live setting cannot override a fixed game-timing patch.
+    // Nor can the total cap with FSR FG: fewer real frames than the patch's rate are slow motion
+    // (a 60 total cap ran the 60 FPS patch at 30 real frames, half speed).
+    s.frame_generation=FrameGenerationFsr;s.frame_generation_active=2;s.generated_fps_limit=60;
+    assert(EffectiveFrameLimit(0)==0 && EffectiveFrameLimit(60)==60);
+    s.variable_frame_time=true;s.real_fps_limit=-1;assert(EffectiveFrameLimit(0)==30);
     s.limit_generated_fps=false;
 
     const auto dir=std::filesystem::temp_directory_path()/

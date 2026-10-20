@@ -261,6 +261,92 @@ bool Generate(Device& gpu,Vulkan::FrameGeneration& fg,const std::shared_ptr<Vulk
     auto cmd=gpu.Begin(); const bool generated=fg.Record(*cmd,snapshot);
     fg.Submitted(gpu.Submit(*cmd)); return generated;
 }
+// Whole-image upload of RGBA8 pixels (the image's previous contents are discarded).
+void Upload(Device& gpu, const InputImage& image, u32 w, u32 h, const std::vector<unsigned char>& rgba) {
+    Buffer upload(gpu.allocator,rgba.size());
+    std::memcpy(upload.mapped,rgba.data(),rgba.size());
+    vmaFlushAllocation(gpu.allocator,upload.allocation,0,VK_WHOLE_SIZE);
+    auto cmd=gpu.Begin();
+    const vk::ImageMemoryBarrier2 barrier{.srcStageMask=vk::PipelineStageFlagBits2::eAllCommands,
+        .srcAccessMask=vk::AccessFlagBits2::eMemoryRead|vk::AccessFlagBits2::eMemoryWrite,
+        .dstStageMask=vk::PipelineStageFlagBits2::eTransfer,.dstAccessMask=vk::AccessFlagBits2::eTransferWrite,
+        .oldLayout=vk::ImageLayout::eUndefined,.newLayout=vk::ImageLayout::eGeneral,.image=image.image,
+        .subresourceRange={vk::ImageAspectFlagBits::eColor,0,1,0,1}};
+    cmd->pipelineBarrier2({.imageMemoryBarrierCount=1,.pImageMemoryBarriers=&barrier});
+    cmd->copyBufferToImage(upload.buffer,image.image,vk::ImageLayout::eGeneral,
+        vk::BufferImageCopy{.imageSubresource={vk::ImageAspectFlagBits::eColor,0,0,1},.imageExtent={w,h,1}});
+    gpu.Submit(*cmd);
+}
+// The 8-bit path's HUD handling (frame_generation_hud.comp): the game draws its HUD into the
+// upscaled UI image, then its display pass changes every value (here T(v) = v + 30). The mask is
+// where the finished UI image differs from the copy taken before the HUD; the interpolation input
+// gets the scene behind the HUD through the table measured on the other pixels; the generated
+// frame gets the HUD back, as the real pixel once the HUD proves opaque over a changing scene.
+void TestHud(Device& gpu) {
+    auto& settings=BbSettings::Get();
+    settings.window_focused=true; settings.background_mode=BbSettings::BackgroundRun;
+    settings.frame_generation=BbSettings::FrameGenerationFsr; settings.upscaler=BbSettings::UpscalerFsr3;
+    Vulkan::FrameGeneration fg(gpu.physical,*gpu.device,gpu.allocator,gpu.Submissions());
+    fg.UseCompactColor(true);
+    constexpr u32 w=128,h=128;
+    Inputs inputs(gpu,64,64,w,h);
+    const auto format=vk::Format::eR8G8B8A8Unorm;
+    InputImage frame(*gpu.device,gpu.allocator,format,w,h,vk::ImageAspectFlagBits::eColor);
+    InputImage ui(*gpu.device,gpu.allocator,format,w,h,vk::ImageAspectFlagBits::eColor);
+    InputImage hudless(*gpu.device,gpu.allocator,format,w,h,vk::ImageAspectFlagBits::eColor);
+    const auto in_hud=[](u32 x,u32 y) { return x>=16 && x<48 && y>=16 && y<48; };
+    const std::array<unsigned char,3> hud{250,20,20};
+    const auto display=[](unsigned value) { return (unsigned char)std::min(255u,value+30); };
+    std::shared_ptr<Vulkan::FrameGeneration::Snapshot> snapshot;
+    const auto frame_with_scene=[&](unsigned char scene) {
+        std::vector<unsigned char> ui_pixels(w*h*4),hudless_pixels(w*h*4),frame_pixels(w*h*4);
+        for (u32 y=0;y<h;++y) for (u32 x=0;x<w;++x) {
+            const u32 i=(y*w+x)*4;
+            for (u32 c=0;c<3;++c) {
+                hudless_pixels[i+c]=scene;
+                ui_pixels[i+c]=in_hud(x,y) ? hud[c] : scene;
+                frame_pixels[i+c]=display(ui_pixels[i+c]);
+            }
+            hudless_pixels[i+3]=ui_pixels[i+3]=frame_pixels[i+3]=255;
+        }
+        Upload(gpu,frame,w,h,frame_pixels); Upload(gpu,ui,w,h,ui_pixels); Upload(gpu,hudless,w,h,hudless_pixels);
+        auto source=inputs.Source();
+        source.ui_view=*ui.view; source.hudless_view=*hudless.view; source.ui_width=w; source.ui_height=h;
+        auto cmd=gpu.Begin(); fg.Capture(*cmd,source,*frame.view,w,h,format,snapshot); gpu.Submit(*cmd);
+        assert(snapshot && snapshot->srgb8 && snapshot->hud);
+    };
+    const auto pixel=[&](const std::vector<std::byte>& data,u32 x,u32 y,u32 c) {
+        return unsigned(data[(y*w+x)*4+c]);
+    };
+    const auto close_to=[](unsigned a,unsigned b,unsigned tolerance) { return a>=b ? a-b<=tolerance : b-a<=tolerance; };
+    frame_with_scene(100);
+    const auto mask=gpu.Read(vk::Image(snapshot->hud_mask),w,h,1);
+    for (u32 y=0;y<h;++y) for (u32 x=0;x<w;++x) assert((unsigned(mask[y*w+x])>127)==in_hud(x,y));
+    // The interpolation input: no HUD, the scene behind it in presented values everywhere.
+    const auto input=gpu.Read(vk::Image(snapshot->color),w,h,4);
+    for (u32 c=0;c<3;++c) assert(pixel(input,24,24,c)==130 && pixel(input,80,80,c)==130);
+    assert(!Generate(gpu,fg,snapshot));
+    frame_with_scene(100);
+    assert(Generate(gpu,fg,snapshot));
+    // No scene change yet to measure the HUD's opacity: it goes over the interpolated scene as
+    // what it adds to the real frame, which here is all of it.
+    auto generated=gpu.Read(vk::Image(snapshot->generated),w,h,4);
+    for (u32 c=0;c<3;++c) {
+        assert(close_to(pixel(generated,24,24,c),display(hud[c]),3));
+        assert(close_to(pixel(generated,80,80,c),130,3));
+    }
+    // The scene behind the HUD changes and the HUD's pixels do not: opaque, the real pixel.
+    frame_with_scene(160);
+    const auto moved=gpu.Read(vk::Image(snapshot->color),w,h,4);
+    for (u32 c=0;c<3;++c) assert(pixel(moved,24,24,c)==190);
+    assert(Generate(gpu,fg,snapshot));
+    generated=gpu.Read(vk::Image(snapshot->generated),w,h,4);
+    for (u32 y=16;y<48;y+=5) for (u32 x=16;x<48;x+=5) for (u32 c=0;c<3;++c)
+        assert(pixel(generated,x,y,c)==display(hud[c]));
+    assert(snapshot->PresentImage()==vk::Image(snapshot->generated));
+    fg.Reset(); snapshot.reset();
+    std::puts("PASS: 8-bit FI on the presented values; HUD mask from the HUD-less copy, the scene behind the HUD through the measured display table, HUD composited back (additive while unmeasured, the real pixel once proven opaque).");
+}
 void TestXessColor(Device& gpu) {
     const vk::DescriptorSetLayoutBinding bindings[]={
         {.binding=0,.descriptorType=vk::DescriptorType::eSampledImage,.descriptorCount=1,.stageFlags=vk::ShaderStageFlagBits::eCompute},
@@ -441,7 +527,7 @@ void Test(Device& gpu) {
 int main() {
     try {
         { Device gpu; if (!gpu.Create()) { std::puts("SKIP: Vulkan GPU and current Khronos validation layer required."); return 77; }
-          Test(gpu); TestXessColor(gpu); }
+          Test(gpu); TestHud(gpu); TestXessColor(gpu); }
         assert(validation_errors==0);
         std::printf("Frame Generation integration: GPU color/depth/motion copies, real FI/OF output, history reset, queue lifetime, resize and background modes passed; validation errors=%u, warnings=%u.\n",
                     validation_errors,validation_warnings);

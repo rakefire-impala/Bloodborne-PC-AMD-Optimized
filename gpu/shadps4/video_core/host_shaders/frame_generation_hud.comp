@@ -1,0 +1,192 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// bbport: keeps the game's HUD out of frame interpolation. The upscaler copies its output before
+// the game draws the HUD into it (the HUD-less scene); where the finished UI image differs from
+// that copy is the HUD. The game's display pass then changes every pixel (its brightness curve),
+// so the HUD-less scene is brought into the presented frame's values through a lookup table
+// measured on this frame's pixels without HUD.
+//   HUD_LUT:       accumulate presented value per HUD-less value, on every third pixel
+//   HUD_RESOLVE:   average the bins and fill the gaps (one thread per channel)
+//   HUD_CAPTURE:   the HUD mask; HUD pixels of the interpolation input become the scene behind
+//   HUD_COMPOSITE: after interpolation, the generated frame gets the real frame's HUD
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+
+#if defined(HUD_RESOLVE)
+layout(local_size_x = 3) in;
+#else
+layout(local_size_x = 8, local_size_y = 8) in;
+#endif
+
+// sums[channel * 256 + HUD-less value] of presented values, their counts, and the resolved table.
+layout(set = 0, binding = 0, std430) buffer Lut {
+    uint sums[768];
+    uint counts[768];
+    float lut[768];
+};
+
+// frame_size: the presented frame; ui_size: the UI image; flags & 1: the frame's view decodes sRGB.
+layout(push_constant) uniform Parameters {
+    uvec2 frame_size;
+    uvec2 ui_size;
+    uint flags;
+} parameters;
+
+vec3 EncodeSrgb(vec3 linear) {
+    linear = max(linear, vec3(0));
+    return mix(linear * 12.92, 1.055 * pow(linear, vec3(1.0 / 2.4)) - 0.055,
+               greaterThan(linear, vec3(0.0031308)));
+}
+
+uint Byte(float value) {
+    return uint(clamp(value, 0.0, 1.0) * 255.0 + 0.5);
+}
+
+ivec2 UiPixel(uvec2 p) {
+    return ivec2((vec2(p) + 0.5) * vec2(parameters.ui_size) / vec2(parameters.frame_size));
+}
+
+#if defined(HUD_LUT) || defined(HUD_CAPTURE)
+layout(set = 0, binding = 1) uniform texture2D ui_final;
+layout(set = 0, binding = 2) uniform texture2D hudless;
+
+// Any 8-bit difference: the copy is bit-identical wherever nothing was drawn over it.
+bool Hud(ivec2 u, out vec3 scene) {
+    const vec3 drawn = texelFetch(ui_final, u, 0).rgb;
+    scene = texelFetch(hudless, u, 0).rgb;
+    return any(greaterThan(abs(drawn - scene), vec3(0.5 / 255.0)));
+}
+#endif
+
+#if defined(HUD_LUT)
+layout(set = 0, binding = 3) uniform texture2D frame;
+
+void main() {
+    const uvec2 p = gl_GlobalInvocationID.xy * 3u + 1u;
+    if (any(greaterThanEqual(p, parameters.frame_size))) {
+        return;
+    }
+    vec3 scene;
+    if (Hud(UiPixel(p), scene)) {
+        return;
+    }
+    vec3 presented = texelFetch(frame, ivec2(p), 0).rgb;
+    if ((parameters.flags & 1u) != 0u) {
+        presented = EncodeSrgb(presented);
+    }
+    for (uint c = 0; c < 3; ++c) {
+        const uint bin = c * 256u + Byte(scene[c]);
+        atomicAdd(sums[bin], Byte(presented[c]));
+        atomicAdd(counts[bin], 1u);
+    }
+}
+#endif
+
+#if defined(HUD_RESOLVE)
+void main() {
+    // Bins seen this frame are averages; the gaps between them are interpolated, the ends run
+    // linearly to black and white. A channel with no data at all stays as it is.
+    const uint c = gl_LocalInvocationID.x;
+    const uint base = c * 256u;
+    int last = -1;
+    for (int v = 0; v < 256; ++v) {
+        const uint n = counts[base + uint(v)];
+        if (n == 0u) {
+            continue;
+        }
+        const float value = float(sums[base + uint(v)]) / float(n) / 255.0;
+        lut[base + uint(v)] = value;
+        const float from = last < 0 ? 0.0 : lut[base + uint(last)];
+        for (int k = last + 1; k < v; ++k) {
+            lut[base + uint(k)] = mix(from, value, float(k - last) / float(v - last));
+        }
+        last = v;
+    }
+    if (last < 0) {
+        for (int k = 0; k < 256; ++k) {
+            lut[base + uint(k)] = float(k) / 255.0;
+        }
+        return;
+    }
+    const float from = lut[base + uint(last)];
+    for (int k = last + 1; k < 256; ++k) {
+        lut[base + uint(k)] = mix(from, 1.0, float(k - last) / float(256 - last));
+    }
+}
+#endif
+
+#if defined(HUD_CAPTURE)
+layout(set = 0, binding = 3) uniform writeonly image2D color_snapshot;
+layout(set = 0, binding = 4, r8) uniform writeonly image2D hud_mask;
+
+void main() {
+    const uvec2 p = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(p, parameters.frame_size))) {
+        return;
+    }
+    vec3 scene;
+    const bool hud = Hud(UiPixel(p), scene);
+    imageStore(hud_mask, ivec2(p), vec4(hud ? 1.0 : 0.0));
+    if (hud) {
+        vec3 presented;
+        for (uint c = 0; c < 3; ++c) {
+            presented[c] = lut[c * 256u + Byte(scene[c])];
+        }
+        imageStore(color_snapshot, ivec2(p), vec4(presented, 1.0));
+    }
+}
+#endif
+
+#if defined(HUD_COMPOSITE)
+layout(set = 0, binding = 1) uniform texture2D frame;
+layout(set = 0, binding = 2) uniform texture2D hud_mask;
+layout(set = 0, binding = 3, rgba8) uniform image2D generated;
+layout(set = 0, binding = 4) uniform texture2D scene_snapshot;
+layout(set = 0, binding = 5, r8) uniform image2D opacity_history;
+// The previous real frame: the scene behind the HUD, and the presented pixel (alpha: HUD there).
+layout(set = 0, binding = 6, rgba8) uniform image2D previous_scene;
+layout(set = 0, binding = 7, rgba8) uniform image2D previous_frame;
+
+float Largest(vec3 v) {
+    return max(max(abs(v.r), abs(v.g)), abs(v.b));
+}
+
+void main() {
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(uvec2(p), parameters.frame_size))) {
+        return;
+    }
+    vec3 presented = texelFetch(frame, p, 0).rgb;
+    if ((parameters.flags & 1u) != 0u) {
+        presented = EncodeSrgb(presented);
+    }
+    const vec3 scene = texelFetch(scene_snapshot, p, 0).rgb;
+    const bool hud = texelFetch(hud_mask, p, 0).r >= 0.5;
+    const vec4 before = imageLoad(previous_frame, p);
+    const vec3 scene_before = imageLoad(previous_scene, p).rgb;
+    imageStore(previous_scene, p, vec4(scene, 1.0));
+    imageStore(previous_frame, p, vec4(presented, hud ? 1.0 : 0.0));
+    if (!hud) {
+        imageStore(opacity_history, p, vec4(0.0));
+        return;
+    }
+    // How much of the scene the HUD lets through: the HUD stays put while the scene behind it
+    // moves, so between two real frames a pixel changes by (1 - opacity) of the scene's change.
+    // An opaque panel over a scene of its own colour and a faint shadow both differ little from
+    // the scene in one frame; this tells them apart. Kept as the largest seen lately (decaying
+    // over a few seconds): a HUD that changes itself (a number, a bar) reads as see-through.
+    float opacity = imageLoad(opacity_history, p).r - 0.004;
+    const float scene_change = Largest(scene - scene_before);
+    if (before.a >= 0.5 && scene_change > 0.15) {
+        opacity = max(opacity, 1.0 - clamp(Largest(presented - before.rgb) / scene_change, 0.0, 1.0));
+    }
+    imageStore(opacity_history, p, vec4(max(opacity, 0.0)));
+    // What the HUD added to the real frame goes over the interpolated scene where the HUD is
+    // see-through (soft shadows: the scene behind them moves), and the real pixel where it is
+    // opaque. Pasting the real pixel everywhere left a box of the real frame's (unmoved) scene
+    // around the numbers' shadows.
+    const vec3 added = presented - scene;
+    const vec3 interpolated = imageLoad(generated, p).rgb;
+    const float opaque = smoothstep(0.5, 0.8, opacity);
+    imageStore(generated, p, vec4(mix(clamp(interpolated + added, 0.0, 1.0), presented, opaque), 1.0));
+}
+#endif

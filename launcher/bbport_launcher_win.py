@@ -1609,8 +1609,12 @@ class Launcher:
         holder = self.fps_cap_control(f, 'generated_fps_limit', 'menu', 30, 1000,
                                       enabled_key='limit_generated_fps')
         self.row(f, _('Total FPS cap', 'Общий лимит FPS'), holder,
-                 _('Optional. Includes generated frames and can reduce the real frame rate. Generated frames do not advance game logic or physics.',
-                   'Необязательный лимит включает промежуточные кадры и может снизить реальные FPS. Генерация не меняет физику и логику игры.'))
+                 _('Optional. Includes generated frames: with Unlocked (frame-time patch), 120 means 60 real frames. '
+                   'The 30/60/90 FPS patches keep their real rate, since fewer real frames would run the game in slow motion. '
+                   'Generated frames do not advance game logic or physics.',
+                   'Необязательный лимит включает промежуточные кадры: с Unlocked (патч времени кадра) 120 означает 60 реальных кадров. '
+                   'Патчи 30/60/90 FPS сохраняют свою частоту реальных кадров: при меньшей игра шла бы в замедленном темпе. '
+                   'Генерация не меняет физику и логику игры.'))
         self.section(f, _('FSR 4 assets', 'Ассеты FSR 4'))
         self.fsr4_label = ttk.Label(f, text='', wraplength=self.px(640), justify='left')
         self.fsr4_label.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w')

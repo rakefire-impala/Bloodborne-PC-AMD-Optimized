@@ -203,7 +203,18 @@ float DisplayFps() {
     const float confirmed=s.nvidia_output_fps;
     if (s.frame_generation==BbSettings::FrameGenerationNvidia &&
         s.frame_generation_active>1 && confirmed>0.0f) return confirmed;
+    if (s.frame_generation==BbSettings::FrameGenerationFsr && s.frame_generation_active>1 &&
+        s.fsr_fg_output_fps>0.0f) return s.fsr_fg_output_fps;
     return frame_ms_avg>0.0f ? 1000.0f/frame_ms_avg : 0.0f;
+}
+
+// bbport: real frames per second while frame generation adds frames, else negative.
+float RealFps() {
+    const auto& s=BbSettings::Get();
+    if (s.frame_generation_active<=1) return -1.0f;
+    if (s.frame_generation==BbSettings::FrameGenerationNvidia) return s.nvidia_real_fps;
+    if (s.frame_generation==BbSettings::FrameGenerationFsr) return s.fsr_fg_real_fps;
+    return -1.0f;
 }
 
 
@@ -580,8 +591,12 @@ void FrameSettings() {
         Store(s.generated_fps_limit,std::clamp(generated_limit,30,1000),true);
     editing_generated_limit=ImGui::IsItemActive();
     ImGui::EndDisabled();
-    Hint(Text("Optional. This cap includes generated frames and can reduce the real frame rate. Generated frames do not advance game logic or physics.",
-              "Этот необязательный лимит включает промежуточные кадры и может снизить реальные FPS. Генерация не меняет физику и логику игры."));
+    Hint(Text("Optional. This cap includes generated frames: with Unlocked (frame-time patch), 120 means 60 real frames. "
+              "The 30/60/90 FPS patches keep their real rate, since fewer real frames would run the game in slow motion. "
+              "Generated frames do not advance game logic or physics.",
+              "Необязательный лимит включает промежуточные кадры: с Unlocked (патч времени кадра) 120 означает 60 реальных кадров. "
+              "Патчи 30/60/90 FPS сохраняют свою частоту реальных кадров: при меньшей игра шла бы в замедленном темпе. "
+              "Генерация не меняет физику и логику игры."));
     if (s.frame_generation==BbSettings::FrameGenerationFsr) {
         if (const char* problem=s.frame_generation_problem.load()) ImGui::TextWrapped("%s",problem);
         else ImGui::TextUnformatted(s.frame_generation_active==2 ? Text("FSR FG active: 2x","FSR FG активна: 2x") :
@@ -925,10 +940,9 @@ void Menu() {
     ImGui::TextColored(ImVec4(0.84f, 0.76f, 0.63f, 1.0f),
                        "Bloodborne - Optimized for mobile discrete AMD systems");
     const float fps = DisplayFps();
-    if (s.frame_generation == BbSettings::FrameGenerationNvidia &&
-        s.frame_generation_active > 1 && s.nvidia_real_fps > 0.0f)
+    if (const float real = RealFps(); real > 0.0f)
         ImGui::TextDisabled(Text("%.0f FPS  |  %.0f real  |  %.1f ms", "%.0f FPS  |  %.0f реальных  |  %.1f мс"),
-                            fps, s.nvidia_real_fps.load(), fps > 0.0f ? 1000.0f / fps : 0.0f);
+                            fps, real, fps > 0.0f ? 1000.0f / fps : 0.0f);
     else
         ImGui::TextDisabled(Text("%.0f FPS  |  %.1f ms", "%.0f FPS  |  %.1f мс"),
                             fps, fps > 0.0f ? 1000.0f / fps : 0.0f);
@@ -1053,7 +1067,13 @@ void FpsCounter() {
     char line[384];
     const float fps = DisplayFps();
     const float displayed_ms=fps>0.0f ? 1000.0f/fps : 0.0f;
-    if (s.show_resolution) {
+    if (const float real = RealFps(); real > 0.0f && !s.show_resolution && !s.show_frame_generation &&
+                                      !s.show_latency) {
+        // Frame generation: the frames presented, and the real ones the game renders.
+        std::snprintf(line, sizeof(line), Text("%.0f FPS (%.0f real)  %.1f ms  %s",
+                                               "%.0f FPS (%.0f реальных)  %.1f мс  %s"),
+                      fps, real, displayed_ms, upscaler);
+    } else if (s.show_resolution) {
         std::snprintf(line, sizeof(line), "%.0ffps %.1fms %s  %dx%d>%dx%d", fps, displayed_ms, upscaler,
                       s.active_render_width.load(), s.active_render_height.load(),
                       s.active_output_width.load(), s.active_output_height.load());
@@ -1162,7 +1182,9 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
         }
     };
     info.MinImageCount = std::max(image_count, 2u);
-    info.ImageCount = std::max(image_count, 2u);
+    // bbport: the vertex buffers in turn: with frame generation the overlay is drawn twice a
+    // frame in the draw stream, which runs up to BB_FRAMES_AHEAD frames ahead of the GPU.
+    info.ImageCount = std::max(image_count, 2u) * 4;
     info.UseDynamicRendering = true;
     info.PipelineInfoMain.PipelineRenderingCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR,
@@ -1336,7 +1358,8 @@ void MakeRoomForTextures(const ImDrawData& draw_data) {
     }
 }
 
-void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
+void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent,
+            vk::ImageView second) {
     // Present interval for the FPS readout (measured also while nothing is drawn).
     const auto now = std::chrono::steady_clock::now();
     const float ms = std::chrono::duration<float, std::milli>(now - last_present).count();
@@ -1376,25 +1399,31 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     ImGui::Render();
 
-    const vk::RenderingAttachmentInfo attachment{
-        .imageView = view,
-        .imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
-        .loadOp = vk::AttachmentLoadOp::eLoad,
-        .storeOp = vk::AttachmentStoreOp::eStore,
-    };
-    cmdbuf.beginRendering(vk::RenderingInfo{
-        .renderArea = {{0, 0}, extent},
-        .layerCount = 1,
-        .colorAttachmentCount = 1,
-        .pColorAttachments = &attachment,
-    });
-    {
-        // Font atlas uploads submit to the graphics queue themselves.
-        std::scoped_lock submit_lock{Vulkan::Scheduler::submit_mutex};
-        MakeRoomForTextures(*ImGui::GetDrawData());
-        ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmdbuf);
+    // bbport: `second` gets the same overlay (both frames of a frame generation pair).
+    for (const vk::ImageView target : {view, second}) {
+        if (!target) {
+            continue;
+        }
+        const vk::RenderingAttachmentInfo attachment{
+            .imageView = target,
+            .imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
+            .loadOp = vk::AttachmentLoadOp::eLoad,
+            .storeOp = vk::AttachmentStoreOp::eStore,
+        };
+        cmdbuf.beginRendering(vk::RenderingInfo{
+            .renderArea = {{0, 0}, extent},
+            .layerCount = 1,
+            .colorAttachmentCount = 1,
+            .pColorAttachments = &attachment,
+        });
+        {
+            // Font atlas uploads submit to the graphics queue themselves.
+            std::scoped_lock submit_lock{Vulkan::Scheduler::submit_mutex};
+            MakeRoomForTextures(*ImGui::GetDrawData());
+            ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmdbuf);
+        }
+        cmdbuf.endRendering();
     }
-    cmdbuf.endRendering();
 }
 
 } // namespace BbOverlay

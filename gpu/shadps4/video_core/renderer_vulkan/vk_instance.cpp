@@ -24,6 +24,7 @@
 #include "video_core/renderer_vulkan/vk_platform.h"
 
 #include <cstdio>
+#include "core/emulator_settings.h"
 #include <vk_mem_alloc.h>
 
 namespace Vulkan {
@@ -458,11 +459,49 @@ bool Instance::CreateDevice() {
         return false;
     }
 
-    static constexpr std::array queue_priorities = {1.0f};
-    const vk::DeviceQueueCreateInfo queue_info = {
-        .queueFamilyIndex = queue_family_index,
-        .queueCount = static_cast<u32>(queue_priorities.size()),
-        .pQueuePriorities = queue_priorities.data(),
+    // bbport: a second queue of the graphics family for presentation (and frame generation) when
+    // the family has one: on a single queue, the swapchain copies and frame interpolation of a
+    // frame wait behind every draw of the next frame submitted before them, so presents land
+    // late and in bunches. BB_PRESENT_QUEUE=0 presents on the graphics queue. Not on NVIDIA,
+    // whose DLSS Frame Generation (Streamline) takes over the game's present.
+    static constexpr std::array queue_priorities = {1.0f, 1.0f};
+    const bool separate_present = family_properties[queue_family_index].queueCount >= 2 &&
+                                  EmulatorSettingsImpl::Flag("BB_PRESENT_QUEUE",
+                                                             properties.vendorID != 0x10DE);
+    // bbport: a compute-only queue at high global priority (async compute) when the GPU has
+    // one, for the copies that present frame generation pairs (Presenter::PresentCompute): it
+    // runs beside the draws at once, which a second graphics queue does not (its work waited
+    // behind the draws, and its family has one priority for all of its queues).
+    // BB_COMPUTE_QUEUE=0 presents them from the graphics family. Not on NVIDIA (Streamline).
+    u32 compute_family = ~0u;
+    for (std::size_t i = 0; i < family_properties.size(); i++) {
+        const auto flags = family_properties[i].queueFlags;
+        if ((flags & vk::QueueFlagBits::eCompute) && !(flags & vk::QueueFlagBits::eGraphics) &&
+            family_properties[i].queueCount > 0) {
+            compute_family = static_cast<u32>(i);
+            break;
+        }
+    }
+    const bool async_compute = compute_family != ~0u &&
+                               EmulatorSettingsImpl::Flag("BB_COMPUTE_QUEUE", properties.vendorID != 0x10DE);
+    const bool global_priority = async_compute &&
+                                 (add_extension(VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME) ||
+                                  add_extension(VK_EXT_GLOBAL_PRIORITY_EXTENSION_NAME));
+    const vk::DeviceQueueGlobalPriorityCreateInfoKHR compute_priority{
+        .globalPriority = vk::QueueGlobalPriorityKHR::eHigh,
+    };
+    std::array<vk::DeviceQueueCreateInfo, 2> queue_infos{
+        vk::DeviceQueueCreateInfo{
+            .queueFamilyIndex = queue_family_index,
+            .queueCount = separate_present ? 2u : 1u,
+            .pQueuePriorities = queue_priorities.data(),
+        },
+        vk::DeviceQueueCreateInfo{
+            .pNext = global_priority ? &compute_priority : nullptr,
+            .queueFamilyIndex = compute_family,
+            .queueCount = 1u,
+            .pQueuePriorities = queue_priorities.data(),
+        },
     };
 
     const auto vk11_features = feature_chain.get<vk::PhysicalDeviceVulkan11Features>();
@@ -479,8 +518,8 @@ bool Instance::CreateDevice() {
     }
     vk::StructureChain device_chain = {
         vk::DeviceCreateInfo{
-            .queueCreateInfoCount = 1u,
-            .pQueueCreateInfos = &queue_info,
+            .queueCreateInfoCount = async_compute ? 2u : 1u,
+            .pQueueCreateInfos = queue_infos.data(),
             .enabledExtensionCount = static_cast<u32>(enabled_extensions.size()),
             .ppEnabledExtensionNames = enabled_extensions.data(),
         },
@@ -700,6 +739,13 @@ bool Instance::CreateDevice() {
         const_cast<void*>(create_info.pNext), VK_TRUE};
     if (anti_lag) create_info.pNext = &anti_lag_features;
     auto [device_result, dev] = physical_device.createDeviceUnique(create_info);
+    if (device_result == vk::Result::eErrorNotPermittedKHR && global_priority) {
+        // The driver may refuse a raised priority to an unprivileged process: keep the queue.
+        queue_infos[1].pNext = nullptr;
+        auto retry = physical_device.createDeviceUnique(create_info);
+        device_result = retry.result;
+        dev = std::move(retry.value);
+    }
     if (device_result != vk::Result::eSuccess) {
         LOG_CRITICAL(Render_Vulkan, "Failed to create device: {}", vk::to_string(device_result));
         return false;
@@ -714,7 +760,15 @@ bool Instance::CreateDevice() {
     if (Xess* xess=Xess::Get()) xess->Initialize(*instance,physical_device,*device);
 
     graphics_queue = device->getQueue(queue_family_index, 0);
-    present_queue = device->getQueue(queue_family_index, 0);
+    present_queue = device->getQueue(queue_family_index, separate_present ? 1 : 0);
+    std::printf("GPU: presentation on %s\n",
+                separate_present ? "its own graphics queue" : "the graphics queue");
+    if (async_compute) {
+        compute_queue_family_index = compute_family;
+        compute_queue = device->getQueue(compute_family, 0);
+        std::printf("GPU: compute queue for presentation (async compute, %s priority)\n",
+                    queue_infos[1].pNext ? "high" : "normal");
+    }
 
     if (calibrated_timestamps) {
         const auto [time_domains_result, time_domains] =

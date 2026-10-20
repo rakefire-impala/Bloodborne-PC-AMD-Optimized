@@ -32,7 +32,8 @@ bool Visible();
 void SavePendingSettings();
 
 /// Present thread: draws into `view` (layout ColorAttachmentOptimal).
-void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent);
+void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent,
+            vk::ImageView second = {});
 
 /// A menu (settings, lamp travel) or a text entry is shown: the game's input is held neutral.
 bool CapturesInput();

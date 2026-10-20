@@ -28,6 +28,11 @@ static constexpr vk::SurfaceFormatKHR SURFACE_FORMAT_HDR = {
 
 Swapchain::Swapchain(const Instance& instance_, const Frontend::WindowSDL& window_)
     : instance{instance_}, window{window_}, surface{CreateSurface(instance.GetInstance(), window)} {
+    if (const u32 family = instance.GetComputeQueueFamilyIndex(); family != ~0u) {
+        const auto [result, supported] =
+            instance.GetPhysicalDevice().getSurfaceSupportKHR(family, surface);
+        compute_present = result == vk::Result::eSuccess && supported;
+    }
     FindPresentFormat();
     Create(window.GetWidth(), window.GetHeight());
     ImGui::Core::Initialize(instance, window, image_count, surface_format.format);
@@ -68,6 +73,7 @@ void Swapchain::Create(u32 width_, u32 height_) {
     width = width_;
     height = height_;
     needs_recreation = false;
+    acquired = false;
 
     Destroy();
     window_mode = window.GetWindowMode();
@@ -75,13 +81,17 @@ void Swapchain::Create(u32 width_, u32 height_) {
     FindPresentMode();
     SetSurfaceProperties();
 
-    const std::array queue_family_indices = {
+    // bbport: the compute family copies frame generation pairs in (Presenter::PresentCompute).
+    std::array<u32, 3> queue_family_indices = {
         instance.GetGraphicsQueueFamilyIndex(),
         instance.GetPresentQueueFamilyIndex(),
     };
-
-    const bool exclusive = queue_family_indices[0] == queue_family_indices[1];
-    const u32 queue_family_indices_count = exclusive ? 1u : 2u;
+    u32 queue_family_indices_count =
+        queue_family_indices[0] == queue_family_indices[1] ? 1u : 2u;
+    if (compute_present) {
+        queue_family_indices[queue_family_indices_count++] = instance.GetComputeQueueFamilyIndex();
+    }
+    const bool exclusive = queue_family_indices_count == 1;
     const vk::SharingMode sharing_mode =
         exclusive ? vk::SharingMode::eExclusive : vk::SharingMode::eConcurrent;
     const auto format = needs_hdr ? SURFACE_FORMAT_HDR : surface_format;
@@ -166,18 +176,30 @@ void Swapchain::SetHDR(bool hdr) {
                                                  : surface_format.format);
 }
 
-bool Swapchain::AcquireNextImage() {
+bool Swapchain::AcquireNextImage(bool fenced) {
     if (!swapchain || width == 0 || height == 0) {
         needs_recreation = true; // no swapchain of the surface's size yet (Create)
         return false;
     }
+    if (acquired && !needs_recreation) {
+        return true;
+    }
     vk::Device device = instance.GetDevice();
-    vk::Result result =
-        device.acquireNextImageKHR(swapchain, std::numeric_limits<u64>::max(),
-                                   image_acquired[frame_index], VK_NULL_HANDLE, &image_index);
+    if (fenced && !acquire_fence) {
+        acquire_fence = Check(device.createFence({}));
+    }
+    vk::Result result = device.acquireNextImageKHR(
+        swapchain, std::numeric_limits<u64>::max(),
+        fenced ? vk::Semaphore{} : image_acquired[frame_index],
+        fenced ? acquire_fence : vk::Fence{}, &image_index);
+    if (fenced && (result == vk::Result::eSuccess || result == vk::Result::eSuboptimalKHR)) {
+        fence_pending = true;
+    }
 
     switch (result) {
     case vk::Result::eSuccess:
+        acquired = true;
+        acquired_fenced = fenced;
         break;
     case vk::Result::eSuboptimalKHR:
     case vk::Result::eErrorSurfaceLostKHR:
@@ -195,7 +217,7 @@ bool Swapchain::AcquireNextImage() {
     return !needs_recreation;
 }
 
-bool Swapchain::Present() {
+bool Swapchain::Present(vk::Queue queue) {
     const vk::PresentInfoKHR present_info = {
         .waitSemaphoreCount = 1,
         .pWaitSemaphores = &present_ready[image_index],
@@ -204,7 +226,9 @@ bool Swapchain::Present() {
         .pImageIndices = &image_index,
     };
 
-    auto result = instance.GetPresentQueue().presentKHR(present_info);
+    acquired = false;
+    acquired_fenced = false;
+    auto result = (queue ? queue : instance.GetPresentQueue()).presentKHR(present_info);
     if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
         needs_recreation = true;
     } else {
@@ -212,7 +236,7 @@ bool Swapchain::Present() {
                    vk::to_string(result));
     }
 
-    frame_index = (frame_index + 1) % image_count;
+    frame_index = (frame_index + 1) % u32(image_acquired.size());
 
     return !needs_recreation;
 }
@@ -368,6 +392,16 @@ void Swapchain::SetSurfaceProperties() {
     }
 }
 
+void Swapchain::WaitAcquired() {
+    if (!fence_pending) {
+        return;
+    }
+    const vk::Device device = instance.GetDevice();
+    Check(device.waitForFences(acquire_fence, true, std::numeric_limits<u64>::max()));
+    Check(device.resetFences(acquire_fence));
+    fence_pending = false;
+}
+
 void Swapchain::Destroy() {
     BbNvidia::BeforeSwapchainChange();
     vk::Device device = instance.GetDevice();
@@ -376,6 +410,16 @@ void Swapchain::Destroy() {
         LOG_WARNING(Render_Vulkan, "Failed to wait for device to become idle: {}",
                     vk::to_string(wait_result));
     }
+    // bbport: an acquisition's fence that the old swapchain may never signal is not reused.
+    if (acquire_fence) {
+        if (fence_pending) {
+            (void)device.waitForFences(acquire_fence, true, 100'000'000);
+        }
+        device.destroyFence(acquire_fence);
+        acquire_fence = vk::Fence{};
+    }
+    fence_pending = false;
+    acquired = acquired_fenced = false;
 
     for (auto& image_view : images_view) {
         device.destroyImageView(image_view);
@@ -399,8 +443,12 @@ void Swapchain::Destroy() {
 
 void Swapchain::RefreshSemaphores() {
     const vk::Device device = instance.GetDevice();
-    image_acquired.resize(image_count);
+    // bbport: an acquire semaphore is free again once the copy that waited on it has finished.
+    // With frame generation two presents share a frame and the frame (present_done) comes back
+    // three frames later: one per image ran out while those copies could still be pending.
+    image_acquired.resize(image_count * 2 + 2);
     present_ready.resize(image_count);
+    frame_index = 0;
 
     for (vk::Semaphore& semaphore : image_acquired) {
         auto [semaphore_result, sem] = device.createSemaphore({});
@@ -416,8 +464,10 @@ void Swapchain::RefreshSemaphores() {
         semaphore = sem;
     }
 
-    for (u32 i = 0; i < image_count; ++i) {
+    for (u32 i = 0; i < image_acquired.size(); ++i) {
         SetObjectName(device, image_acquired[i], "Swapchain Semaphore: image_acquired {}", i);
+    }
+    for (u32 i = 0; i < image_count; ++i) {
         SetObjectName(device, present_ready[i], "Swapchain Semaphore: present_ready {}", i);
     }
 }

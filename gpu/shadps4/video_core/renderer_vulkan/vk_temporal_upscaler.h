@@ -131,10 +131,15 @@ public:
     };
     bool DisplayOverride(VAddr address, Display& display, vk::Format view_format);
     const FrameGenerationSource& FrameGenerationInputs() const { return completed_fg_source; }
+    /// bbport: frame generation samples the scene depth after the frame, when later draws may
+    /// have attached it as depth again: back to the layout its view was made for.
+    void PrepareFrameGenerationInputs();
 
 private:
     mutable Motion::MipBiasCache mip_bias_cache;
     FrameGenerationSource fg_source{}, completed_fg_source{};
+    VideoCore::ImageId fg_depth_id{}, completed_fg_depth_id{};
+    u64 fg_depth_uid{}, completed_fg_depth_uid{};
     /// bbport: views of guest images the upscaler reads, kept across frames: FSR 4 registers
     /// images by view in a registry of eight (a new view per frame filled it at Native AA).
     vk::ImageView CachedView(const VideoCore::Image& image, vk::Format format,
@@ -152,6 +157,9 @@ private:
 
     void Run();
     void RunScaled();
+    /// bbport: frame generation's copy of the upscaled scene before the HUD is drawn into it.
+    void EnsureHudless(u32 w, u32 h);
+    void CopyHudless(vk::CommandBuffer cmdbuf, u32 w, u32 h);
     void RunUiOnly(VideoCore::ImageId color, VideoCore::ImageId depth);
     void EnsureUiResources(u32 width, u32 height, vk::Format color, vk::Format depth);
     void PrepareUiDepth(VideoCore::ImageId depth);
@@ -304,6 +312,10 @@ private:
     vk::UniqueImageView extra_sharpen_view;
     u32 extra_sharpen_width = 0, extra_sharpen_height = 0;
     vk::UniqueImageView ui_storage_view;
+    VideoCore::UniqueImage hudless_image;
+    vk::UniqueImageView hudless_view, ui_sample_view;
+    u32 hudless_width{}, hudless_height{};
+    vk::Format hudless_format{};
 };
 
 } // namespace Vulkan

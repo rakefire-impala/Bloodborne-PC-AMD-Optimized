@@ -78,6 +78,10 @@ struct Values {
     // Negotiated multiplier for the cap, independent of delayed SDK statistics.
     std::atomic<int> frame_generation_cap_multiplier{0};
     std::atomic<float> nvidia_real_fps{-1.0f}, nvidia_output_fps{-1.0f};
+    // bbport: FSR frame generation, measured at the presents (Presenter): all frames presented
+    // per second and the real ones among them. The overlay is drawn once per real frame (onto
+    // both frames of a pair), so its own frame time counts real frames only.
+    std::atomic<float> fsr_fg_output_fps{-1.0f}, fsr_fg_real_fps{-1.0f};
     std::atomic<bool> limit_generated_fps{false};
     std::atomic<int> generated_fps_limit{144};
     std::atomic<int> reflex{0}, nvidia_generated_frames{1}, nvidia_max_generated{0};

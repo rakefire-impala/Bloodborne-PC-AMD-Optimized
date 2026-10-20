@@ -142,6 +142,8 @@ public:
     void UnmapMemory(VAddr addr, u64 size);
 
     u64 Flush();
+    /// bbport: while frame generation runs, a submission every few draws (Draw).
+    void SplitSubmission();
     void Finish();
     void OnSubmit();
 
@@ -164,6 +166,7 @@ public:
 #endif
 
 private:
+    u32 draws_since_submission{}; ///< bbport: SplitSubmission
     /// bbport: DMA copies and fills on the GPU path also write guest memory (readbacks Off).
     static bool MirrorDmaToGuest();
     void PrepareRenderState(const GraphicsPipeline* pipeline);

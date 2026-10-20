@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <deque>
 #include "bbport_amd.h"
 
@@ -45,7 +47,16 @@ struct Frame {
     vk::Semaphore nvidia_fence{};
     u64 nvidia_fence_value{};
     u64 nvidia_fence_epoch{};
-
+    std::chrono::steady_clock::time_point flip_time{}; ///< bbport: when the guest flip was released
+    // bbport: frame generation, done in the draw stream (PrepareFrame): the generated frame in
+    // the swapchain format, for a plain copy at presentation, and whether this frame has one.
+    VmaAllocation generated_allocation{};
+    vk::Image generated_image{};
+    vk::ImageView generated_view{};      ///< in the swapchain format (the overlay draws into it)
+    vk::Format generated_format{};       ///< of generated_image: the UNORM twin for 8-bit sRGB FI
+    bool generated{};
+    bool overlay_drawn{}; ///< the overlay was drawn into image (and generated_image) already
+    bool compute_present{}; ///< presented by copies on the compute queue (PresentCompute)
 };
 
 enum SchedulerType {
@@ -106,11 +117,27 @@ public:
 
     Frame* PrepareBlankFrame(bool present_thread);
 
+    /// bbport: a guest flip of `frame` is queued for Present (the video out present thread).
+    void FlipQueued(Frame* frame) {
+        frame->flip_time = std::chrono::steady_clock::now();
+    }
+
     void Present(Frame* frame, bool is_reusing_frame = false, bool is_game_frame = true);
     Frame* PrepareLastFrame();
 
 private:
     Frame* GetRenderFrame();
+
+    /// bbport: frame generation of a drawn frame, in the draw stream (PrepareFrame).
+    void Generate(Frame* frame, vk::CommandBuffer cmdbuf);
+    /// bbport: copies `source` into the acquired swapchain image on the compute queue and
+    /// presents it, not before `present_at` when given (the copy is submitted at once).
+    /// Returns the compute timeline value of the copy.
+    u64 PresentCompute(Frame* frame, vk::Image source, bool final, bool is_game_frame,
+                       std::chrono::steady_clock::time_point present_at = {});
+    void WaitCompute(u64 tick);
+    /// bbport: BB_FRAME_STATS timestamps around frame generation commands.
+    void FgTimestamp(vk::CommandBuffer cmdbuf, bool end);
 
     void RecreateFrame(Frame* frame, u32 width, u32 height);
 
@@ -145,6 +172,26 @@ private:
     std::condition_variable_any frame_cv;
     std::vector<VAddr> vo_buffers_addr;
     std::unique_ptr<FrameGeneration> frame_generation;
+    std::chrono::steady_clock::time_point last_flip_time{};
+    /// bbport: when the real frame of the last frame generation pair was presented
+    std::chrono::steady_clock::time_point last_real_present{};
+    double real_interval_ms{1000.0 / 60.0}; ///< bbport: average interval of guest flips
+    /// bbport: presentation of frame generation pairs on the compute queue
+    /// (Instance::GetComputeQueue): its own command buffers, reused in turn, and a timeline
+    /// semaphore counting its submissions. Null queue: no compute presentation.
+    struct ComputePresent {
+        vk::Queue queue;
+        vk::UniqueCommandPool pool;
+        vk::UniqueSemaphore timeline;
+        std::array<vk::CommandBuffer, 8> buffers{};
+        std::array<u64, 8> ticks{};
+        u64 tick{};
+        u32 next{};
+    } compute_present;
+    vk::UniqueQueryPool fg_queries; ///< bbport: BB_FRAME_STATS frame generation GPU time
+    std::array<bool, 8> fg_query_used{}, fg_query_split{};
+    u32 fg_query_slot{};
+    float fg_query_period{1.0f};
 };
 
 } // namespace Vulkan

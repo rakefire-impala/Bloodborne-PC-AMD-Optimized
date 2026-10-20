@@ -27,9 +27,12 @@ unsigned EffectiveFrameLimit(unsigned foreground_limit) {
     if (s.window_focused || s.background_mode == BackgroundRun) {
         // The ordinary limit counts real game flips. Only an explicitly enabled
         // display cap may reduce that rate to account for generated frames.
+        // bbport: and only with the frame-time patch. The 30/60/90 patches advance the game
+        // by a fixed step per frame: fewer real frames than the patch's rate are slow
+        // motion (a 60 total cap with FSR FG made the 60 FPS patch run at half speed).
         const unsigned multiplier=unsigned(std::max(1,s.frame_generation==FrameGenerationNvidia ?
             s.frame_generation_cap_multiplier.load() : s.frame_generation_active.load()));
-        if (s.limit_generated_fps && multiplier>1) {
+        if (s.limit_generated_fps && multiplier>1 && s.variable_frame_time) {
             const unsigned real_cap=unsigned(std::clamp(s.generated_fps_limit.load(),30,1000))/multiplier;
             return foreground_limit ? std::min(foreground_limit,real_cap) : real_cap;
         }

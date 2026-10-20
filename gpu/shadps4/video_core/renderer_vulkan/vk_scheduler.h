@@ -699,6 +699,11 @@ public:
     /// Ends current rendering scope.
     void EndRendering();
 
+    /// bbport: submit to another queue of the same family (the presenter's present queue).
+    void UseQueue(vk::Queue other) {
+        queue = other;
+    }
+
     /// Sets a function to be called on every scheduler submission.
     void SetSubmitCallback(SubmitFunc&& on_submit) {
         this->on_submit = std::move(on_submit);
@@ -873,6 +878,8 @@ public:
     }
 
     static std::mutex submit_mutex;
+    /// bbport: submissions to the graphics queue (BB_FRAME_STATS, Present stats).
+    static inline std::atomic<u64> graphics_submissions{0};
 
 private:
     void AllocateWorkerCommandBuffers();
@@ -887,6 +894,7 @@ private:
 
 private:
     const Instance& instance;
+    vk::Queue queue; ///< bbport: the graphics queue, or the presenter's own (UseQueue)
     Semaphore work_semaphore;
     CommandPool command_pool;
     DynamicState dynamic_state;

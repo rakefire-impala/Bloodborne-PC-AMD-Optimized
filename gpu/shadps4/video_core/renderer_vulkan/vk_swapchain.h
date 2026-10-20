@@ -28,11 +28,27 @@ public:
     /// Recreates the swapchain with a given size and current surface.
     void Recreate(u32 width, u32 height);
 
-    /// Acquires the next image in the swapchain.
-    bool AcquireNextImage();
+    /// Acquires the next image in the swapchain (bbport: or keeps the one acquired already
+    /// and not presented yet: frame generation acquires ahead, off its pacing path).
+    /// bbport: fenced: the image's availability is a fence the CPU waits for (WaitAcquired)
+    /// instead of a semaphore a GPU submission waits on. Frame generation acquires before an
+    /// image is free; a queue left waiting on such a semaphore when the process ends (std::_Exit
+    /// ends the driver's present thread, which signals it) never finishes, and the process
+    /// cannot end (a killed test run kept 1.7 GB of VRAM).
+    bool AcquireNextImage(bool fenced = false);
+
+    /// bbport: waits until a fenced acquisition's image is available (once).
+    void WaitAcquired();
 
     /// Presents the current image and move to the next one
-    bool Present();
+    /// (bbport: on `queue`, by default the instance's present queue).
+    bool Present(vk::Queue queue = {});
+
+    /// bbport: whether the instance's compute queue can present to this surface; the
+    /// swapchain images are then shared with its family.
+    bool ComputePresent() const {
+        return compute_present;
+    }
 
     vk::SurfaceKHR GetSurface() const {
         return surface;
@@ -74,8 +90,9 @@ public:
         return extent;
     }
 
+    /// Null when the image was acquired with the fence (WaitAcquired instead).
     [[nodiscard]] vk::Semaphore GetImageAcquiredSemaphore() const {
-        return image_acquired[frame_index];
+        return acquired_fenced ? vk::Semaphore{} : image_acquired[frame_index];
     }
 
     [[nodiscard]] vk::Semaphore GetPresentReadySemaphore() const {
@@ -135,6 +152,11 @@ private:
     u32 image_index = 0;
     u32 frame_index = 0;
     bool needs_recreation = true;
+    bool compute_present = false;
+    bool acquired = false; ///< bbport: image_index is acquired and not presented yet
+    bool acquired_fenced = false;  ///< ... with acquire_fence
+    bool fence_pending = false;    ///< acquire_fence may still signal: wait before reuse
+    vk::Fence acquire_fence{};
     bool reported_empty_surface = false;
     bool needs_hdr = false;    // The game requested HDR swapchain
     bool supports_hdr = false; // SC supports HDR output

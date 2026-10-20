@@ -5,7 +5,8 @@ layout(local_size_x=8,local_size_y=8) in;
 layout(set=0,binding=0) uniform texture2D scene;
 layout(set=0,binding=1) uniform texture2D scene_depth;
 layout(set=0,binding=2,rg16f) uniform readonly image2D scene_motion;
-layout(set=0,binding=3,rgba16f) uniform writeonly image2D color_snapshot;
+// bbport: no format: rgba16f (linear scRGB) or rgba8 (sRGB-encoded, transfer 6).
+layout(set=0,binding=3) uniform writeonly image2D color_snapshot;
 layout(set=0,binding=4,r32f) uniform writeonly image2D depth_snapshot;
 layout(set=0,binding=5,rg16f) uniform writeonly image2D motion_snapshot;
 layout(push_constant) uniform Parameters { uvec2 source_size; uvec2 render_size; uint transfer; } parameters;
@@ -36,7 +37,7 @@ void main() {
         if (parameters.transfer==1) color=decodePQ(color);
         if (parameters.transfer==2) color=encodePQ(color);
         if (parameters.transfer==4) color=decodeSrgb(color);
-        if (parameters.transfer==5) color=encodeSrgb(color);
+        if (parameters.transfer==5 || parameters.transfer==6) color=encodeSrgb(color);
         imageStore(color_snapshot,p,vec4(color,1.0));
     }
     if (parameters.transfer==2 || parameters.transfer==5) return;

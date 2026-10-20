@@ -9,6 +9,7 @@
 #include "common/debug.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
+#include "bbport_settings.h"
 #include "core/memory.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/amdgpu/liverpool.h"
@@ -954,6 +955,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
     RENDERER_TRACE;
     BbWatch::Stage("draw");
     BbStats::draws.fetch_add(1, std::memory_order_relaxed);
+    SplitSubmission();
 
     // bbport: with the draw pipeline this thread only selects the pipeline and hands the draw
     // to the recording thread (DrawRecord there); draws FilterDraw handles itself run here.
@@ -1439,7 +1441,26 @@ void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr a
     scheduler.KickRecording();
 }
 
+void Rasterizer::SplitSubmission() {
+    // bbport: while frame generation runs, the frame's draws go to the GPU in several
+    // submissions instead of about two. Windows' GPU scheduler (without hardware scheduling)
+    // switches between this process's queues at submission boundaries: the presentation copies
+    // and flips of a frame generation pair waited behind half a frame of draws, and in flip
+    // mode (fullscreen, or a window Windows promotes) presents piled up (47 real FPS, uneven).
+    // BB_FG_SPLIT_DRAWS=<n> draws per submission, 0 = one per guest submission as before.
+    static const u32 every = [] {
+        const char* env = std::getenv("BB_FG_SPLIT_DRAWS");
+        return env ? u32(std::max(0, std::atoi(env))) : 32u;
+    }();
+    if (!every || BbSettings::Get().frame_generation_active < 2 ||
+        ++draws_since_submission < every) {
+        return;
+    }
+    Flush();
+}
+
 u64 Rasterizer::Flush() {
+    draws_since_submission = 0;
     DrainDrawPipe();
     const u64 current_tick = scheduler.CurrentTick();
     SubmitInfo info{};

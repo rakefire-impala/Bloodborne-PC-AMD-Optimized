@@ -98,6 +98,14 @@ public:
         return present_queue;
     }
 
+    /// bbport: the compute-only queue for presentation copies, or null (no async compute).
+    vk::Queue GetComputeQueue() const {
+        return compute_queue;
+    }
+    u32 GetComputeQueueFamilyIndex() const {
+        return compute_queue_family_index;
+    }
+
     TracyVkCtx GetProfilerContext() const {
         return profiler_context;
     }
@@ -596,6 +604,8 @@ private:
     VmaAllocator allocator{};
     vk::Queue present_queue;
     vk::Queue graphics_queue;
+    vk::Queue compute_queue;
+    u32 compute_queue_family_index{~0u};
     std::vector<vk::PhysicalDevice> physical_devices;
     std::vector<std::string> available_extensions;
     std::unordered_map<vk::Format, vk::FormatProperties3> format_properties;
