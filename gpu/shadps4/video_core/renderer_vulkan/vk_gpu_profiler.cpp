@@ -117,10 +117,32 @@ void GpuProfiler::Print() {
     }
     std::printf("GPU profile: %.2f ms/frame over %llu frames, %zu labels\n", sum / frames,
                 static_cast<unsigned long long>(frames), sorted.size());
+    double listed = 0;
     for (size_t i = 0; i < std::min<size_t>(sorted.size(), 30); ++i) {
         const auto& [key, total] = sorted[i];
+        listed += total.ms;
         std::printf("  %6.3f ms/frame %5.1f/frame  %s\n", total.ms / frames,
                     double(total.segments) / frames, described[key].c_str());
+    }
+    if (sorted.size() > 30) {
+        std::printf("  %6.3f ms/frame in %zu more labels\n", (sum - listed) / frames, sorted.size() - 30);
+    }
+    // The same by kind: passes by size and targets (any shaders), dispatches by shader.
+    std::unordered_map<std::string, Total> kinds;
+    for (const auto& [key, total] : sorted) {
+        std::string kind = described[key];
+        if (const auto shaders = kind.find(" vs "); shaders != std::string::npos) {
+            kind.resize(shaders);
+        }
+        kinds[kind].ms += total.ms;
+        kinds[kind].segments += total.segments;
+    }
+    std::vector<std::pair<std::string, Total>> by_kind(kinds.begin(), kinds.end());
+    std::ranges::sort(by_kind, [](const auto& a, const auto& b) { return a.second.ms > b.second.ms; });
+    std::printf("GPU profile by kind:\n");
+    for (size_t i = 0; i < std::min<size_t>(by_kind.size(), 20); ++i) {
+        std::printf("  %6.3f ms/frame %5.1f/frame  %s\n", by_kind[i].second.ms / frames,
+                    double(by_kind[i].second.segments) / frames, by_kind[i].first.c_str());
     }
     totals.clear();
     frames = 0;

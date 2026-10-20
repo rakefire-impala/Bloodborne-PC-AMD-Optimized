@@ -13,8 +13,9 @@ layout(binding = 2, std430) readonly buffer PrevFrame { uint prev_frame[]; };
 layout(binding = 3, std430) writeonly buffer NextFrame { uint next_frame[]; };
 #else
 layout(binding = 1, rg16f) uniform writeonly image2D motion_img; // pixels, previous - current
-// Object motion from the G-buffer: rg pixels, b = valid, a = written depth.
-layout(binding = 2) uniform texture2D object_tex;
+// Object motion from the G-buffer (MotionVectors::PackedFormat): x = the vector in pixels as
+// two halves, y = the written depth's bits, sign bit set where there is no vector.
+layout(binding = 2) uniform utexture2D object_tex;
 #endif
 
 layout(push_constant) uniform Constants {
@@ -88,13 +89,17 @@ void main() {
 #else
     vec2 result = motion;
     if (mode == 1) {
-        const vec4 object_motion = texelFetch(object_tex, pixel, 0);
+        const uvec2 packed = texelFetch(object_tex, pixel, 0).xy;
+        const vec2 object_vector = unpackHalf2x16(packed.x);
+        const bool has_vector = (packed.y & 0x80000000u) == 0u;
+        const float object_depth = uintBitsToFloat(packed.y & 0x7fffffffu);
         // A later ordinary draw may have covered this pixel without touching the motion
         // target. Its final depth then differs from the depth stored with the vector.
         // Both depths are full precision. Do not accept an old foreground vector merely
         // because perspective depth compresses distant surfaces into a small interval.
         float depth_threshold = max(2e-7, (proj.z - depth) * 0.01);
-        if (object_motion.b > 0.99 && abs(object_motion.a - depth) < depth_threshold &&
+        const vec4 object_motion = vec4(object_vector, 0.0, 0.0);
+        if (has_vector && abs(object_depth - depth) < depth_threshold &&
             !any(isnan(object_motion.rg)) &&
             !any(isinf(object_motion.rg)) && all(lessThanEqual(abs(object_motion.rg),vec2(65504.0)))) {
             result = object_motion.rg;

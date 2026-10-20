@@ -85,6 +85,11 @@ struct MotionVectors {
     static constexpr u32 CurrentLocation = 30;  ///< varying: current clip position
     static constexpr u32 PreviousLocation = 31; ///< varying: previous clip position, z = valid
     static constexpr u32 Output = 7;            ///< color attachment index
+    /// The attachment's format, as HwFragmentRuntimeInfo::motion_vectors: R32G32_UINT, x the
+    /// vector as two halves (pixels, previous - current), y the depth's bits with the sign bit
+    /// set where the pixel has no vector. RGBA32F (1, before) cost twice the export rate in
+    /// every G-buffer pass (~1 ms of 12 at 1132x636 on an RX 5500M); FSR takes RG16F anyway.
+    static constexpr u8 PackedFormat = 2;
     /// Per-draw parameters (u32x4: store base, load base, vertices per instance, flags) and
     /// the position array (vec4 per vertex; element 0 is scratch), fixed for the session.
     static inline u64 params_address = 0;
@@ -227,8 +232,9 @@ struct HwFragmentRuntimeInfo {
     bool front_face_all_bits{false};
     bool dual_source_blending{false};
     bool clip_distance_emulation{false};
-    /// bbport: writes the object motion vector to MotionVectors::Output.
-    bool motion_vectors{false};
+    /// bbport: writes the object motion vector to MotionVectors::Output, in the format
+    /// MotionVectors::PackedFormat (0: none). Cached shaders of another format stay unused.
+    u8 motion_vectors{0};
 
     bool operator==(const HwFragmentRuntimeInfo& other) const noexcept {
         return std::ranges::equal(color_buffers, other.color_buffers) &&

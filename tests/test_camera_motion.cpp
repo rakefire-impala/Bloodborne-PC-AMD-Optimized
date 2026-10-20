@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -24,7 +25,9 @@ int main() {
     std::array<vk::UniqueImageView,3> views;
     std::array<vk::DescriptorSetLayoutBinding,3> bindings{};
     for (u32 i=0;i<3;++i) {
-        const auto format=i==1 ? vk::Format::eR16G16Sfloat : vk::Format::eR32G32B32A32Sfloat;
+        // Object vectors: MotionVectors::PackedFormat (runtime_info.h).
+        const auto format=i==1 ? vk::Format::eR16G16Sfloat : i==2 ? vk::Format::eR32G32Uint :
+            vk::Format::eR32G32B32A32Sfloat;
         images[i]=VideoCore::UniqueImage(device,instance.GetAllocator());
         images[i].Create({.imageType=vk::ImageType::e2D,.format=format,.extent={W,H,1},
             .mipLevels=1,.arrayLayers=1,.samples=vk::SampleCountFlagBits::e1,
@@ -69,14 +72,30 @@ int main() {
                                   .dstStageMask=dst,.dstAccessMask=dst_access};
         cmd.pipelineBarrier2({.memoryBarrierCount=1,.pMemoryBarriers=&b},d);
     };
+    const auto to_half=[](float f) -> u32 {
+        if (std::isnan(f)) return 0x7e00u;
+        const u32 sign=std::signbit(f) ? 0x8000u : 0u;
+        f=std::abs(f);
+        if (f>=65520.f) return sign|0x7c00u;
+        if (f<std::ldexp(1.f,-14)) return sign|u32(std::lround(f*std::ldexp(1.f,24)));
+        int e=0;
+        const float m=std::frexp(f,&e);
+        u32 mantissa=u32(std::lround((m*2.f-1.f)*1024.f)), exponent=u32(e-1+15);
+        if (mantissa==1024) { mantissa=0; ++exponent; }
+        return sign|exponent<<10|mantissa;
+    };
     const auto run=[&](const char* label,float depth,float translation,float rotation,
                        float object_depth,u32 mode,float expected,bool jitter=false,
-                       float object_x=2.f,float previous_z=1.f,float expected_y=0.f) {
+                       float object_x=2.f,float previous_z=1.f,float expected_y=0.f,
+                       bool object_written=true) {
         auto* pixels=static_cast<float*>(ai.pMappedData);
+        auto* objects=reinterpret_cast<u32*>(pixels+N*4);
+        u32 depth_bits=0;
+        std::memcpy(&depth_bits,&object_depth,4);
         for (u32 p=0;p<N;++p) {
             pixels[p*4]=depth;
-            pixels[N*4+p*4]=object_x; pixels[N*4+p*4+1]=0.f;
-            pixels[N*4+p*4+2]=1.f; pixels[N*4+p*4+3]=object_depth;
+            objects[p*2]=to_half(object_x);
+            objects[p*2+1]=depth_bits|(object_written ? 0u : 0x80000000u);
         }
         const auto cmd=scheduler.CommandBuffer();
         std::array<vk::ImageMemoryBarrier2,3> transitions{};
@@ -132,6 +151,7 @@ int main() {
     run("sky ignores translation",1,1000,0,0,0,0);
     run("static camera cancels jitter",distant,0,0,0,0,0,true);
     run("matching object vector",distant,0,0,distant,1,2);
+    run("pixel without object vector",distant,0,0,distant,1,0,false,2.f,1.f,0.f,false);
     run("stale distant object vector",distant,0,0,0.9999f,1,0);
     run("point behind previous camera",0.5f,1000,0,0,0,-5.625f,false,2.f,-1.f,-4.375f);
     run("object vector exceeds FP16",distant,0,0,distant,1,0,false,100000.f);

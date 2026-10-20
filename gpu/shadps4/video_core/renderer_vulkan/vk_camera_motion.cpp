@@ -168,7 +168,9 @@ std::array<std::array<float, 4>, 3> CameraMotion::TaaDepthParameters() const noe
 }
 
 vk::ImageView CameraMotion::ObjectMotionView() const noexcept {
-    return object_motion && object_motion->Enabled() ? object_motion->View() : vk::ImageView{};
+    // Also with object motion off: RecordMotion prepared a 1x1 stand-in of the same (unsigned)
+    // format for shaders that declare it.
+    return object_motion ? object_motion->View() : vk::ImageView{};
 }
 
 vk::Image CameraMotion::ObjectMotionImage(u32 width, u32 height) const noexcept {
@@ -179,8 +181,11 @@ vk::Image CameraMotion::ObjectMotionImage(u32 width, u32 height) const noexcept 
 void CameraMotion::RecordMotion(vk::CommandBuffer cmdbuf, vk::ImageView depth_view,
                                 vk::ImageView motion_view, u32 width, u32 height) {
     bool object_valid = false;
-    const vk::ImageView object_view = object_motion && object_motion->Enabled()
+    // The shader declares an unsigned image (MotionVectors::PackedFormat): with object motion
+    // off, ObjectMotion's 1x1 image stands in (not read: mode 0).
+    const vk::ImageView object_view = object_motion
         ? object_motion->PrepareRead(cmdbuf, width, height, object_valid) : depth_view;
+    object_valid = object_valid && object_motion->Enabled();
     const PushConstants push{
         .reproject = Multiply(previous.view, current.inv_view),
         .proj = current.proj,

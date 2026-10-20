@@ -193,9 +193,10 @@ void ObjectMotion::EnsureImage(u32 width, u32 height) {
     view.reset();
     image_layout = vk::ImageLayout::eUndefined;
     image = VideoCore::UniqueImage(device, instance.GetAllocator());
+    // MotionVectors::PackedFormat (runtime_info.h).
     image.Create(vk::ImageCreateInfo{
         .imageType = vk::ImageType::e2D,
-        .format = vk::Format::eR32G32B32A32Sfloat,
+        .format = vk::Format::eR32G32Uint,
         .extent = {alloc_width, alloc_height, 1},
         .mipLevels = 1,
         .arrayLayers = 1,
@@ -208,7 +209,7 @@ void ObjectMotion::EnsureImage(u32 width, u32 height) {
     view = Check(device.createImageViewUnique({
         .image = vk::Image(image),
         .viewType = vk::ImageViewType::e2D,
-        .format = vk::Format::eR32G32B32A32Sfloat,
+        .format = vk::Format::eR32G32Uint,
         .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
     }));
     image_width = width;
@@ -244,6 +245,8 @@ void ObjectMotion::Attach(RenderState& state, u32 width, u32 height) {
         });
         image_layout = vk::ImageLayout::eColorAttachmentOptimal;
         attachment.is_clear = !written;
+        // No vector (MotionVectors::PackedFormat: the sign bit of y).
+        attachment.clear_value = {0u, 0x80000000u, 0u, 0u};
         written = true;
     }
     state.num_color_attachments = std::max<u16>(state.num_color_attachments, slot + 1);

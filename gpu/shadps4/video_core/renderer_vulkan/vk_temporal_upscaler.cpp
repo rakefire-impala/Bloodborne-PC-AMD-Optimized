@@ -1223,7 +1223,7 @@ void TemporalUpscaler::Run() {
                         {input_depth, w, h, 4, "depth", "f32", vk::ImageAspectFlagBits::eDepth}});
             if (const auto object = camera_motion.ObjectMotionImage(w, h); object) {
                 DumpImages(instance, scheduler, cmdbuf, dump,
-                           {{object, w, h, 16, "objects", "rgba32f"}});
+                           {{object, w, h, 8, "objects", "rg32ui"}});
             }
         }
         // The result replaces the scene color's RGB (its alpha carries data for the post).
@@ -1796,7 +1796,7 @@ void TemporalUpscaler::RunScaled() {
                 // inputs: only dump it when it matches, to avoid an out-of-bounds GPU copy.
                 if (const auto object = camera_motion.ObjectMotionImage(w, h); object) {
                     DumpImages(instance, scheduler, cmdbuf, dump,
-                               {{object, w, h, 16, "objects", "rgba32f"}});
+                               {{object, w, h, 8, "objects", "rg32ui"}});
                 }
             }
         }

@@ -25,7 +25,7 @@ int main(int argc, char** argv) {
             if (vertex) {
                 runtime.hw.vs.motion_vectors = motion;
             } else {
-                runtime.hw.fs.motion_vectors = motion;
+                runtime.hw.fs.motion_vectors = motion ? MotionVectors::PackedFormat : 0;
                 runtime.hw.fs.color_buffers[0].num_format = AmdGpu::NumberFormat::Float;
             }
             Common::ObjectPool<IR::Inst> pool;

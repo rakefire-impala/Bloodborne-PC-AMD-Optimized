@@ -263,7 +263,8 @@ public:
                runtime_info.hw.vs.motion_vectors && MotionVectors::positions_address != 0;
     }
     [[nodiscard]] bool FragmentMotion() const {
-        return sw_stage == SwStage::Fragment && runtime_info.hw.fs.motion_vectors;
+        return sw_stage == SwStage::Fragment &&
+               runtime_info.hw.fs.motion_vectors == MotionVectors::PackedFormat;
     }
     Id base_vertex{};
     Id base_instance{};

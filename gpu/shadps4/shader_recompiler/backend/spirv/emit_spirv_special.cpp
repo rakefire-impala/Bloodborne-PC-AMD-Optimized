@@ -187,10 +187,18 @@ static void EmitFragmentMotion(EmitContext& ctx) {
     // written. Preserve depth so the compose pass can reject an occluded vector.
     const Id depth = ctx.OpCompositeExtract(f32_type,
                                             ctx.OpLoad(ctx.F32[4], ctx.frag_coord), 2u);
-    ctx.OpStore(ctx.motion_frag_out,
-                ctx.OpCompositeConstruct(ctx.F32[4], std::array<Id, 4>{
-                    ctx.OpSelect(f32_type, front, dx, zero),
-                    ctx.OpSelect(f32_type, front, dy, zero), valid, depth}));
+    // MotionVectors::PackedFormat: the vector as two halves, the depth's bits with the sign
+    // bit set where there is no vector (valid is 0 or 1 for the whole draw).
+    const Id u32_type = ctx.U32[1];
+    const Id packed = ctx.OpPackHalf2x16(
+        u32_type, ctx.OpCompositeConstruct(ctx.F32[2], ctx.OpSelect(f32_type, front, dx, zero),
+                                           ctx.OpSelect(f32_type, front, dy, zero)));
+    const Id depth_bits = ctx.OpBitcast(u32_type, depth);
+    const Id none = ctx.OpFOrdLessThan(ctx.U1[1], valid, ctx.Constant(f32_type, 0.5f));
+    const Id flagged = ctx.OpSelect(
+        u32_type, none, ctx.OpBitwiseOr(u32_type, depth_bits, ctx.ConstU32(0x80000000u)),
+        depth_bits);
+    ctx.OpStore(ctx.motion_frag_out, ctx.OpCompositeConstruct(ctx.U32[2], packed, flagged));
 }
 
 void EmitEpilogue(EmitContext& ctx) {
