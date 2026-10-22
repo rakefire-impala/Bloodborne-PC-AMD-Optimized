@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <thread>
 
 #include "client.h"
@@ -720,7 +721,20 @@ void ShadNetClient::HandleServerFeaturesReply(const std::vector<u8>& payload) {
     m_server_features_received.store(parsed);
     LOG_INFO(ShadNet, "Server features: matching2_enabled={}{}",
              matching2_enabled ? "true" : "false", parsed ? "" : " (defaulted)");
+    ReportClientVersion();
     m_sem_authenticated.release();
+}
+
+// bbport: as upstream shadPS4 does after the server features. Without it the server sends
+// ClientRejected ~15 s after login, drops the connection and refuses the account's logins for
+// ~2 minutes (login error 5), so the game never stayed signed in. Upstream's format for a fork
+// build; BB_SHADNET_CLIENT_VERSION overrides it.
+u64 ShadNetClient::ReportClientVersion() {
+    const char* env = std::getenv("BB_SHADNET_CLIENT_VERSION");
+    shadnet::SetClientVersionRequest req;
+    req.set_version(env && *env ? env : "shadPS4 v0.20.1 WIP rakefire-impala/bbport");
+    LOG_INFO(ShadNet, "Reporting client version '{}'", req.version());
+    return SubmitRequest(CommandType::SetClientVersion, MakeProtoPayload(req));
 }
 
 // Notifications
@@ -909,6 +923,18 @@ void ShadNetClient::HandleNotification(u16 cmd_raw, const std::vector<u8>& paylo
                  n.npServiceName, n.dataType, n.fromNpid, n.data.size(), n.extdData.size());
         if (onWebApiPushEvent)
             onWebApiPushEvent(n);
+        break;
+    }
+    case NotificationType::ClientRejected: {
+        shadnet::NotifyClientRejected pb;
+        if (!pb.ParseFromString(blob)) {
+            LOG_WARNING(ShadNet, "ClientRejected parse error");
+            break;
+        }
+        LOG_ERROR(ShadNet, "Server rejected this client (reason={}, version='{}'): {}", pb.reason(),
+                  pb.version(), pb.message());
+        if (onClientRejected)
+            onClientRejected(pb.message());
         break;
     }
     default:

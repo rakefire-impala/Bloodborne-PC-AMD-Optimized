@@ -67,6 +67,7 @@ enum class CommandType : u16 {
     AddBlock = 10,
     RemoveBlock = 11,
     GetServerFeatures = 12,
+    SetClientVersion = 13,
     GetBoardInfos = 30,
     RecordScore = 31,
     RecordScoreData = 32,
@@ -105,6 +106,8 @@ enum class NotificationType : u16 {
     RoomEvent = 10,
     RoomMessage = 11,
     WebApiPushEvent = 17, // Generic NP WebApi push event
+    ServiceUnavailable = 18,
+    ClientRejected = 19, // the server drops this client (no or refused client version)
 };
 
 enum class ErrorType : uint8_t {
@@ -292,6 +295,8 @@ public:
     std::function<void(const NotifyRoomEvent&)> onRoomEvent;
     std::function<void(const NotifyRoomMessage&)> onRoomMessage;
     std::function<void(const NotifyWebApiPushEvent&)> onWebApiPushEvent;
+    /// bbport: the server refuses this build (its message); it drops the connection next.
+    std::function<void(const std::string&)> onClientRejected;
     // Async reply callback.
     //   cmd    —command this reply is for (matches the request's cmd)
     //   pkt_id —packet id echoed back from the original request header
@@ -328,6 +333,7 @@ private:
     void HandleServerFeaturesReply(const std::vector<u8>& payload);
     void HandleNotification(u16 cmd_raw, const std::vector<u8>& payload);
     bool RequestServerFeatures();
+    u64 ReportClientVersion();
 
     // Helper: read a u32-LE-prefixed proto blob from a byte vector at pos.
     static std::string ExtractBlob(const std::vector<u8>& p, int pos);

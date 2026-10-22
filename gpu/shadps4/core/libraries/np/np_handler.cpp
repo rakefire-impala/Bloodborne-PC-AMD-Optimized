@@ -214,6 +214,14 @@ bool NpHandler::ConnectUser(s32 user_id, const std::string& host, u16 port, cons
     client->onFriendStatus = [this, user_id](const ShadNet::NotifyFriendStatus& n) {
         OnFriendStatus(user_id, n);
     };
+    // bbport: a server that refuses this build drops it again after every login, and each drop
+    // locks the account out for ~2 minutes: stop for this run and say why.
+    client->onClientRejected = [](const std::string& message) {
+        EmulatorSettings.SetShadNetSessionDisabled(true);
+        ImGui::ShadNetNotify::Push(
+            ImGui::ShadNetNotify::Kind::Info,
+            fmt::format("shadNet: {} Online features are off for this session.", message));
+    };
     client->onWebApiPushEvent = [this, user_id](const ShadNet::NotifyWebApiPushEvent& n) {
         OnWebApiPushEvent(user_id, n);
     };

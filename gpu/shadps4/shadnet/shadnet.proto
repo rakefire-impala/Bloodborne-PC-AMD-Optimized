@@ -33,6 +33,18 @@ message ServerFeaturesReply {
     bool matching2_enabled = 1;
 }
 
+// bbport: from upstream shadPS4. The server drops a client that has not reported its version
+// (ClientRejected) about 15 s after login, and refuses that account's logins for ~2 minutes.
+message SetClientVersionRequest {
+    string version = 1;
+}
+
+message NotifyClientRejected {
+    uint32 reason  = 1;
+    string message = 2;
+    string version = 3;
+}
+
 message FriendEntry {
     string npid     = 1;
     bool   online   = 2;
