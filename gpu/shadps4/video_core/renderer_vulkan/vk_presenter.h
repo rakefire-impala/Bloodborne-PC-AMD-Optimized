@@ -138,6 +138,7 @@ private:
     void WaitCompute(u64 tick);
     /// bbport: BB_FRAME_STATS timestamps around frame generation commands.
     void FgTimestamp(vk::CommandBuffer cmdbuf, bool end);
+    void GuardFgVram();
 
     void RecreateFrame(Frame* frame, u32 width, u32 height);
 
@@ -192,6 +193,10 @@ private:
     std::array<bool, 8> fg_query_used{}, fg_query_split{};
     u32 fg_query_slot{};
     float fg_query_period{1.0f};
+    /// bbport: GuardFgVram: frames since the last check, checks in a row near/clear of the
+    /// budget, and the device usage when frame generation paused.
+    u32 fg_vram_frames{}, fg_vram_full_checks{}, fg_vram_clear_checks{};
+    u64 fg_vram_paused_usage{};
 };
 
 } // namespace Vulkan

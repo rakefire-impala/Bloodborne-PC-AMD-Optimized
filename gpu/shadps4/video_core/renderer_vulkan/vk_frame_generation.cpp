@@ -114,6 +114,7 @@ void FrameGeneration::Capture(vk::CommandBuffer cmdbuf, const FrameGenerationSou
     if (settings.frame_generation == BbSettings::FrameGenerationOff ||
         settings.upscaler==BbSettings::UpscalerOff ||
         (settings.frame_generation==BbSettings::FrameGenerationFsr && failed.load(std::memory_order_relaxed)) || !source.valid ||
+        VramPaused() ||
         !source.depth_view || !source.motion_view || !source.render_width || !source.render_height || !w || !h ||
         (!settings.window_focused && settings.background_mode!=BbSettings::BackgroundRun) ||
         (!hdr && format != vk::Format::eB8G8R8A8Srgb && format != vk::Format::eR8G8B8A8Srgb &&
@@ -385,6 +386,11 @@ void FrameGeneration::Reset() {
 bool FrameGeneration::Record(vk::CommandBuffer cmdbuf, const std::shared_ptr<Snapshot>& snapshot) {
     auto& settings=BbSettings::Get();
     RetireCompleted();
+    if (settings.frame_generation==BbSettings::FrameGenerationFsr && VramPaused()) {
+        // Releases the FI/OF context and the HUD history (Capture dropped the inputs).
+        if (context) Reset();
+        return false;
+    }
     if (settings.frame_generation!=BbSettings::FrameGenerationFsr ||
         settings.upscaler==BbSettings::UpscalerOff || !snapshot ||
         (!settings.window_focused && settings.background_mode!=BbSettings::BackgroundRun)) {
@@ -499,7 +505,8 @@ bool FrameGeneration::Record(vk::CommandBuffer cmdbuf, const std::shared_ptr<Sna
 bool FrameGeneration::Wanted() const {
     const auto& settings=BbSettings::Get();
     return settings.frame_generation==BbSettings::FrameGenerationFsr &&
-           settings.upscaler!=BbSettings::UpscalerOff && !failed.load(std::memory_order_relaxed);
+           settings.upscaler!=BbSettings::UpscalerOff && !failed.load(std::memory_order_relaxed) &&
+           !VramPaused();
 }
 void FrameGeneration::Submitted(u64 tick) {
     if (recording.snapshot) { recording.tick=tick; pending.push_back(std::move(recording)); recording={}; }

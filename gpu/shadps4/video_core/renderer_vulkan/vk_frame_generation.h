@@ -101,6 +101,14 @@ public:
     }
     void Invalidate();
     void Reset();
+    /// bbport: VRAM nearly exhausted (Presenter's guard): frame generation steps aside and
+    /// releases its context and input copies until there is room again.
+    void SetVramPaused(bool paused) {
+        vram_paused.store(paused, std::memory_order_relaxed);
+    }
+    bool VramPaused() const {
+        return vram_paused.load(std::memory_order_relaxed);
+    }
 private:
     bool EnsureCopyPipeline();
     // bbport: the HUD passes (frame_generation_hud.comp) and their lookup table buffer.
@@ -141,6 +149,7 @@ private:
     bool context_hdr{}, compact_color{};
     vk::Format context_format{};
     std::atomic<bool> failed{false};
+    std::atomic<bool> vram_paused{false};
     struct Pending {
         u64 id{}, tick{};
         std::shared_ptr<Snapshot> snapshot;

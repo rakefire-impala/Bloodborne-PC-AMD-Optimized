@@ -610,6 +610,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     pp_settings.srgb_input =
         attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
     pp_pass.Render(cmdbuf, image_view, image_size, *frame, pp_settings);
+    GuardFgVram();
     if (frame_generation->Wanted()) {
         rasterizer->GetUpscaler().PrepareFrameGenerationInputs();
     }
@@ -1127,6 +1128,66 @@ void Presenter::FgTimestamp(vk::CommandBuffer cmdbuf, bool end) {
     cmdbuf.writeTimestamp2(vk::PipelineStageFlagBits2::eAllCommands, *fg_queries,
                            fg_query_slot * 2 + (end ? 1 : 0));
     fg_query_used[fg_query_slot] = end;
+}
+
+// bbport: FSR frame generation (its FI/OF context, HUD history and per-frame input copies,
+// a few hundred MiB at 1080p) steps aside while VRAM is nearly exhausted. At the budget Windows
+// pages the game's memory on every submission: on an RX 5500M, with another process taking
+// ~760 MiB mid-session, usage sat at 97% of a 2516 MiB budget and every frame took 340 ms
+// (3 FPS, never recovering; healthy runs sit near 68%). It resumes once the usage it had when
+// it paused fits well within the budget again.
+void Presenter::GuardFgVram() {
+    auto& settings = BbSettings::Get();
+    if (settings.frame_generation != BbSettings::FrameGenerationFsr) {
+        if (frame_generation->VramPaused()) {
+            frame_generation->SetVramPaused(false);
+            settings.frame_generation_problem = nullptr;
+        }
+        fg_vram_full_checks = fg_vram_clear_checks = 0;
+        return;
+    }
+    if (++fg_vram_frames < 30) {
+        return;
+    }
+    fg_vram_frames = 0;
+    const u64 budget = instance.GetDeviceMemoryBudgetNow();
+    const u64 usage = instance.GetDeviceMemoryUsage();
+    if (!budget) {
+        return;
+    }
+    constexpr u64 MiB = 1ull << 20;
+    if (!frame_generation->VramPaused()) {
+        // Three checks in a row (~1.5 s at 60 FPS) above 95% of the budget
+        // (BB_FG_VRAM_PAUSE_PERCENT, for testing the pause).
+        static const u64 percent = [] {
+            const char* env = std::getenv("BB_FG_VRAM_PAUSE_PERCENT");
+            return env ? u64(std::clamp(std::atoi(env), 1, 100)) : 95ull;
+        }();
+        fg_vram_full_checks = usage * 100 > budget * percent ? fg_vram_full_checks + 1 : 0;
+        if (fg_vram_full_checks >= 3) {
+            fg_vram_full_checks = 0;
+            fg_vram_paused_usage = usage;
+            frame_generation->SetVramPaused(true);
+            settings.frame_generation_problem =
+                "FG paused: video memory is nearly full (other programs use it too). It resumes "
+                "by itself when there is room.";
+            std::printf("FSR Frame Generation: paused, VRAM %llu of %llu MiB budget\n",
+                        (unsigned long long)(usage / MiB), (unsigned long long)(budget / MiB));
+            std::fflush(stdout);
+        }
+        return;
+    }
+    // ~10 s in a row with room for the usage it had when it paused, plus a margin.
+    const u64 needed = std::max(fg_vram_paused_usage, usage + 256 * MiB);
+    fg_vram_clear_checks = needed * 100 < budget * 88 ? fg_vram_clear_checks + 1 : 0;
+    if (fg_vram_clear_checks >= 20) {
+        fg_vram_clear_checks = 0;
+        frame_generation->SetVramPaused(false);
+        settings.frame_generation_problem = nullptr;
+        std::printf("FSR Frame Generation: resumed, VRAM %llu of %llu MiB budget\n",
+                    (unsigned long long)(usage / MiB), (unsigned long long)(budget / MiB));
+        std::fflush(stdout);
+    }
 }
 
 void Presenter::WaitCompute(u64 tick) {
