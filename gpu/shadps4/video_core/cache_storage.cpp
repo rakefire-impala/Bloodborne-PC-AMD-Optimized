@@ -13,6 +13,7 @@
 
 #include <miniz.h>
 
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <future>
@@ -328,6 +329,18 @@ void DataBase::Clear() {
         }
     }
     LOG_WARNING(Render, "Pipeline cache cleared ({} files): it is rebuilt for this build", removed);
+}
+
+void DataBase::Drain() {
+    while (IsOpened()) {
+        {
+            std::scoped_lock lk{submit_mutex};
+            if (!num_requests) {
+                return;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
 }
 
 void DataBase::FinishPreload() {

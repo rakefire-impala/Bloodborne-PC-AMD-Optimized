@@ -1,6 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <string_view>
+
+#include "common/hash.h"
 #include "common/serdes.h"
 #include "core/emulator_settings.h"
 #include "shader_recompiler/frontend/fetch_shader.h"
@@ -261,6 +268,14 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
         Storage::DataBase::Instance().Load(Storage::BlobType::ShaderMeta,
                                            fmt::format("{:#018x}", hash), meta_blob);
         if (meta_blob.empty()) {
+            // bbport: the cache lost this stage, so the key never builds; a pre-build deletes
+            // it (a new permutation could take the index and pair with the old key's stages).
+            if (std::getenv("BB_PREBUILD_SHADERS")) {
+                unbuildable_keys.push_back(fmt::format(
+                    "g_{:#018x}", std::hash<GraphicsPipelineKey>{}(sel.graphics_key)));
+            }
+            sel.infos.fill(nullptr);
+            sel.modules.fill(nullptr);
             return false;
         }
 
@@ -296,7 +311,149 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
         graphics_pipelines.erase(it);
         return false;
     }
+    if (sel.graphics_key.motion_vectors == 1) {
+        preloaded_motion.emplace_back(sel.graphics_key, std::move(sdata));
+    }
     return true;
+}
+
+// bbport: the plain permutation of one stage of a motion pipeline: the program's module whose
+// specialization is the motion one without the motion flags (GetStillTwin's runtime infos).
+// Permutations no loaded key uses are read from the cache.
+bool PipelineCache::PlainPermutation(Program& program, u32 stage, size_t motion_hash,
+                                     size_t& plain_hash, vk::ShaderModule& module,
+                                     Shader::RuntimeInfo& runtime_info) {
+    const u64 pgm_hash = program.info.pgm_hash;
+    std::optional<Shader::StageSpecialization> plain;
+    for (size_t idx = 0; idx < program.modules.size(); ++idx) {
+        if (program.modules[idx].module && HashCombine(pgm_hash, idx) == motion_hash) {
+            plain = program.modules[idx].spec;
+            break;
+        }
+    }
+    if (!plain) {
+        return false;
+    }
+    if (stage == u32(Shader::SwStage::Vertex)) {
+        plain->runtime_info.hw.vs.motion_vectors = false;
+    } else if (stage == u32(Shader::SwStage::Fragment)) {
+        plain->runtime_info.hw.fs.motion_vectors = 0;
+    }
+    const auto find = [&]() -> bool {
+        for (size_t idx = 0; idx < program.modules.size(); ++idx) {
+            if (program.modules[idx].module && program.modules[idx].spec == *plain) {
+                plain_hash = HashCombine(pgm_hash, idx);
+                module = program.modules[idx].module;
+                runtime_info = program.modules[idx].spec.runtime_info;
+                return true;
+            }
+        }
+        return false;
+    };
+    if (find()) {
+        return true;
+    }
+    auto& storage = Storage::DataBase::Instance();
+    for (size_t idx = 0, missing = 0; idx < 64 && missing < 8; ++idx) {
+        if (idx < program.modules.size() && program.modules[idx].module) {
+            continue;
+        }
+        std::vector<u8> meta_blob;
+        storage.Load(Storage::BlobType::ShaderMeta,
+                     fmt::format("{:#018x}", HashCombine(pgm_hash, idx)), meta_blob);
+        if (meta_blob.empty()) {
+            missing += idx >= program.modules.size();
+            continue;
+        }
+        Serialization::Archive meta_ar{std::move(meta_blob)};
+        LoadPipelineStage(meta_ar, stage);
+    }
+    sel.infos.fill(nullptr);
+    sel.modules.fill(nullptr);
+    sel.fetch_shader.reset();
+    return find();
+}
+
+// bbport: still twins (GetStillTwin) of the motion pipelines the warm-up loaded. A twin is the
+// motion key with the plain permutations of its stages; twins in the cache are linked here, so
+// a motion pipeline's first draw needs no full selection. With `build` (BB_PREBUILD_SHADERS,
+// the launcher's "Pre-build shaders") the missing ones are compiled and stored too: the first
+// visit of an area then compiles none of them while playing.
+void PipelineCache::PrepareStillTwins(bool build) {
+    u32 linked = 0, built = 0, failed = 0, missing = 0, no_plain = 0;
+    const auto started = std::chrono::steady_clock::now();
+    u32 done = 0;
+    for (auto& [motion_key, sdata] : preloaded_motion) {
+        ++done;
+        const auto found = graphics_pipelines.find(motion_key);
+        if (found == graphics_pipelines.end()) {
+            continue;
+        }
+        const GraphicsPipeline* pipeline = found->second.get();
+        GraphicsPipelineKey twin_key = motion_key;
+        twin_key.motion_vectors = 2;
+        twin_key.write_masks[Shader::MotionVectors::Output] = {};
+        std::array<const Shader::Info*, MaxShaderStages> infos{};
+        std::array<vk::ShaderModule, MaxShaderStages> modules{};
+        std::array<Shader::RuntimeInfo, MaxShaderStages> runtime_infos{};
+        bool plain = true;
+        for (u32 stage = 0; stage < MaxShaderStages && plain; ++stage) {
+            if (!motion_key.stage_hashes[stage]) {
+                continue;
+            }
+            const auto program = program_cache.find(pipeline->GetStage(Shader::SwStage(stage)).pgm_hash);
+            plain = program != program_cache.end() &&
+                    PlainPermutation(*program.value(), stage, motion_key.stage_hashes[stage],
+                                     twin_key.stage_hashes[stage], modules[stage],
+                                     runtime_infos[stage]);
+            if (plain) {
+                infos[stage] = &program.value()->info;
+            }
+        }
+        if (!plain) {
+            ++no_plain;
+            continue;
+        }
+        if (const auto twin = graphics_pipelines.find(twin_key); twin != graphics_pipelines.end()) {
+            pipeline->SetStillTwin(twin->second.get());
+            ++linked;
+            continue;
+        }
+        if (!build) {
+            ++missing;
+            continue;
+        }
+        auto twin_sdata = sdata;
+        auto twin = std::make_unique<GraphicsPipeline>(
+            instance, scheduler, desc_heap, profile, twin_key, *pipeline_cache, infos,
+            runtime_infos, pipeline->GetFetchShader(), modules, twin_sdata, true);
+        if (!twin->Handle()) {
+            ++failed;
+            continue;
+        }
+        RegisterPipelineData(twin_key, std::hash<GraphicsPipelineKey>{}(twin_key), twin_sdata);
+        pipeline->SetStillTwin(twin.get());
+        graphics_pipelines.emplace(twin_key, std::move(twin));
+        ++num_new_pipelines;
+        if (++built % 50 == 0) {
+            std::printf("Shader pre-build: %u still twins built (%u of %zu motion pipelines)\n",
+                        built, done, preloaded_motion.size());
+            std::fflush(stdout);
+        }
+    }
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    if (build) {
+        std::printf("Shader pre-build: %zu motion pipelines; still twins %u built now, %u already "
+                    "cached, %u failed, %u without cached plain shaders (built in play); %.1f s\n",
+                    preloaded_motion.size(), built, linked, failed, no_plain, seconds);
+    } else if (!preloaded_motion.empty()) {
+        std::printf("Still twins: %u of %zu motion pipelines linked from the cache, %u build in "
+                    "play (Pre-build shaders builds them before)\n",
+                    linked, preloaded_motion.size(), missing + no_plain);
+    }
+    preloaded_motion.clear();
+    preloaded_motion.shrink_to_fit();
 }
 
 bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) {
@@ -434,7 +591,31 @@ void PipelineCache::WarmUp() {
                     num_total_pipelines - num_pipelines);
     }
 
+    // bbport: BB_PREBUILD_SHADERS=1 builds the pipelines the cache can derive before the game
+    // starts (still twins) and deletes keys whose shaders are gone; =only ends the run then.
+    const char* prebuild = std::getenv("BB_PREBUILD_SHADERS");
+    const bool build = prebuild && prebuild[0] && prebuild[0] != '0';
+    PrepareStillTwins(build);
+    if (build) {
+        auto& storage = Storage::DataBase::Instance();
+        for (const auto& name : unbuildable_keys) {
+            storage.Remove(Storage::BlobType::PipelineKey, name);
+        }
+        std::printf("Shader pre-build: %zu cached pipelines on %s; %u preloaded, %zu keys "
+                    "removed (their shaders are no longer cached)\n",
+                    size_t(num_total_pipelines), std::string{instance.GetModelName()}.c_str(),
+                    num_pipelines, unbuildable_keys.size());
+        unbuildable_keys.clear();
+    }
+
     Storage::DataBase::Instance().FinishPreload();
+
+    if (build && std::string_view{prebuild} == "only") {
+        Storage::DataBase::Instance().Drain();
+        std::printf("Shader pre-build: done\n");
+        std::fflush(stdout);
+        std::_Exit(0);
+    }
 }
 
 void PipelineCache::Sync() {

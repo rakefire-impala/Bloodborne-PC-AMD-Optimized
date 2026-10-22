@@ -51,6 +51,9 @@ public:
     /// bbport: deletes a stored blob (a pipeline key that no longer builds), during the warm-up
     /// once it ends (ForEachBlob holds the file open). Not for the archived cache.
     void Remove(BlobType type, const std::string& name);
+    /// bbport: waits until every queued write is on disk (a run that ends right after the
+    /// warm-up: BB_PREBUILD_SHADERS=only).
+    void Drain();
 
     void ForEachBlob(BlobType type, const std::function<void(std::vector<u8>&& data)>& func);
 

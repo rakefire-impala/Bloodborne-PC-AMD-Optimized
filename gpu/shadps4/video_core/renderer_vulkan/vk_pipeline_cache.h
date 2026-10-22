@@ -184,6 +184,12 @@ private:
         return num_new_pipelines > 0;
     }
 
+    /// bbport: links (and with `build`, builds) the still twins of the motion pipelines the
+    /// warm-up loaded (vk_pipeline_serialization.cpp).
+    void PrepareStillTwins(bool build);
+    bool PlainPermutation(Program& program, u32 stage, size_t motion_hash, size_t& plain_hash,
+                          vk::ShaderModule& module, Shader::RuntimeInfo& runtime_info);
+
 private:
     const Instance& instance;
     Scheduler& scheduler;
@@ -203,6 +209,11 @@ private:
     PipelineSelection sel{}; ///< GPU thread selection state
     ComputePipelineKey compute_key{};
     u32 num_new_pipelines{}; // new pipelines added to the cache since the game start
+    /// bbport: the warm-up's motion pipeline keys with their vertex inputs (PrepareStillTwins).
+    std::vector<std::pair<GraphicsPipelineKey, GraphicsPipeline::SerializationSupport>>
+        preloaded_motion;
+    /// bbport: with BB_PREBUILD_SHADERS, the keys whose shaders the cache no longer has.
+    std::vector<std::string> unbuildable_keys;
 
     // Only if Config::collectShadersForDebug()
     tsl::robin_map<vk::ShaderModule,

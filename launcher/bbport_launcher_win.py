@@ -191,7 +191,8 @@ APP_DEFAULTS = {'ui_language': '', 'game_dir': str(PORT_DIR.parent / 'CUSA03173'
                 'vk_validation': False, 'developer_profile': False, 'extra_env': '', 'close_on_play': False,
                 'check_updates': True, 'sacrifice_made': False, 'online': False, 'online_server': 'srv.shadps4.net:31313',
                 'online_webapi': '', 'online_npid': '', 'online_password': '', 'online_upnp': True,
-                'online_community': COMMUNITY_SERVER, 'gpu': '', 'igpu_mode': False, 'gpu_profiles': {}}
+                'online_community': COMMUNITY_SERVER, 'gpu': '', 'igpu_mode': False, 'gpu_profiles': {},
+                'prebuild_shaders': True}
 MENU_DEFAULTS = {'menu_language': 'en', 'window_mode': 'launcher', 'borderless_vsync': '0',
                  'dlss_preset': 'default', 'xess_preset': '2', 'show_fps': '1', 'show_dlss_preset': '0',
                  'show_resolution': '0', 'show_frame_generation': '0', 'show_latency': '0',
@@ -566,6 +567,10 @@ def game_environment(s):
     env['BB_LANGUAGE'] = s['language']
     if str(s.get('gpu', '')).strip():
         env['BB_GPU'] = str(s['gpu']).strip()
+    # Pipelines the shader cache can derive (motion pipelines' still twins) are built before
+    # the game starts, for this GPU's own cache, instead of on the first visit of each area.
+    if s.get('prebuild_shaders', True):
+        env['BB_PREBUILD_SHADERS'] = '1'
     if str(s['player_name']).strip():
         env['BB_USER_NAME'] = str(s['player_name']).strip()
     env['BB_FULLSCREEN'] = '1' if s['fullscreen'] else '0'
@@ -1619,6 +1624,21 @@ class Launcher:
         self.igpu_button(holder).pack(side='left')
         ttk.Button(holder, text=_('Restore its defaults', 'Вернуть его настройки по умолчанию'),
                    command=self.reset_igpu_profile).pack(side='left', padx=(6, 0))
+        self.check(f, 'prebuild_shaders', 'app', _('Pre-build shaders before playing',
+                                                   'Собирать шейдеры перед игрой'),
+                   _("Builds the shaders this graphics card's cache can derive before the game starts "
+                     '(the plain versions of the motion-vector pipelines), instead of compiling them with '
+                     'a short stutter on the first visit of each area. Each GPU has its own cache; keys '
+                     'whose shaders are gone are removed. Pre-build now does it for the selected card '
+                     'without playing (the game window opens briefly).',
+                     'Собирает шейдеры, которые можно вывести из кэша этой видеокарты, до запуска игры '
+                     '(обычные версии конвейеров с векторами движения), а не компилирует их с короткой '
+                     'заминкой при первом посещении каждой области. У каждой GPU свой кэш; ключи, чьих '
+                     'шейдеров больше нет, удаляются. «Собрать сейчас» делает это для выбранной карты без '
+                     'игры (окно игры ненадолго откроется).'))
+        self.prebuild_button = ttk.Button(f, text=_('Pre-build now', 'Собрать сейчас'),
+                                          command=lambda: self.play(prebuild_only=True))
+        self.prebuild_button.grid(row=self.next_row(f), column=0, sticky='w', padx=(26, 0), pady=(4, 0))
         self.row(f, _('Integrated GPU mode', 'Режим встроенной графики'), holder,
                  _('One switch for the integrated GPU: it selects it and sets the fastest options for it — '
                    'FSR 3.1 Performance to a 1280 × 720 output scaled to your screen (FSR costs a third of '
@@ -2424,7 +2444,7 @@ class Launcher:
                 {'enabled': sorted(enabled), 'disabled': sorted(disabled)}, indent=2), encoding='utf-8')
 
     # ---- game process ------------------------------------------------------------------------
-    def play(self):
+    def play(self, prebuild_only=False):
         if self.process:
             return
         online, npid = self.var('online', 'app'), self.var('online_npid', 'app')
@@ -2452,7 +2472,11 @@ class Launcher:
         diagnostic = None
         try:
             diagnostic = DiagnosticSession(settings)
-            self.process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=diagnostic.environment(game_environment(settings)),
+            env = game_environment(settings)
+            if prebuild_only:
+                # The shader warm-up, then the run ends (BB_PREBUILD_SHADERS=only), in a window.
+                env.update(BB_PREBUILD_SHADERS='only', BB_FULLSCREEN='0', BB_LAUNCHER_WINDOW_MODE='windowed')
+            self.process = subprocess.Popen(run_command(), cwd=PORT_DIR, env=diagnostic.environment(env),
                                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                             stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
         except OSError as error:
@@ -2468,6 +2492,10 @@ class Launcher:
         threading.Thread(target=self.read_output, args=(self.process, settings, diagnostic), daemon=False).start()
         self.play_button.configure(state='disabled')
         self.stop_button.configure(state='normal')
+        if prebuild_only:
+            self.status.configure(text=_('Pre-building shaders for the selected graphics card…',
+                                         'Сборка шейдеров для выбранной видеокарты…'), fg=GOLD)
+            return
         self.status.configure(text=_('Preparing the game; it opens in its own window…',
                                      'Подготовка игры; она откроется в своём окне…'), fg=GOLD)
         if self.app.get('close_on_play'):
@@ -2496,8 +2524,17 @@ class Launcher:
                     self.stop_button.configure(state='disabled')
                     self.refresh_menu_settings()
                     self.refresh_status()
+                    summary, self.prebuild_summary = getattr(self, 'prebuild_summary', None), None
+                    if summary:  # a pre-build run: its result stays shown
+                        self.status.configure(text=summary, fg=GOLD)
                 else:
-                    if 'Entering original x86-64 code' in item:
+                    if 'Shader pre-build:' in item:
+                        line = item.strip().split('Shader pre-build: ', 1)[-1]
+                        if 'still twins' in line:
+                            self.prebuild_summary = _('Shaders pre-built: {}',
+                                                      'Шейдеры собраны: {}').format(line[:150])
+                        self.status.configure(text=line[:160], fg=GOLD)
+                    elif 'Entering original x86-64 code' in item:
                         self.status.configure(text=_('The game is running.', 'Игра запущена.'), fg=GOLD)
                     elif 'restarting through run.py' in item:
                         self.status.configure(text=_('Restarting with the new settings…', 'Перезапуск с новыми настройками…'), fg=GOLD)
