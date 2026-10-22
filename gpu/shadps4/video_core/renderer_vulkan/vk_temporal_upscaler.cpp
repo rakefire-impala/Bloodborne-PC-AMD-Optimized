@@ -1872,7 +1872,15 @@ void TemporalUpscaler::RunScaled() {
         if (const int dump = DumpFrame(); dump >= 0) {
             DumpImages(instance, scheduler, cmdbuf, dump,
                        {{vk::Image(ui_image), ow, oh, 4, "fsr_out", "rgba"},
-                        {color_image, source_width, source_height, 4, "input", "rgba"}});
+                        {color_image, source_width, source_height, 4, "input", "rgba"},
+                        {vk::Image(motion_image), w, h, 4, "motion", "rg16f"}});
+            DumpImages(instance, scheduler, cmdbuf, dump,
+                       {{depth_image, source_width, source_height, 4, "depth", "f32",
+                         vk::ImageAspectFlagBits::eDepth}});
+            if (const auto object = camera_motion.ObjectMotionImage(w, h); object) {
+                DumpImages(instance, scheduler, cmdbuf, dump,
+                           {{object, w, h, 8, "objects", "rg32ui"}});
+            }
         }
         CopyHudless(cmdbuf, ow, oh);
     }
