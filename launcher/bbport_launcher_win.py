@@ -790,7 +790,7 @@ class Launcher:
         self.ui_calls = queue.Queue()  # work for the Tk thread from helper threads
         self.mod_order, self.mod_vars, self.patch_vars = [], {}, {}
         self.gpus, self.gpu_boxes, self.igpu_buttons = [], [], []  # detect_gpu fills the list
-        root.title('Bloodborne: Optimized for mobile discrete AMD systems — rakefire impala')
+        root.title('Bloodborne: Optimized for AMD')
         root.configure(bg=BG)
         self.dpi = root.winfo_fpixels('1i') / 96.0
         root.geometry(f'{self.px(1120)}x{self.px(740)}')
@@ -810,12 +810,12 @@ class Launcher:
 
     # (readbacks, depth of field + motion blur on, or None to keep them)
     SACRIFICES = [
-        ('0', False, ('Forsake the haze',
-                      'GPU Readbacks set to Off (recommended): depth of field and motion blur off.\n'
+        ('0', False, ('Forsake the haze (recommended)',
+                      'GPU Readbacks set to Off: depth of field and motion blur off.\n'
                       'You maintain performance, efficiency, and practicality. '
                       'However, the dream will lose its blur...',
-                      'Отречься от дымки',
-                      'Чтение GPU выключено (рекомендуется): глубина резкости и размытие выкл.\n'
+                      'Отречься от дымки (рекомендуется)',
+                      'Чтение GPU выключено: глубина резкости и размытие выкл.\n'
                       'Вы сохраняете производительность, экономичностью и практичностью. '
                       'Однако сон потеряет своё размытие...')),
         ('', True, ('Walk the slow path',
@@ -1342,12 +1342,12 @@ class Launcher:
         side.pack_propagate(False)
         self.side = side
         brand_width = self.px(184)
-        self.brand_title = tk.Label(side, text='Bloodborne -\nOptimized for mobile\ndiscrete AMD systems',
+        self.brand_title = tk.Label(side, text='Bloodborne:\nOptimized for AMD',
                                    bg=BG, fg=GOLD, font=('Georgia', 13),
                                    anchor='w', justify='left', wraplength=brand_width, bd=0, padx=0)
         self.brand_title.pack(fill='x', padx=self.px(18), pady=(self.px(12), self.px(4)))
-        self.brand_author = tk.Label(side, text='by rakefire impala', bg=BG, fg=TEXT,
-                                    font=('Segoe UI', 10), anchor='w', bd=0, padx=0)
+        self.brand_author = tk.Label(side, text='by rakefire impala, with love <3', bg=BG, fg=TEXT,
+                                    font=('Segoe UI', 9), anchor='w', bd=0, padx=0)
         self.brand_author.pack(fill='x', padx=self.px(18))
         self.brand_origin = tk.Label(side, text='Native CPU Windows port with GPU\ncode borrowed and edited '
                                                'from\nShadPS4\'s work. This is a fork of\nTatsuna Kyo\'s '
@@ -1592,13 +1592,13 @@ class Launcher:
         compact = h < self.px(160)
         x = self.px(26)
         if not compact:
-            c.create_text(x, self.px(26), text='by rakefire impala', anchor='w',
+            c.create_text(x, self.px(26), text='by rakefire impala, with love <3', anchor='w',
                           fill=GOLD, font=('Georgia', 11, 'italic'), tags='workshop-type')
         title_y = self.px(8) if compact else self.px(62)
         c.create_text(x, title_y, text='BLOODBORNE', anchor='nw', fill=TEXT,
                       font=('Georgia', 17 if compact else 26), tags='workshop-type')
         c.create_text(x, title_y+self.px(31 if compact else 43),
-                      text='Optimized for mobile discrete AMD systems',
+                      text='Optimized for AMD',
                       anchor='nw', fill=GOLD, font=('Georgia', 12 if compact else 18), tags='workshop-type')
         c.create_line(x, h-self.px(29), w-self.px(26), h-self.px(29), fill=LINE)
         info = game_info(self.var('game_dir', 'app').get())

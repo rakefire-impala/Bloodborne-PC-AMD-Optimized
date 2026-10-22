@@ -915,10 +915,8 @@ void Menu() {
     ImGui::PushFont(nullptr, 18.0f * scale / base_scale);
     bool keep_open = true;
     // Language-independent IDs also preserve the selected tab when the language changes.
-    if (!ImGui::Begin(Text("Bloodborne - Optimized for mobile discrete AMD systems: settings"
-                           "###bbport_settings",
-                           "Bloodborne - Optimized for mobile discrete AMD systems: настройки"
-                           "###bbport_settings"), &keep_open,
+    if (!ImGui::Begin(Text("Bloodborne: Optimized for AMD - settings###bbport_settings",
+                           "Bloodborne: Optimized for AMD - настройки###bbport_settings"), &keep_open,
                       ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar |
                       ImGuiWindowFlags_NoScrollWithMouse)) {
         ImGui::End();
@@ -944,8 +942,8 @@ void Menu() {
     ImGui::Dummy(ImVec2(38.0f * scale, 40.0f * scale));
     ImGui::SameLine();
     ImGui::BeginGroup();
-    ImGui::TextColored(ImVec4(0.84f, 0.76f, 0.63f, 1.0f),
-                       "Bloodborne - Optimized for mobile discrete AMD systems");
+    ImGui::TextColored(ImVec4(0.84f, 0.76f, 0.63f, 1.0f), "Bloodborne: Optimized for AMD");
+    ImGui::TextDisabled("by rakefire impala, with love <3");
     const float fps = DisplayFps();
     if (const float real = RealFps(); real > 0.0f)
         ImGui::TextDisabled(Text("%.0f FPS  |  %.0f real + %.0f generated  |  %.1f ms",
