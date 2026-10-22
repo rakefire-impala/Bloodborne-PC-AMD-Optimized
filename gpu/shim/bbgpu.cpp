@@ -6,6 +6,8 @@
 #include "bbport_copy.h"
 #ifndef _WIN32
 #include <sys/resource.h>
+#else
+#include <windows.h>
 #endif
 #include "bbport_toggles.h"
 #include <algorithm>
@@ -254,6 +256,13 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
         }
         LOG_INFO(Frontend, "Window closed by user");
         std::fflush(stdout);
+#ifdef _WIN32
+        // bbport: TerminateProcess, as the restart does (probe.c), not std::_Exit: that is
+        // ExitProcess, which stops the other threads wherever they are and then runs every DLL's
+        // shutdown without them. Closed mid-frame, the process then hung with one thread left,
+        // not killable, its VRAM (2 GiB) held and the exe locked for ~25 min (RX 5500M).
+        TerminateProcess(GetCurrentProcess(), 0);
+#endif
         std::_Exit(0);
     });
     g_window_thread.detach();
