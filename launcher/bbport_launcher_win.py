@@ -1965,6 +1965,15 @@ class Launcher:
                                  'go through a shadNet server.'))
         self.check(f, 'online', 'app', _('Play online'),
                    _('Off: the game stays offline, as before.'))
+        self.note(f, _('⚠ Disclaimer: the public shadNet server (srv.shadps4.net) currently accepts only official '
+                       'shadPS4 builds and refuses this port: it signs you out about 15 seconds after you log in, '
+                       'and the game then turns online features off for that session. Online play needs a shadNet '
+                       'server that accepts this port. This port is not affiliated with shadPS4, shadNet or '
+                       "The Hunter's Dream.",
+                       '⚠ Важно: публичный сервер shadNet (srv.shadps4.net) сейчас принимает только официальные '
+                       'сборки shadPS4 и отклоняет этот порт: он выходит из аккаунта примерно через 15 секунд после '
+                       'входа, и игра отключает онлайн до конца сеанса. Для онлайна нужен сервер shadNet, который '
+                       'принимает этот порт. Порт не связан с shadPS4, shadNet и The Hunter\'s Dream.'), top=8)
         for key in ('online', 'online_npid', 'online_password'):
             self.var(key, 'app').trace_add('write', lambda *_a: self.refresh_status())
         self.section(f, _('Game server (messages, bloodstains, ghosts)'))
