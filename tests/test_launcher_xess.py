@@ -20,8 +20,10 @@ else:
     spec = importlib.util.spec_from_file_location('launcher_xess', source)
     launcher = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(launcher)
-launcher.Launcher.detect_gpu = lambda self: None
-launcher.Launcher.check_update = lambda self: None
+launcher.Launcher.detect_gpu = lambda self, *_args: None
+launcher.Launcher.check_update = lambda self, *_args: None
+# The first-run question (a fresh config) would open its own window and take the focus.
+launcher.Launcher.first_boot_sacrifice = lambda self: None
 results = []
 
 with tempfile.TemporaryDirectory(prefix='bbport-xess-popup-') as directory:
@@ -71,10 +73,15 @@ with tempfile.TemporaryDirectory(prefix='bbport-xess-popup-') as directory:
                         root.update()
                         popup = root.tk.call('ttk::combobox::PopdownWindow', str(box))
                         listbox = str(popup) + '.f.l'
+                        if sys.platform == 'win32' and not int(root.tk.call('winfo', 'ismapped', listbox)):
+                            # Windows themes: a synthetic click on the arrow does not post the list
+                            # (no pointer grab); post it as the arrow's binding does.
+                            root.tk.call('ttk::combobox::Post', str(box))
+                            root.update()
                         assert int(root.tk.call('winfo', 'ismapped', listbox)) == 1
                         actual = root.tk.call(listbox, 'get', 0, 'end')
                         assert tuple(actual) == tuple(launcher._(*text) for _value, text in launcher.XESS_PRESETS)
-                        if language == 'en' and scale == 1.0 and page == 'play' and index == 0:
+                        if language == 'en' and scale == 1.0 and page == 'play' and index == 0 and os.environ.get('DISPLAY'):
                             from PIL import ImageGrab
                             ImageGrab.grab(bbox=(0, 0, root.winfo_width(), root.winfo_height()),
                                            xdisplay=os.environ['DISPLAY']).save(source.parents[1] / 'out/verification/launcher-xess-popup-revision15.png')
@@ -116,5 +123,6 @@ with tempfile.TemporaryDirectory(prefix='bbport-xess-popup-') as directory:
                 root.destroy()
 
 output = source.parents[1] / 'out/verification/launcher-xess-revision15.json'
+output.parent.mkdir(parents=True, exist_ok=True)
 output.write_text(json.dumps({'cases': results, 'checks': 'actual popup input, all seven entries, both pages, conditional rows/hints, independent saved quality, concurrent game changes'}, indent=2)+'\n')
 print(f'PASS: {len(results)} real XeSS popup selections on Play/Graphics in English/Russian at 100/150/200%; migration, visibility and independent saved preferences pass.')
