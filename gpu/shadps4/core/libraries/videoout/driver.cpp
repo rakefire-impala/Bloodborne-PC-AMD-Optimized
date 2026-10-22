@@ -675,6 +675,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
 
     Common::SetCurrentThreadName("shadPS4:PresentThread");
     Common::SetCurrentThreadRealtime(vblank_period);
+    BbSampler::RegisterThread("present");
 
     Common::AccurateTimer timer{vblank_period};
 

@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -200,8 +201,9 @@ bool Enabled() {
 
 void RegisterThread(const char* name) {
 #ifdef _WIN32
+    // Registered also without BB_HITCH_PROFILE, for DumpStacks; sampled only with it.
     thread_local bool registered = false;
-    if (!Enabled() || registered) {
+    if (registered) {
         return;
     }
     registered = true;
@@ -213,17 +215,64 @@ void RegisterThread(const char* name) {
     }
     Thread& thread = threads[index];
     thread.name = name;
-    thread.ring.resize(RingSize);
+    if (Enabled()) {
+        thread.ring.resize(RingSize);
+    }
     DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &thread.handle,
                     THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE,
                     0);
     thread_count.store(index + 1, std::memory_order_release);
+    if (!Enabled()) {
+        return;
+    }
     std::printf("Hitch profile: sampling thread %s\n", name);
     if (index == 0) {
         std::thread{Run}.detach();
     }
 #else
     (void)name;
+#endif
+}
+
+void DumpStacks() {
+#ifdef _WIN32
+    for (unsigned t = 0; t < thread_count.load(std::memory_order_acquire); ++t) {
+        Thread& thread = threads[t];
+        std::uint64_t frames[MaxDepth];
+        unsigned depth = 0;
+        if (SuspendThread(thread.handle) == DWORD(-1)) {
+            continue;
+        }
+        CONTEXT context{};
+        context.ContextFlags = CONTEXT_FULL;
+        if (GetThreadContext(thread.handle, &context)) {
+            depth = Unwind(context, frames);
+        }
+        ResumeThread(thread.handle);
+        std::printf("Stack of %s:", thread.name);
+        for (unsigned d = 0; d < depth; ++d) {
+            // This image's frames as image addresses (llvm-symbolizer); others (the driver,
+            // ntdll) as module+offset.
+            HMODULE module = nullptr;
+            char path[MAX_PATH] = "?";
+            GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                   GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCSTR>(frames[d]), &module);
+            if (module == reinterpret_cast<HMODULE>(&__ImageBase)) {
+                std::printf(" 0x%llx", static_cast<unsigned long long>(ImageAddress(frames[d])));
+                continue;
+            }
+            if (module) {
+                GetModuleFileNameA(module, path, MAX_PATH);
+            }
+            const char* slash = std::strrchr(path, '\\');
+            std::printf(" %s+0x%llx", slash ? slash + 1 : path,
+                        static_cast<unsigned long long>(
+                            frames[d] - reinterpret_cast<std::uintptr_t>(module)));
+        }
+        std::printf("\n");
+    }
+    std::fflush(stdout);
 #endif
 }
 

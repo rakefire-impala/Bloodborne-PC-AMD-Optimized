@@ -102,7 +102,7 @@ public:
     void Invalidate();
     void Reset();
     /// bbport: VRAM nearly exhausted (Presenter's guard): frame generation steps aside and
-    /// releases its context and input copies until there is room again.
+    /// keeps its memory (freeing it at the budget blocks in the driver) until there is room.
     void SetVramPaused(bool paused) {
         vram_paused.store(paused, std::memory_order_relaxed);
     }

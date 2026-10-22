@@ -16,6 +16,10 @@ bool Enabled();
 /// The calling thread is sampled from now on (once per thread; `name` must outlive it).
 void RegisterThread(const char* name);
 
+/// Prints where each registered thread is now (any time, also without BB_HITCH_PROFILE): for
+/// the freeze watchdog.
+void DumpStacks();
+
 /// A slow frame spanned [start, end]: its samples are printed by the sampler thread.
 void ReportWindow(std::chrono::steady_clock::time_point start,
                   std::chrono::steady_clock::time_point end, double frame_ms);

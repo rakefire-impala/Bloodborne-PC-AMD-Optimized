@@ -1146,10 +1146,13 @@ void Presenter::GuardFgVram() {
         fg_vram_full_checks = fg_vram_clear_checks = 0;
         return;
     }
-    if (++fg_vram_frames < 30) {
+    // Every 0.5 s, not every N frames: paging makes frames slow (1.6 s each with another
+    // process holding 900 MiB), and 30 frames then took long enough that FG never paused.
+    const auto now = std::chrono::steady_clock::now();
+    if (now - fg_vram_checked < std::chrono::milliseconds(500)) {
         return;
     }
-    fg_vram_frames = 0;
+    fg_vram_checked = now;
     const u64 budget = instance.GetDeviceMemoryBudgetNow();
     const u64 usage = instance.GetDeviceMemoryUsage();
     if (!budget) {
@@ -1157,7 +1160,7 @@ void Presenter::GuardFgVram() {
     }
     constexpr u64 MiB = 1ull << 20;
     if (!frame_generation->VramPaused()) {
-        // Three checks in a row (~1.5 s at 60 FPS) above 95% of the budget
+        // Three checks in a row (1.5 s) above 95% of the budget
         // (BB_FG_VRAM_PAUSE_PERCENT, for testing the pause).
         static const u64 percent = [] {
             const char* env = std::getenv("BB_FG_VRAM_PAUSE_PERCENT");
@@ -1208,6 +1211,10 @@ void Presenter::Generate(Frame* frame, vk::CommandBuffer cmdbuf) {
     frame->generated = frame_generation->Record(cmdbuf, frame->frame_generation);
     if (frame->frame_generation) FgTimestamp(cmdbuf, true);
     frame_generation->Submitted(draw_scheduler.CurrentTick());
+    if (frame_generation->VramPaused()) {
+        // Paused for VRAM: the frame and its snapshot keep their images (FrameGeneration::Record).
+        return;
+    }
     if (!frame->frame_generation && frame->generated_image) {
         // Frame generation is off: its copy of this frame goes (the frame is reused only after
         // its present_done, so nothing uses it).
@@ -1452,16 +1459,39 @@ Frame* Presenter::GetRenderFrame() {
     vk::Result result{};
 
     const auto wait = [&]() {
-        result = device.waitForFences(frame->present_done, false, std::numeric_limits<u64>::max());
+        result = device.waitForFences(frame->present_done, false, 2'000'000'000ull);
         return result;
     };
 
     // Wait for the presentation to be finished so all frame resources are free
+    u32 timeouts = 0;
     while (wait() != vk::Result::eSuccess) {
         ASSERT_MSG(result != vk::Result::eErrorDeviceLost,
                    "Device lost during waiting for a frame");
         // Retry if the waiting times out
         if (result == vk::Result::eTimeout) {
+            // bbport: which part of the frame's presentation has not finished (a 16 s freeze in
+            // exclusive fullscreen on Oct 21 waited here, until an alt-tab).
+            if (++timeouts == 1 || timeouts % 5 == 0) {
+                const auto counter = [&](vk::Semaphore semaphore) {
+                    return semaphore ? u64(Check(device.getSemaphoreCounterValue(semaphore))) : 0ull;
+                };
+                std::printf("Presenter: frame %d not presented after %u s; window %ux%u, %s; "
+                            "draw GPU tick %llu of %llu (frame ready at %llu); present GPU tick "
+                            "%llu of %llu; compute present %llu of %llu; swapchain %ux%u\n",
+                            int(frame - present_frames.data()), timeouts * 2, window.GetWidth(),
+                            window.GetHeight(),
+                            BbSettings::Get().window_focused ? "focused" : "not focused",
+                            (unsigned long long)counter(draw_scheduler.GetWorkSemaphore()->Handle()),
+                            (unsigned long long)draw_scheduler.CurrentTick(),
+                            (unsigned long long)frame->ready_tick,
+                            (unsigned long long)counter(present_scheduler.GetWorkSemaphore()->Handle()),
+                            (unsigned long long)present_scheduler.CurrentTick(),
+                            (unsigned long long)counter(*compute_present.timeline),
+                            (unsigned long long)compute_present.tick, swapchain.GetWidth(),
+                            swapchain.GetHeight());
+                std::fflush(stdout);
+            }
             continue;
         }
     }

@@ -105,6 +105,9 @@ void FrameGeneration::Capture(vk::CommandBuffer cmdbuf, const FrameGenerationSou
                               vk::ImageView color_view, u32 w, u32 h, vk::Format format,
                               std::shared_ptr<Snapshot>& snapshot) {
     auto& settings=BbSettings::Get();
+    // bbport: paused for VRAM: no copies, but the snapshot keeps its images (freeing memory at
+    // the budget blocked in the driver for seconds; see Record).
+    if (settings.frame_generation==BbSettings::FrameGenerationFsr && VramPaused()) return;
     const bool nvidia=settings.frame_generation==BbSettings::FrameGenerationNvidia;
     const bool sdr_unorm=format==vk::Format::eR8G8B8A8Unorm || format==vk::Format::eB8G8R8A8Unorm;
     const bool hdr=format==vk::Format::eA2B10G10R10UnormPack32 || format==vk::Format::eA2R10G10B10UnormPack32;
@@ -114,7 +117,6 @@ void FrameGeneration::Capture(vk::CommandBuffer cmdbuf, const FrameGenerationSou
     if (settings.frame_generation == BbSettings::FrameGenerationOff ||
         settings.upscaler==BbSettings::UpscalerOff ||
         (settings.frame_generation==BbSettings::FrameGenerationFsr && failed.load(std::memory_order_relaxed)) || !source.valid ||
-        VramPaused() ||
         !source.depth_view || !source.motion_view || !source.render_width || !source.render_height || !w || !h ||
         (!settings.window_focused && settings.background_mode!=BbSettings::BackgroundRun) ||
         (!hdr && format != vk::Format::eB8G8R8A8Srgb && format != vk::Format::eR8G8B8A8Srgb &&
@@ -387,8 +389,10 @@ bool FrameGeneration::Record(vk::CommandBuffer cmdbuf, const std::shared_ptr<Sna
     auto& settings=BbSettings::Get();
     RetireCompleted();
     if (settings.frame_generation==BbSettings::FrameGenerationFsr && VramPaused()) {
-        // Releases the FI/OF context and the HUD history (Capture dropped the inputs).
-        if (context) Reset();
+        // Steps aside but keeps the FI/OF context (Capture makes no input copies meanwhile):
+        // destroying it at the budget froze the game, its vkFreeMemory blocked in the driver for
+        // 9-16 s while Windows paged (RX 5500M, Oct 21). Unused, Windows can page it out itself.
+        Invalidate();
         return false;
     }
     if (settings.frame_generation!=BbSettings::FrameGenerationFsr ||

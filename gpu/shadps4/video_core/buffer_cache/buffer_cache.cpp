@@ -12,6 +12,7 @@
 #include <magic_enum/magic_enum.hpp>
 #include "bbport_copy.h"
 #include "bbport_toggles.h"
+#include "bbport_sampler.h"
 #include "bbport_watchdog.h"
 #include "bbport_hitch.h"
 #include "common/alignment.h"
@@ -1709,6 +1710,9 @@ void BufferCache::PrefetchLoop() {
                             static_cast<long long>(stalled),
                             BbWatch::stage.load(std::memory_order_relaxed),
                             instance.DescribeMemory().c_str());
+                // Where the stalled threads wait (a 16 s freeze on Oct 21 only showed the
+                // command processor draining the draw pipe; the recorder's wait was unknown).
+                BbSampler::DumpStacks();
                 std::fflush(stdout);
             }
             continue;
