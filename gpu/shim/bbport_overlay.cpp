@@ -217,6 +217,11 @@ float RealFps() {
     return -1.0f;
 }
 
+// bbport: the generated frames among `fps` presented when `real` of them are rendered.
+float GeneratedFps(float fps, float real) {
+    return std::max(fps-real,0.0f);
+}
+
 
 void WorkshopTheme(ImGuiStyle& style) {
     style.WindowRounding = 8.0f;
@@ -943,8 +948,9 @@ void Menu() {
                        "Bloodborne - Optimized for mobile discrete AMD systems");
     const float fps = DisplayFps();
     if (const float real = RealFps(); real > 0.0f)
-        ImGui::TextDisabled(Text("%.0f FPS  |  %.0f real  |  %.1f ms", "%.0f FPS  |  %.0f реальных  |  %.1f мс"),
-                            fps, real, fps > 0.0f ? 1000.0f / fps : 0.0f);
+        ImGui::TextDisabled(Text("%.0f FPS  |  %.0f real + %.0f generated  |  %.1f ms",
+                                 "%.0f FPS  |  %.0f реальных + %.0f сгенерированных  |  %.1f мс"),
+                            fps, real, GeneratedFps(fps, real), fps > 0.0f ? 1000.0f / fps : 0.0f);
     else
         ImGui::TextDisabled(Text("%.0f FPS  |  %.1f ms", "%.0f FPS  |  %.1f мс"),
                             fps, fps > 0.0f ? 1000.0f / fps : 0.0f);
@@ -1069,19 +1075,22 @@ void FpsCounter() {
     char line[384];
     const float fps = DisplayFps();
     const float displayed_ms=fps>0.0f ? 1000.0f/fps : 0.0f;
-    if (const float real = RealFps(); real > 0.0f && !s.show_resolution && !s.show_frame_generation &&
-                                      !s.show_latency) {
-        // Frame generation: the frames presented, and the real ones the game renders.
-        std::snprintf(line, sizeof(line), Text("%.0f FPS (%.0f real)  %.1f ms  %s",
-                                               "%.0f FPS (%.0f реальных)  %.1f мс  %s"),
-                      fps, real, displayed_ms, upscaler);
+    // Frame generation: the frames presented, then the real ones the game renders and the
+    // generated ones in parentheses ("(60+60)" in the compact lines).
+    const float real = RealFps();
+    char split[48] = "";
+    if (real > 0.0f) std::snprintf(split, sizeof(split), "(%.0f+%.0f)", real, GeneratedFps(fps, real));
+    if (real > 0.0f && !s.show_resolution && !s.show_frame_generation && !s.show_latency) {
+        std::snprintf(line, sizeof(line), Text("%.0f FPS (%.0f real + %.0f generated)  %.1f ms  %s",
+                                               "%.0f FPS (%.0f реальных + %.0f сгенерированных)  %.1f мс  %s"),
+                      fps, real, GeneratedFps(fps, real), displayed_ms, upscaler);
     } else if (s.show_resolution) {
-        std::snprintf(line, sizeof(line), "%.0ffps %.1fms %s  %dx%d>%dx%d", fps, displayed_ms, upscaler,
+        std::snprintf(line, sizeof(line), "%.0ffps%s %.1fms %s  %dx%d>%dx%d", fps, split, displayed_ms, upscaler,
                       s.active_render_width.load(), s.active_render_height.load(),
                       s.active_output_width.load(), s.active_output_height.load());
     } else {
         if (s.show_frame_generation || s.show_latency)
-            std::snprintf(line,sizeof(line),"%.0ffps %.1fms %s",fps,displayed_ms,upscaler);
+            std::snprintf(line,sizeof(line),"%.0ffps%s %.1fms %s",fps,split,displayed_ms,upscaler);
         else std::snprintf(line, sizeof(line), Text("%.0f FPS  %.1f ms  %s", "%.0f FPS  %.1f мс  %s"),
                            fps, displayed_ms, upscaler);
     }
@@ -1109,7 +1118,8 @@ void FpsCounter() {
     }
     if (s.show_resolution || s.show_frame_generation || s.show_latency) {
         // Extra fields stay on one row. Preserve the usual font unless a fit is needed.
-        const float width=s.show_frame_generation || s.show_latency ? 520.0f : 420.0f;
+        // The frame generation and latency fields (with the real+generated split) need more.
+        const float width=s.show_frame_generation || s.show_latency ? 540.0f : 420.0f;
         const float limit=std::min(width*base_scale,viewport->WorkSize.x-pad*2.0f);
         const float natural=ImGui::CalcTextSize(line).x;
         // Extra fields may need slightly more room than resolution alone.

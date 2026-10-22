@@ -702,10 +702,10 @@ int main(int argc,char** argv) {
     s.frame_generation_active=2;s.nvidia_output_fps=130;s.nvidia_real_fps=65;s.pc_latency_ms=22.3f;
     s.show_frame_generation=s.show_latency=s.show_resolution=true;
     osd=OsdFrame();OsdFrame();OsdFrame();
-    assert(osd.find("130fps")!=std::string::npos && osd.find("FG:NV2x")!=std::string::npos && osd.find("PC:22.3ms")!=std::string::npos);
+    assert(osd.find("130fps(65+65)")!=std::string::npos && osd.find("FG:NV2x")!=std::string::npos && osd.find("PC:22.3ms")!=std::string::npos);
     assert(std::count(osd.begin(),osd.end(),'\n')==original_rows);
-    if(ImGui::FindWindowByName("##fps")->Size.x>521) std::fprintf(stderr,"Expanded OSD width %.1f, font %.1f, text: %s\n",ImGui::FindWindowByName("##fps")->Size.x,ImGui::GetFontSize(),osd.c_str());
-    assert(ImGui::FindWindowByName("##fps")->Size.x<=521);
+    if(ImGui::FindWindowByName("##fps")->Size.x>541) std::fprintf(stderr,"Expanded OSD width %.1f, font %.1f, text: %s\n",ImGui::FindWindowByName("##fps")->Size.x,ImGui::GetFontSize(),osd.c_str());
+    assert(ImGui::FindWindowByName("##fps")->Size.x<=541);
     s.nvidia_output_fps=150;s.frame_generation_active=1;
     osd=OsdFrame();assert(osd.find("150fps")==std::string::npos); // Requested FG is never reported as active.
     s.pc_latency_ms=-1;osd=OsdFrame();assert(osd.find("PC:N/A")!=std::string::npos);
