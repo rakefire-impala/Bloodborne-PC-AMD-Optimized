@@ -2,12 +2,15 @@
  * library implements: a named pipe on Windows, a Unix socket elsewhere, frames of opcode,
  * length and JSON). No library or DLL: Discord not running just means no presence.
  *
- * The area is the map block the player is in (mAA_BB): the game's place-name IDs follow the
- * same numbering (2410 Central Yharnam is m24_01), and the developers' comments in
- * map/worldmsblist.worldloadlistlist agree (m27 "forest", m36 "fishing village"). On 1.09 it is
- * read from the game on its own thread (runtime_discord_poll), as the script binding
- * GetLastBlockId does. Map layouts opened are only a fallback for other executables: the game
- * also opens neighbouring maps it streams in (m27 and m24_00 from the Tomb of Oedon).
+ * The area is the place name of the floor the player stands on, as the game's area banner
+ * shows it: each floor collision of a map layout carries a place-name ID (地名.fmg: 2300 Old
+ * Yharnam, 2411 Iosefka's Clinic), and floors without one keep the last. The map block the
+ * player is in (mAA_BB; the place IDs follow its numbering, 2410 Central Yharnam is m24_01) is
+ * the fallback: a map's floors reach past the point where the game already names the next area
+ * (the way down from Cathedral Ward is Old Yharnam on screen while the floor is still m24_00).
+ * On 1.09 both are read from the game on its own thread (runtime_discord_poll). Map layouts
+ * opened are only a fallback for other executables: the game also opens neighbouring maps it
+ * streams in (m27 and m24_00 from the Tomb of Oedon).
  *
  * Boss fights: the HUD's three boss bars (EMEVD 2003[11]) are slots in the menu manager holding
  * the boss's name ID (NPC names) and character handle. A bar counts while its character has HP
@@ -61,6 +64,18 @@ static const Zone zones[] = {
     {36, -1, "Fishing Hamlet", "fishing_hamlet"},
 };
 
+/* Place names the floors give the area banner (item.msgbnd 地名.fmg, English). IDs from 90000
+ * are chalice dungeon layers and dungeons. */
+static const struct { int id; const char *name; } places[] = {
+    {2100, "Hunter's Dream"}, {2110, "Abandoned Old Workshop"}, {2200, "Hemwick Charnel Lane"},
+    {2300, "Old Yharnam"}, {2400, "Cathedral Ward"}, {2410, "Central Yharnam"},
+    {2411, "Iosefka's Clinic"}, {2420, "Upper Cathedral Ward"}, {2421, "Healing Church Workshop"},
+    {2422, "Altar of Despair"}, {2500, "Forsaken Cainhurst Castle"}, {2600, "Nightmare of Mensis"},
+    {2700, "Forbidden Woods"}, {2800, "Yahar'gul, Unseen Village"}, {3200, "Byrgenwerth"},
+    {3201, "Lecture Building"}, {3202, "Moonside Lake"}, {3300, "Nightmare Frontier"},
+    {3400, "Hunter's Nightmare"}, {3500, "Research Hall"}, {3600, "Fishing Hamlet"},
+};
+
 /* NPC names (item.msgbnd NPC名.fmg, English): the name IDs boss bars show. */
 static const struct { int id; const char *name; } npc_names[] = {
     {1000, "Madman's Escort"}, {1010, "Forgotten Madman"}, {6400, "Old Hunter Henryk"},
@@ -110,7 +125,10 @@ static pthread_mutex_t state_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct { int map, block; } loaded[MAX_BLOCKS];
 static int loaded_count;
 static uint64_t last_layout_ns;
-static const Zone *zone; /* current area, NULL before the first map */
+/* The presence's area: a place name or a zone's, with the zone image; name NULL before the
+   first map. */
+typedef struct { const char *name, *image; } Area;
+static Area zone;
 static int boss = -1;    /* name ID of the boss bar being fought, -1 when none */
 static long long fight_start;
 static int started;
@@ -124,6 +142,7 @@ enum {
     BOSS_BARS = 0x1658,
 };
 static unsigned char *game;
+static int places_ok; /* the field update's floor collision (ChrIns +0x288) checked */
 
 static uint64_t now_ns(void) {
     struct timespec t;
@@ -146,6 +165,24 @@ static const Zone *find_zone(int map, int block) {
         if (zones[i].block < 0) whole = &zones[i];
     }
     return whole;
+}
+static Area zone_area(const Zone *z) {
+    Area area = {NULL, NULL};
+    if (z) area = (Area){z->name, z->image};
+    return area;
+}
+/* A place name's area, its image the zone of map AA_BB for an ID AABC; name NULL when unknown. */
+static Area place_area(int id) {
+    if (id >= 90000) return zone_area(find_zone(29, -1));
+    for (size_t i = 0; i < sizeof(places) / sizeof(*places); ++i) {
+        if (places[i].id != id) continue;
+        const Zone *z = find_zone(id / 100, id / 10 % 10);
+        return (Area){places[i].name, z ? z->image : "bloodborne"};
+    }
+    return (Area){NULL, NULL};
+}
+static int same_area(Area a, Area b) {
+    return a.name == b.name || (a.name && b.name && !strcmp(a.name, b.name));
 }
 
 /* Called for every guest file the game opens: cheap unless it is a map layout. Only used when
@@ -187,8 +224,8 @@ void runtime_discord_note_open(const char *path) {
         snprintf(item, sizeof(item), " m%02d_%02d", loaded[i].map % 100, loaded[i].block % 100);
         strcat(list, item);
     }
-    const int changed = next && next != zone;
-    if (next) zone = next;
+    const int changed = next && !same_area(zone_area(next), zone);
+    if (next) zone = zone_area(next);
     pthread_mutex_unlock(&state_lock);
     if (changed) printf("Discord: area %s (map layouts:%s)\n", next->name, list);
 }
@@ -240,6 +277,14 @@ void runtime_discord_install(void *image, size_t size, const char *app_version) 
         return;
     }
     game = image;
+    /* The field update (0x193ac10) takes the player's block from the floor collision:
+     * mov rax,[r13+0x118]; mov r15,[rax+0x58]; mov rbx,[r14+0x288]; ...; movsx ecx,[rbx+0x2b]. */
+    static const unsigned char floor_check[] = {0x49,0x8b,0x85,0x18,0x01,0x00,0x00,0x4c,0x8b,0x78,0x58,
+                                                0x49,0x8b,0x9e,0x88,0x02,0x00,0x00,0x48,0x85,0xdb,0x74,
+                                                0x0b,0x48,0x89,0x58,0x58,0x0f,0xbe,0x4b,0x2b};
+    places_ok = size > 0x193c762 + sizeof(floor_check) &&
+                !memcmp(code + 0x193c762, floor_check, sizeof(floor_check));
+    if (!places_ok) puts("Discord: floor collision guard failed; areas from map blocks only");
 }
 
 /* The block the player is in, as GetLastBlockId reads it: 0xAABBCCDD for mAA_BB_CC_DD. */
@@ -253,6 +298,33 @@ static int player_block(int32_t *id) {
     if (!pointer_ok(entries)) return 0;
     *id = load32(entries + (uintptr_t)index * 0xa0 + 8);
     return *id != -1;
+}
+
+/* The place-name ID of the floor the player stands on in map `block`, -1 for none: the floor
+ * collision the field update uses (ChrIns +0x288; its map at +0x2c), its map layout part
+ * (+0x20; type 5 is a collision) and that part's type data (+0xb8), whose 16-bit map name ID
+ * follows the hit filter, sound space, light index and reflection height (+8; -1 on the
+ * Hunter's Dream paths, 2300 in Old Yharnam). Read with a recovery point: during a load the
+ * collision can already be freed. */
+static int player_place(uintptr_t player, int32_t block) {
+    sigjmp_buf recover;
+    if (sigsetjmp(recover, 0)) return -1;
+    runtime_fault_recover = &recover;
+    int place = -1;
+    const uintptr_t hit = load(player + 0x288);
+    if (pointer_ok(hit) && load32(hit + 0x2c) == block) {
+        const uintptr_t part = load(hit + 0x20);
+        if (pointer_ok(part) && load32(part + 0x14) == 5) {
+            const uintptr_t type_data = load(part + 0xb8);
+            if (type_data > part && type_data < part + 0x1000) {
+                int16_t id;
+                memcpy(&id, (const void *)(type_data + 8), sizeof(id));
+                place = id;
+            }
+        }
+    }
+    runtime_fault_recover = NULL;
+    return place;
 }
 
 /* The first boss bar whose character still has HP; its name ID, or -1. */
@@ -289,28 +361,44 @@ static const char *npc_name(int id) {
 void runtime_discord_poll(void) {
     static unsigned reads;
     static uint64_t left_world;
+    static int32_t named_block = -1; /* the block whose floor gave the current place name */
     if (!started || !game || ++reads % 15) return;
     const uintptr_t world = load((uintptr_t)game + WORLD_CHR_MAN);
     const int in_world = pointer_ok(world) && pointer_ok(load(world + 0x60));
     int32_t block = -1;
-    const Zone *here = NULL;
-    if (in_world && player_block(&block)) here = find_zone((block >> 24) & 0xff, (block >> 16) & 0xff);
+    int place = -1;
+    Area here = {NULL, NULL}, named = {NULL, NULL};
+    if (in_world && player_block(&block)) {
+        here = zone_area(find_zone((block >> 24) & 0xff, (block >> 16) & 0xff));
+        if (places_ok && (place = player_place(load(world + 0x60), block)) >= 0) named = place_area(place);
+    }
     const int fought = in_world ? fought_boss(world) : -1;
     const uint64_t now = now_ns();
     if (in_world) left_world = 0;
     else if (!left_world) left_world = now;
     pthread_mutex_lock(&state_lock);
-    const Zone *before = zone;
+    const Area before = zone;
     const int boss_before = boss;
-    if (here) zone = here;
-    else if (!in_world && now - left_world > MENUS_AFTER_NS) zone = NULL;
+    /* The floor's place name; a floor without one keeps the last (as the game's banner does)
+       until the player is in another block, which then names the area. */
+    if (named.name) {
+        zone = named;
+        named_block = block;
+    } else if (here.name && (block != named_block || !zone.name)) {
+        zone = here;
+        named_block = block;
+    } else if (!in_world && now - left_world > MENUS_AFTER_NS) {
+        zone = (Area){NULL, NULL};
+        named_block = -1;
+    }
     /* A second phase (another bar name) is the same fight. */
     if (fought >= 0 && boss < 0) fight_start = (long long)time(NULL);
     boss = fought;
-    const Zone *after = zone;
+    const Area after = zone;
     pthread_mutex_unlock(&state_lock);
-    if (after != before) {
-        if (after) printf("Discord: area %s (m%02d_%02d)\n", after->name, (block >> 24) & 0xff, (block >> 16) & 0xff);
+    if (!same_area(after, before)) {
+        if (after.name) printf("Discord: area %s (place %d, m%02d_%02d)\n", after.name, place,
+                               (block >> 24) & 0xff, (block >> 16) & 0xff);
         else puts("Discord: in the menus");
     }
     if (fought != boss_before) {
@@ -483,31 +571,31 @@ static void append_json_string(char *out, size_t size, const char *text) {
     }
     out[at] = '\0';
 }
-static void presence_json(char *out, size_t size, const Zone *current, int fought, long long start,
+static void presence_json(char *out, size_t size, Area current, int fought, long long start,
                           unsigned long nonce) {
     char details[96];
     if (fought >= 0) {
         const char *name = npc_name(fought);
         snprintf(details, sizeof(details), "Fighting %s", name ? name : "a boss");
     } else {
-        snprintf(details, sizeof(details), "%s", current ? "Exploring" : "In the menus");
+        snprintf(details, sizeof(details), "%s", current.name ? "Exploring" : "In the menus");
     }
     snprintf(out, size, "{\"cmd\":\"SET_ACTIVITY\",\"nonce\":\"%lu\",\"args\":{\"pid\":%lu,\"activity\":{\"details\":\"",
              nonce, process_id());
     append_json_string(out, size, details);
-    if (current) {
+    if (current.name) {
         strncat(out, "\",\"state\":\"", size - strlen(out) - 1);
-        append_json_string(out, size, current->name);
+        append_json_string(out, size, current.name);
     }
     /* The cover art large; the area's image in the small circle, its name on hover. */
     char rest[512];
     snprintf(rest, sizeof(rest), "\",\"timestamps\":{\"start\":%lld},\"assets\":{\"large_image\":\"bloodborne\","
              "\"large_text\":\"Bloodborne\"", start);
     strncat(out, rest, size - strlen(out) - 1);
-    if (current) {
-        snprintf(rest, sizeof(rest), ",\"small_image\":\"%s\",\"small_text\":\"", current->image);
+    if (current.name) {
+        snprintf(rest, sizeof(rest), ",\"small_image\":\"%s\",\"small_text\":\"", current.image);
         strncat(out, rest, size - strlen(out) - 1);
-        append_json_string(out, size, current->name);
+        append_json_string(out, size, current.name);
         strncat(out, "\"", size - strlen(out) - 1);
     }
     strncat(out, "}}}}", size - strlen(out) - 1);
@@ -518,7 +606,7 @@ static void *presence_thread(void *unused) {
     const long long start = (long long)time(NULL);
     unsigned long nonce = 0;
     int connected = 0, refused = 0, reported_absent = 0;
-    const Zone *sent = NULL;
+    Area sent = {NULL, NULL};
     int sent_boss = -1, sent_any = 0;
     uint64_t next_attempt = 0, last_sent = 0;
     for (;; sleep_ms(2000)) {
@@ -544,12 +632,12 @@ static void *presence_thread(void *unused) {
             continue;
         }
         pthread_mutex_lock(&state_lock);
-        const Zone *current = zone;
+        const Area current = zone;
         const int fought = boss;
         const long long fought_since = fight_start;
         pthread_mutex_unlock(&state_lock);
         /* Discord accepts 5 updates per 20 s: one per change, at most every 4 s. */
-        if ((sent_any && current == sent && fought == sent_boss) ||
+        if ((sent_any && same_area(current, sent) && fought == sent_boss) ||
             (sent_any && now - last_sent < 4000000000ull))
             continue;
         char json[1024];
