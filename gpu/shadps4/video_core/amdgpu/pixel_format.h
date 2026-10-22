@@ -356,7 +356,10 @@ constexpr NumberConversion MapNumberConversion(const NumberFormat num_fmt,
         case DataFormat::Format16_16_16_16:
             return NumberConversion::Sint16ToSnormNz;
         default:
-            UNREACHABLE_MSG("data_fmt = {}", u32(data_fmt));
+            // bbport: no such format; a stale or unused descriptor (seen with data format 45
+            // while the camera was inside the player model) is read without conversion instead
+            // of stopping the game.
+            return NumberConversion::None;
         }
     }
     default:
