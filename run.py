@@ -238,6 +238,9 @@ def main():
         env.setdefault('BB_GPU_USER_DIR', str(user_dir))
         if env.get('BB_ONLINE') == '1':
             online_overrides(env, user_dir)
+            if not env.get('BB_SHADNET_NPID') or not env.get('BB_SHADNET_PASSWORD'):
+                print('Online: no shadNet account (launcher: Online co-op, Online ID and Password); '
+                      'the game stays signed out: no messages, bloodstains or summons')
         this = ['--run'] if getattr(sys, 'frozen', False) else [str(Path(__file__).resolve())]
         restart = [sys.executable, *this, '--after', str(os.getpid()), *args]
         env['BB_RESTART_COMMAND'] = subprocess.list2cmdline(restart)

@@ -1471,7 +1471,7 @@ class Launcher:
         info.grid(row=0, column=0, sticky='new', padx=(0, self.px(12)))
         ttk.Label(info, text=_('Your workshop', 'Ваша мастерская'), style='WorkshopSection.TLabel').pack(anchor='w', pady=(0, 6))
         self.checks = {}
-        for key in ('game', 'saves', 'gpu', 'fsr4'):
+        for key in ('game', 'saves', 'gpu', 'fsr4', 'online'):
             self.checks[key] = ttk.Label(info, text='', style='Workshop.TLabel', justify='left', wraplength=self.px(440))
             self.checks[key].pack(anchor='w', pady=3)
         quick_card = ttk.Frame(body, style='Workshop.TFrame', padding=self.px(12))
@@ -1965,7 +1965,8 @@ class Launcher:
                                  'go through a shadNet server.'))
         self.check(f, 'online', 'app', _('Play online'),
                    _('Off: the game stays offline, as before.'))
-        self.var('online', 'app').trace_add('write', lambda *_a: self.refresh_status())
+        for key in ('online', 'online_npid', 'online_password'):
+            self.var(key, 'app').trace_add('write', lambda *_a: self.refresh_status())
         self.section(f, _('Game server (messages, bloodstains, ghosts)'))
         community = self.var('online_community', 'app')
         self.row(f, _('Game server'), ttk.Entry(f, textvariable=community, width=40),
@@ -2127,7 +2128,20 @@ class Launcher:
         fsr4 = (_('✓ FSR 4 assets installed', '✓ Ассеты FSR 4 установлены') if not missing else
                 _('• FSR 4 assets missing (Graphics); FSR 3.1 is used meanwhile',
                   '• Нет ассетов FSR 4 («Графика»); пока используется FSR 3.1'))
-        for key, text in (('game', game), ('saves', save), ('gpu', self.gpu_text), ('fsr4', fsr4)):
+        # Online needs a shadNet account: without one the game stays signed out (no messages,
+        # bloodstains or summons) although every server answers.
+        npid = self.var('online_npid', 'app').get().strip()
+        if not self.var('online', 'app').get():
+            online = _('• Offline (Online co-op: Play online)', '• Офлайн («Онлайн-кооператив»: «Играть онлайн»)')
+        elif not npid or not self.var('online_password', 'app').get():
+            online = _('⚠ Online is on but no shadNet account is set: the game stays signed out. Enter your '
+                       'Online ID and password (Online co-op); register at shadnet.shadps4.net',
+                       '⚠ Онлайн включён, но аккаунт shadNet не задан: игра остаётся офлайн. Введите Online ID и '
+                       'пароль («Онлайн-кооператив»); регистрация на shadnet.shadps4.net')
+        else:
+            online = _('✓ Online as {}', '✓ Онлайн как {}').format(npid)
+        for key, text in (('game', game), ('saves', save), ('gpu', self.gpu_text), ('fsr4', fsr4),
+                          ('online', online)):
             self.checks[key].configure(text=text, foreground=MUTED if text.startswith('•') else
                                        '#d9a441' if text.startswith('⚠') else '#d36b5c' if text.startswith('✗') else TEXT)
         for label in getattr(self, 'warnings', []):
@@ -2455,6 +2469,15 @@ class Launcher:
             if choice is None:
                 return
             online.set(bool(choice))
+        if online.get() and (not npid.get().strip() or not self.var('online_password', 'app').get()):
+            # Without a shadNet account the game cannot sign in: no messages, bloodstains or summons.
+            if self.messagebox.askyesno(
+                    'Bloodborne', _('"Play online" is on, but no shadNet account is set, so the game '
+                                    'would stay signed out (no messages, bloodstains or summons).\n\n'
+                                    'Yes: enter your Online ID and password now (register at '
+                                    'shadnet.shadps4.net).   No: play signed out.')):
+                self.show('online')
+                return
         if online.get() and '@' in npid.get():
             self.messagebox.showwarning(
                 'Bloodborne', _('The Online ID is the account name (NPID) you registered on the server, '
