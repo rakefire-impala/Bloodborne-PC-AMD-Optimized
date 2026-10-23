@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 enum {
     IS_EVENT_FLAG = 0x1399bf0,   /* bool (ignored, flag id): the "IsEventFlag" binding's target */
@@ -74,8 +75,29 @@ void runtime_lamp_install(void *image, size_t size, const char *app_version) {
     printf("Lamp travel: menu of %d lamps (flags %d-%d)\n", count, request, lamp_flags[count - 1]);
 }
 
+/* bbport: logs every change of a lamp's lit flag with the time (a lamp lit in Cathedral Ward was
+ * reported unlit again after a death; this shows when, and what the save loaded had). */
+static void watch_lit(void) {
+    static unsigned char last[BBGPU_LAMP_MENU_MAX];
+    static int known, polls;
+    if (++polls % 30) return;
+    for (int i = 0; i < count; ++i) {
+        const unsigned char lit = (unsigned char)get(lit_flags[i]);
+        if (known && lit == last[i]) continue;
+        if (known || lit) {
+            const time_t now = time(NULL);
+            char clock[16];
+            strftime(clock, sizeof(clock), "%H:%M:%S", localtime(&now));
+            printf("Lamp %s: flag %d at %s\n", lit ? "lit" : "UNLIT", lit_flags[i], clock);
+        }
+        last[i] = lit;
+    }
+    known = 1;
+}
+
 void runtime_lamp_poll(void) {
     if (!active || !ready()) return;
+    watch_lit();
     if (!shown) {
         if (!get(request) || get(done)) return;
         unsigned char lit[BBGPU_LAMP_MENU_MAX];

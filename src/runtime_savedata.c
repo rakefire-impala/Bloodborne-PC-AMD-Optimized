@@ -65,7 +65,7 @@ _Static_assert(sizeof(SearchCond)==64 && sizeof(SearchResult)==56,"dir name sear
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 static int initialized;
 static char title_id[16]="UNKNOWN";
-static struct { int used; char host[700], meta[700]; } slots[SLOTS];
+static struct { int used; time_t mounted; char host[700], meta[700]; } slots[SLOTS];
 static char memory_path[720];
 static uint64_t memory_size;
 static size_t mounts_done, memory_writes;
@@ -171,6 +171,7 @@ static int32_t mount(int32_t user, const char *title, const DirName *dir, uint32
     if (!exists && (make_dirs(host) || make_dirs(meta))) { pthread_mutex_unlock(&lock); return ERR_INTERNAL; }
     if (!exists) { Param empty={0}; write_param(meta,&empty); }
     slots[slot].used=1;
+    slots[slot].mounted=time(NULL);
     snprintf(slots[slot].host,sizeof(slots[slot].host),"%s",host);
     snprintf(slots[slot].meta,sizeof(slots[slot].meta),"%s",meta);
     memset(result,0,sizeof(*result));
@@ -202,8 +203,27 @@ static ABI int32_t save_umount(const MountPoint *point) {
     if (!initialized) return ERR_NOT_INITIALIZED;
     pthread_mutex_lock(&lock);
     int slot=slot_of(point);
-    if (slot>=0) { runtime_file_unmount(point->data); slots[slot].used=0; }
+    char written[200]="";
+    if (slot>=0) {
+        /* bbport: which files this mount wrote (a lamp's progress was lost when no save reached
+         * the disk for minutes although the game kept mounting its save). */
+        DIR *dir=opendir(slots[slot].host);
+        for (struct dirent *e; dir && (e=readdir(dir));) {
+            char path[1000]; struct stat st;
+            snprintf(path,sizeof(path),"%s/%s",slots[slot].host,e->d_name);
+            if (e->d_name[0]!='.' && !stat(path,&st) && st.st_mtime>=slots[slot].mounted &&
+                strlen(written)+strlen(e->d_name)+2<sizeof(written))
+                snprintf(written+strlen(written),sizeof(written)-strlen(written),"%s%s",*written ? ", " : "",e->d_name);
+        }
+        if (dir) closedir(dir);
+        runtime_file_unmount(point->data); slots[slot].used=0;
+    }
     pthread_mutex_unlock(&lock);
+    if (*written) {
+        const time_t now=time(NULL); char clock[16];
+        strftime(clock,sizeof(clock),"%H:%M:%S",localtime(&now));
+        printf("Runtime: save data written at %s: %s\n",clock,written);
+    }
     return slot>=0 ? 0 : ERR_NOT_FOUND;
 }
 static ABI int32_t save_set_param(const MountPoint *point, uint32_t type, const void *buffer, uint64_t size) {
