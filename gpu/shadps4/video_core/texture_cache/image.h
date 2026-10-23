@@ -152,6 +152,11 @@ public:
         u32 vo_surface : 1;
     } usage{};
     bool scene_proxy = false; ///< bbport: SceneTargets holds a reduced-size proxy of it
+    /// bbport: frame (Rasterizer::frame_number) it was last drawn to as a color target.
+    u32 target_frame = ~0u;
+    /// bbport: Bloodborne's god-ray mask (the light shafts draw into it): starts each frame
+    /// cleared when blending draws come first (Rasterizer::BeginRendering).
+    bool godray_mask = false;
     VAddr track_addr = 0;
     VAddr track_addr_end = 0;
     VAddr guest_begin = 0; ///< info.guest_address

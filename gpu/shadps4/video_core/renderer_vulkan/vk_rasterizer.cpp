@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <mutex>
+#include <unordered_set>
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
 #include "bbport_toggles.h"
@@ -232,6 +234,44 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
 
     const bool skip_cb_binding =
         regs.color_control.mode == AmdGpu::ColorControl::OperationMode::Disable;
+    // bbport: BB_CLEAR_LOG=<ps hash>[,<ps hash>...] (hex): the color targets the game binds for
+    // draws with those pixel shaders (address, fast clear and CMASK state) and the pipeline's
+    // mask, to follow a target that keeps content it should not (the god-ray mask).
+    static const std::vector<u32> clear_log = [] {
+        std::vector<u32> hashes;
+        if (const char* env = std::getenv("BB_CLEAR_LOG")) {
+            for (const char* p = env; *p;) {
+                char* end = nullptr;
+                hashes.push_back(u32(std::strtoul(p, &end, 16)));
+                p = *end ? end + 1 : end;
+            }
+        }
+        return hashes;
+    }();
+    if (!clear_log.empty() && key.mrt_mask &&
+        std::ranges::find(clear_log, u32(pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash)) !=
+            clear_log.end()) {
+        static u32 lines = 0;
+        if (lines++ < 4000) {
+            std::string targets;
+            for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
+                const auto& col_buf = regs.color_buffers[cb];
+                if (!col_buf) continue;
+                const VAddr cmask = col_buf.CmaskAddress();
+                targets += fmt::format(" [{} {:#x} mask {:x} fc {} cmask {:#x} tracked {} cleared {}]",
+                                       cb, col_buf.Address(), regs.color_target_mask.GetMask(cb),
+                                       u32(col_buf.info.fast_clear), cmask,
+                                       texture_cache.IsMeta(cmask).has_value(),
+                                       texture_cache.IsMetaCleared(cmask, col_buf.view.slice_start));
+            }
+            std::printf("Clear log: frame %u ps %08x vs %08x key mrt %#x motion %u indices %u%s\n",
+                        frame_number,
+                        u32(pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash),
+                        u32(pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash),
+                        u32(key.mrt_mask), u32(key.motion_vectors), regs.num_indices,
+                        targets.c_str());
+        }
+    }
     for (s32 cb = 0; cb < std::bit_width(key.mrt_mask); ++cb) {
         auto& [image_id, desc] = cb_descs[cb];
         const auto& col_buf = regs.color_buffers[cb];
@@ -980,6 +1020,21 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
         draw_prep->Count(used_prepared != nullptr);
     }
     if (!pipeline) {
+        // bbport: a draw the port cannot select a pipeline for is not drawn; name its shaders
+        // (each pair once) so a missing draw can be found in the log.
+        static std::mutex dropped_mutex;
+        static std::unordered_set<u64> dropped;
+        const auto& regs = Regs();
+        const auto* vs = regs.ProgramForStage(u32(Shader::HwStage::Vertex));
+        const auto* ps = regs.ProgramForStage(u32(Shader::HwStage::Fragment));
+        const u64 vs_hash = vs && vs->Address<u32*>() ? AmdGpu::GetParams(*vs).hash : 0;
+        const u64 ps_hash = ps && ps->Address<u32*>() ? AmdGpu::GetParams(*ps).hash : 0;
+        std::scoped_lock lock{dropped_mutex};
+        if (dropped.size() < 64 && dropped.insert(vs_hash * 31 + ps_hash).second) {
+            std::printf("Draw dropped: no pipeline for vs %08llx ps %08llx (frame %u)\n",
+                        static_cast<unsigned long long>(vs_hash),
+                        static_cast<unsigned long long>(ps_hash), frame_number);
+        }
         return;
     }
     if (pipelined && FilterDrawPasses()) {
@@ -1010,6 +1065,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         camera_motion->SetJitter(upscaler->Jitter());
         object_motion->OnFrameStart();
         NoteFrameStart();
+        ++frame_number;
         static const char* scene_debug = std::getenv("BB_SCENE_DEBUG");
         scene_debug_frame = scene_debug && std::remove(scene_debug) == 0;
         scene_targets->debug = scene_debug_frame;
@@ -2887,7 +2943,31 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         const auto mip = image_view.info.range.base.level;
 
         const auto& col_buf = regs.color_buffers[cb];
-        const bool is_clear = texture_cache.IsMetaCleared(col_buf.CmaskAddress(), slice);
+        // bbport: Bloodborne's light shafts (ps 898dabb3) and glows add into a mask (their
+        // color 1) that the sky (color 6 of its G-buffer draw, drawn first) overwrites every
+        // frame; the game's radial blur of that mask makes the god rays. The game skips the sky
+        // in some views; then the shafts added onto the mask of all earlier frames, and the
+        // rays grew into long streaks over the screen. In such a frame the first blending draw
+        // into the mask starts from a cleared one (BB_GODRAY_CLEAR=0: off).
+        if (cb == 1 && key.mrt_mask &&
+            pipeline->GetStage(Shader::SwStage::Fragment).pgm_hash == LightShaftPs) {
+            image->godray_mask = true;
+        }
+        bool clear_godray_mask = false;
+        if (image->godray_mask && image->target_frame != frame_number &&
+            regs.blend_control[cb].enable && key.write_masks[cb] && GodRayClearEnabled()) {
+            clear_godray_mask = true;
+            if (godray_mask_clears++ % 600 == 0) {
+                std::printf("God rays: the light-shaft mask was not redrawn before the shafts; "
+                            "cleared (%u frames so far, frame %u)\n",
+                            godray_mask_clears, frame_number);
+            }
+        }
+        if (key.write_masks[cb]) {
+            image->target_frame = frame_number;
+        }
+        const bool is_clear =
+            clear_godray_mask || texture_cache.IsMetaCleared(col_buf.CmaskAddress(), slice);
         texture_cache.TouchMeta(col_buf.CmaskAddress(), slice, false);
 
         if (reduced) {
@@ -2917,8 +2997,9 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         state.height = std::min<u32>(state.height, std::max(image->info.size.height >> mip, 1u));
         state.num_layers = std::min<u32>(state.num_layers, image_view.info.range.extent.layers);
 
-        const auto clear_value =
-            is_clear ? LiverpoolToVK::ColorBufferClearValue(col_buf) : vk::ClearValue{};
+        const auto clear_value = is_clear && !clear_godray_mask
+                                     ? LiverpoolToVK::ColorBufferClearValue(col_buf)
+                                     : vk::ClearValue{};
         auto& attachment = state.color_attachments[cb];
         attachment.image_view = *image_view.image_view;
         attachment.image_layout = image->backing->state.layout;
@@ -3148,6 +3229,15 @@ void Rasterizer::DepthStencilCopy(bool is_depth, bool is_stencil) {
 }
 
 void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds) {
+    static const bool log_fills = std::getenv("BB_CLEAR_LOG") != nullptr;
+    if (log_fills) {
+        static u32 fills = 0;
+        if (fills++ < 400) {
+            std::printf("Clear log: frame %u fill %#llx size %u value %#x tracked meta %d\n",
+                        frame_number, static_cast<unsigned long long>(address), num_bytes, value,
+                        texture_cache.IsMeta(address).has_value());
+        }
+    }
     DrainDrawPipe();
     ASSERT_MSG(address % 4 == 0 && num_bytes % 4 == 0,
                "FillBuffer address and size must be a multiple of 4 bytes");

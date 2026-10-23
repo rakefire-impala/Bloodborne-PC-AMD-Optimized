@@ -497,6 +497,20 @@ private:
     u64 proxy_samples = 0; ///< texture bindings that read a scene proxy (statistics)
     float sampler_lod_bias = 0.0f; ///< bbport: extra bias of this draw's samplers
     bool scene_debug_frame = false; ///< BB_SCENE_DEBUG: this frame's passes are printed
+    /// bbport: frames started (display passes); images keep the last one they were drawn to
+    /// (Image::target_frame).
+    u32 frame_number = 0;
+    /// bbport: the god-ray mask's reset (BeginRendering): the light shafts' pixel shader, which
+    /// adds into a mask the sky normally redraws first each frame.
+    static constexpr u64 LightShaftPs = 0x898dabb3;
+    static bool GodRayClearEnabled() {
+        static const bool enabled = [] {
+            const char* env = std::getenv("BB_GODRAY_CLEAR");
+            return !env || env[0] != '0';
+        }();
+        return enabled;
+    }
+    u32 godray_mask_clears = 0;
     bool PendingWriteOverlaps(VAddr address, u64 size);
     /// Stage B: the ring bindings of the stages of the packet being recorded.
     struct RingStage {
