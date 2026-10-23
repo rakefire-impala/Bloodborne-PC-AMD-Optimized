@@ -2,6 +2,7 @@
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 #include "video_core/renderer_vulkan/vk_frame_generation.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -54,6 +55,8 @@ CameraMotion::CameraMotion(const Instance& instance_, Scheduler& scheduler_,
     : instance{instance_}, scheduler{scheduler_}, texture_cache{texture_cache_}, runtime{runtime_} {
     const char* env = std::getenv("BB_DEBUG_MOTION");
     debug_overlay = env && env[0] == '1';
+    const char* log_env = std::getenv("BB_CAMERA_LOG");
+    camera_log = log_env && log_env[0] == '1';
     // Allocate the motion pipeline for live provider switches, even when starting with None.
     // Tracking does not dispatch it until a temporal provider needs motion vectors.
     for_upscaler = true;
@@ -223,12 +226,48 @@ void CameraMotion::RecordMotion(vk::CommandBuffer cmdbuf, vk::ImageView depth_vi
     cmdbuf.dispatch((width + 7) / 8, (height + 7) / 8, 1);
 }
 
-void CameraMotion::OnConstants(const float* data) {
-    if (!NeedsCamera()) return; // only the first main camera is used this frame
+void CameraMotion::OnConstants(const float* data, char source, VAddr address) {
+    if (!WantsConstants(address)) return; // only the first main camera is used this frame
+    checked_address = address;
     const auto decoded = Motion::DecodeSceneCamera({data,216});
-    if (!decoded) return;
+    if (!decoded) {
+        rejected_constants += NeedsCamera();
+        return;
+    }
+    if (camera_log && seen_cameras.size() < 160) {
+        char note[48];
+        std::snprintf(note, sizeof(note), " %c y %.2f @%llx", source,
+                      decoded->camera.inv_view[7], static_cast<unsigned long long>(address));
+        if (!seen_cameras.ends_with(note)) seen_cameras += note;
+    }
     const auto& size = decoded->size;
+    // A planar reflection pass (water, wet ground) draws its G-buffer before the main one, from
+    // the main camera mirrored about the reflecting plane. Taken as the frame's camera, it gave
+    // the whole frame mirrored pitch and height motion (FSR and frame generation smeared the
+    // scene vertically, worst on stairs). A known plane's reflection camera is skipped (the
+    // main camera follows in this frame); one captured anyway is replaced by the main camera.
+    if (!NeedsCamera()) {
+        if (!settled && Motion::MirroredVertically(current, decoded->camera)) {
+            const float first_height = current.inv_view[7];
+            if (history.Replace(decoded->camera, size != render_size)) {
+                mirror_plane = 0.5f * (first_height + current.inv_view[7]);
+                settled = true;
+                captured_source = static_cast<char>(source - 'a' + 'A');
+            }
+        }
+        return;
+    }
+    if (mirror_plane && current.valid &&
+        Motion::MirrorOfPrevious(current, decoded->camera, *mirror_plane)) {
+        skipped = decoded->camera;
+        return;
+    }
     if (!history.Capture(decoded->camera, size != render_size)) return;
+    captured_source = source;
+    if (skipped && Motion::MirroredVertically(*skipped, current)) {
+        mirror_plane = 0.5f * (skipped->inv_view[7] + current.inv_view[7]);
+        settled = true;
+    }
     if (HistoryReset()) {
         previous_jitter = jitter;
         if (object_motion) object_motion->DiscardPreviousHistory();
@@ -247,7 +286,26 @@ void CameraMotion::OnDisplayPass(VideoCore::ImageId frame) {
     if (debug_overlay && frame && depth_id && current.valid && previous.valid) {
         Overlay(frame);
     }
+    if (camera_log) {
+        const auto& v = current.inv_view;
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+        std::printf("Camera log: %u %lld ms %c%s pos %.3f %.3f %.3f fwd %.4f %.4f %.4f proj "
+                    "%.4f %.4f %.5f %.5f rejected %u%s cameras%s\n",
+                    ++log_frame, static_cast<long long>(ms), NeedsCamera() ? '-' : captured_source,
+                    HistoryReset() ? " reset" : "", v[3], v[7], v[11], v[2], v[6], v[10],
+                    current.proj[0], current.proj[1], current.proj[2], current.proj[3],
+                    rejected_constants, skipped ? " reflection-skipped" : "",
+                    seen_cameras.c_str());
+        captured_source = '-';
+        rejected_constants = 0;
+        seen_cameras.clear();
+    }
     history.EndFrame();
+    settled = false;
+    skipped.reset();
+    checked_address = 0;
     depth_id = {};
 }
 

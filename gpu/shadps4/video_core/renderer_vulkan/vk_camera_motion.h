@@ -6,6 +6,7 @@
 #pragma once
 
 #include <array>
+#include <string>
 #include <vector>
 
 #include "common/types.h"
@@ -33,6 +34,14 @@ public:
     ~CameraMotion();
     void InvalidateHistory() { history.Invalidate(); }
     [[nodiscard]] bool NeedsCamera() const noexcept { return history.NeedsCamera(); }
+    /// The rasterizer passes scene constants: the camera is still needed, or BB_CAMERA_LOG lists
+    /// every scene camera of the frame.
+    /// Scene constants at guest `address` are read once: a pass's draws share one buffer (the
+    /// reflection and main passes have their own), and reading the constant ring (GPU memory)
+    /// on every G-buffer draw cost ~20% of the frame rate.
+    [[nodiscard]] bool WantsConstants(VAddr address) const noexcept {
+        return address != checked_address && (NeedsCamera() || !settled || camera_log);
+    }
     [[nodiscard]] bool HistoryReset() const noexcept { return history.Reset(); }
     void SetObjectMotion(ObjectMotion* motion) noexcept {
         object_motion = motion;
@@ -75,8 +84,9 @@ public:
     void RecordMotion(vk::CommandBuffer cmdbuf, vk::ImageView depth_view, vk::ImageView motion_view,
                       u32 width, u32 height);
 
-    /// A bound constant buffer of 864 bytes: checks the scene constant signature.
-    void OnConstants(const float* data);
+    /// A bound constant buffer of 864 bytes (from guest `address`): checks the scene constant
+    /// signature. `source`: 'r' the draw's constant-ring snapshot, 'g' guest memory.
+    void OnConstants(const float* data, char source, VAddr address);
 
     /// The G-buffer pass (5+ color targets): its depth is the scene depth.
     void OnGBufferPass(VideoCore::ImageId depth);
@@ -94,6 +104,12 @@ private:
     Runtime& runtime;
     bool debug_overlay = false;
     bool for_upscaler = false;
+    /// BB_CAMERA_LOG=1: one line per frame (camera source, reset, position, direction).
+    bool camera_log = false;
+    u32 log_frame = 0;
+    u32 rejected_constants = 0;
+    char captured_source = '-';
+    std::string seen_cameras;
     vk::UniqueDescriptorSetLayout motion_desc_layout;
     vk::UniquePipelineLayout motion_pipeline_layout;
     vk::UniquePipeline motion_pipeline;
@@ -104,6 +120,13 @@ private:
     Motion::CameraSample& previous = history.previous;
     std::array<float, 2> jitter{}, previous_jitter{};
     std::array<u32, 2> render_size{};
+    /// This frame's main camera is known: it replaced or followed a reflection camera.
+    bool settled = false;
+    /// Guest address of the scene constants read last this frame (OnConstants).
+    VAddr checked_address = 0;
+    /// Height of the last reflecting plane, and this frame's skipped reflection camera.
+    std::optional<float> mirror_plane;
+    std::optional<Motion::CameraSample> skipped;
     VideoCore::ImageId depth_id{};
 
     vk::UniqueDescriptorSetLayout desc_layout;

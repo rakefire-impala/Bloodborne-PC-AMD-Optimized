@@ -83,6 +83,29 @@ inline bool CameraDiscontinuity(const CameraSample& previous, const CameraSample
     return false;
 }
 
+// A planar reflection pass (water, wet ground) renders the scene from the main camera mirrored
+// about a horizontal plane: same x/z position and heading, mirrored height and pitch.
+inline bool MirroredVertically(const CameraSample& a, const CameraSample& b) {
+    const auto& p = a.inv_view;
+    const auto& q = b.inv_view;
+    return std::abs(p[3] - q[3]) < 0.05f && std::abs(p[11] - q[11]) < 0.05f &&
+           std::abs(p[7] - q[7]) > 0.01f && std::abs(p[2] - q[2]) < 0.02f &&
+           std::abs(p[10] - q[10]) < 0.02f && std::abs(p[6] + q[6]) < 0.02f;
+}
+
+// The reflection camera of the next frame: the previous main camera mirrored about the same
+// plane (the camera moves a little between frames, the plane stays). Its height differs by more
+// than a unit, which the main camera's own motion between two frames does not.
+inline bool MirrorOfPrevious(const CameraSample& previous, const CameraSample& sample,
+                             float plane) {
+    const auto& p = previous.inv_view;
+    const auto& q = sample.inv_view;
+    return std::abs(q[3] - p[3]) < 1.0f && std::abs(q[11] - p[11]) < 1.0f &&
+           std::abs(q[7] - (2.0f * plane - p[7])) < 1.0f && std::abs(q[7] - p[7]) > 1.0f &&
+           std::abs(q[2] - p[2]) < 0.2f && std::abs(q[10] - p[10]) < 0.2f &&
+           std::abs(q[6] + p[6]) < 0.2f;
+}
+
 class CameraHistory {
 public:
     CameraSample current, previous;
@@ -94,11 +117,34 @@ public:
             return false;
         }
         sample.valid = true;
+        before = current;
+        reset_before = reset;
         previous = current;
         current = sample;
         reset = reset || resized || CameraDiscontinuity(previous, current);
         if (reset) previous = current; // zero velocity; do not reuse the preceding scene
         captured = true;
+        return true;
+    }
+    /// A later camera of this frame replaces the captured one when it continues the previous
+    /// frame's camera better (the main camera after a reflection pass drawn first): history and
+    /// reset are decided again against it.
+    bool Replace(CameraSample sample, bool resized = false) {
+        if (!captured || !ValidCamera(sample)) return false;
+        const auto distance = [](const CameraSample& a, const CameraSample& b) {
+            float sum = 0;
+            for (int row = 0; row < 3; ++row) {
+                const float d = a.inv_view[row * 4 + 3] - b.inv_view[row * 4 + 3];
+                sum += d * d;
+            }
+            return sum;
+        };
+        if (before.valid && distance(sample, before) >= distance(current, before)) return false;
+        sample.valid = true;
+        previous = before;
+        current = sample;
+        reset = reset_before || resized || CameraDiscontinuity(previous, current);
+        if (reset) previous = current;
         return true;
     }
     void Invalidate() noexcept {
@@ -114,8 +160,10 @@ public:
     bool Reset() const noexcept { return reset; }
 
 private:
+    CameraSample before; ///< current before this frame's capture (for Replace)
     bool captured = false;
     bool reset = true;
+    bool reset_before = true;
 };
 
 // Scene samplers ask for this bias on many draws; only changed dimensions need log2.

@@ -2146,10 +2146,11 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
         if (ring) {
             // Copied by the GPU command thread into the constant ring (read-only).
             if (!desc.IsSpecial()) {
-                if (ring->size == 864 && gbuffer_draw && camera_motion->NeedsCamera()) {
+                if (ring->size == 864 && gbuffer_draw && camera_motion->WantsConstants(ring->address)) {
                     // The draw uses this snapshot. Guest memory may already contain a
                     // later camera by the time the recording thread reaches this packet.
-                    camera_motion->OnConstants(reinterpret_cast<const float*>(constant_ring->Data(ring->offset)));
+                    camera_motion->OnConstants(reinterpret_cast<const float*>(constant_ring->Data(ring->offset)), 'r',
+                                               ring->address);
                 }
                 push_data.AddOffset(binding.buffer, 0);
             }
@@ -2208,11 +2209,13 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
         } else {
             const auto vsharp =
                 prepared ? prepared->buffer_sharps[buffer_index] : desc.GetSharp(stage);
-            if (vsharp.GetSize() == 864 && gbuffer_draw && camera_motion->NeedsCamera() &&
+            if (vsharp.GetSize() == 864 && gbuffer_draw &&
+                camera_motion->WantsConstants(vsharp.base_address) &&
                 memory->IsValidGpuMapping(vsharp.base_address, 0) &&
                 memory->ClampRangeSize(vsharp.base_address,864) == 864 &&
                 !buffer_cache.IsRegionGpuModified(vsharp.base_address,864)) {
-                camera_motion->OnConstants(reinterpret_cast<const float*>(vsharp.base_address));
+                camera_motion->OnConstants(reinterpret_cast<const float*>(vsharp.base_address), 'g',
+                                           vsharp.base_address);
             }
             // Object motion research: the vertex shader buffers of G-buffer draws.
             if (FrameCapture::Active() && gbuffer_draw && stage.sw_stage == Shader::SwStage::Vertex &&

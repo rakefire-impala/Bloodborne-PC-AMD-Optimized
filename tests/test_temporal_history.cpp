@@ -96,6 +96,47 @@ int main() {
     assert(ValidCamera(inverted_y)); // preserve the projection's coordinate convention
     assert(CameraDiscontinuity(Camera(), inverted_y));
 
+    // A planar reflection pass (water, wet ground) draws its G-buffer first, from the main camera
+    // mirrored about the plane (height and pitch mirrored); the main camera follows.
+    {
+        const auto pitched = [](float y, float pitch, float x = 0) {
+            CameraSample c;
+            const float s = std::sin(pitch), k = std::cos(pitch);
+            c.inv_view = {1, 0, 0, x, 0, k, s, y, 0, -s, k, 0};
+            c.view = {1, 0, 0, -x, 0, k, -s, -k * y, 0, s, k, -s * y};
+            c.proj = {1.1f, 1.9f, 1.000033f, -0.1000033f};
+            c.valid = true;
+            return c;
+        };
+        const float plane = -29.6f;
+        const auto mirror = [&](const CameraSample& c) {
+            return pitched(2 * plane - c.inv_view[7], -std::asin(c.inv_view[6]), c.inv_view[3]);
+        };
+        CameraHistory mirrored;
+        const auto main0 = pitched(-40.0f, 0.2f), main1 = pitched(-40.05f, 0.21f, 0.1f);
+        assert(mirrored.Capture(main0));
+        mirrored.EndFrame();
+        const auto reflection1 = mirror(main1);
+        assert(MirroredVertically(reflection1, main1) && MirroredVertically(main1, reflection1));
+        assert(MirrorOfPrevious(main0, reflection1, plane)); // skipped once the plane is known
+        assert(!MirrorOfPrevious(main0, main1, plane) && !MirroredVertically(main0, main1));
+        assert(mirrored.Capture(reflection1) && mirrored.Reset()); // 20 units: looks like a cut
+        assert(mirrored.Replace(main1) && !mirrored.Reset());
+        assert(mirrored.current.inv_view == main1.inv_view);
+        assert(mirrored.previous.inv_view == main0.inv_view); // motion main0 -> main1
+        mirrored.EndFrame();
+        // A reflection drawn after the main camera never replaces it.
+        const auto main2 = pitched(-40.1f, 0.22f, 0.2f);
+        assert(mirrored.Capture(main2) && !mirrored.Reset());
+        assert(!mirrored.Replace(mirror(main2)));
+        assert(mirrored.current.inv_view == main2.inv_view && !mirrored.Reset());
+        mirrored.EndFrame();
+        // A real cut is still one when the replacement continues nothing.
+        mirrored.Invalidate();
+        assert(mirrored.Capture(mirror(main2)) && mirrored.Replace(main2) && mirrored.Reset());
+        mirrored.EndFrame();
+    }
+
     // Slow rotations, including crossing +-pi, do not look like a cut.
     assert(!CameraDiscontinuity(Camera(0, 3.13f), Camera(0, -3.13f)));
     assert(!CameraDiscontinuity(Camera(), Camera(9.9f, 1.5f)));
@@ -108,5 +149,5 @@ int main() {
     assert(std::abs(bias.Get(1280, 3840) + 1.5849625f) < 1e-6f);
     assert(bias.Get(3840, 3840) == 0 && bias.Get(3840, 1920) == 0);
     assert(bias.Get(1920, 3840) == -1.0f);
-    std::puts("Temporal history: PASS (submitted camera snapshot, bounds, smooth motion/FOV, cuts, resize, loading, invalid data, recovery, cached mip bias)");
+    std::puts("Temporal history: PASS (submitted camera snapshot, bounds, smooth motion/FOV, cuts, resize, loading, invalid data, recovery, reflection cameras, cached mip bias)");
 }
