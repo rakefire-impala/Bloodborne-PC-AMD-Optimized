@@ -61,12 +61,23 @@ struct Archive {
         return offset < container.size() ? container.size() - offset : 0;
     }
 
+    /// bbport: a read went past the end (a truncated or corrupt cache file). The Reader then
+    /// returns zeros instead of asserting, so the warm-up can drop the file.
+    [[nodiscard]] bool Failed() const {
+        return failed;
+    }
+    void Fail() {
+        failed = true;
+        offset = static_cast<u32>(container.size());
+    }
+
     Archive() = default;
     explicit Archive(std::vector<u8>&& v) : container{v} {}
 
 private:
     u32 offset{};
     std::vector<u8> container{};
+    bool failed{};
 
     friend struct Writer;
     friend struct Reader;
@@ -110,8 +121,11 @@ struct Writer {
 struct Reader {
     template <typename T>
     void Read(T* ptr, size_t size) {
-        ASSERT_MSG(ar.offset + size <= ar.container.size(),
-                   "Invalid or corrupted deserialization container/shader cache");
+        if (ar.failed || size > ar.Remaining()) {
+            std::memset(reinterpret_cast<void*>(ptr), 0, size);
+            ar.Fail();
+            return;
+        }
         std::memcpy(reinterpret_cast<void*>(ptr), ar.CurrPtr(), size);
         ar.Advance(size);
     }
@@ -126,7 +140,12 @@ struct Reader {
     void Read(auto& v) {
         size_t num_elements{};
         Read(num_elements);
-        for (int i = 0; i < num_elements; ++i) {
+        // Each element takes at least one byte: a larger count is a corrupt file.
+        if (num_elements > ar.Remaining()) {
+            ar.Fail();
+            return;
+        }
+        for (size_t i = 0; i < num_elements; ++i) {
             v.emplace_back();
             Read(v.back());
         }
@@ -135,6 +154,10 @@ struct Reader {
     void Read(std::string& s) {
         size_t length{};
         Read(length);
+        if (length > ar.Remaining()) {
+            ar.Fail();
+            return;
+        }
         s.resize(length);
         Read(s.data(), length);
     }

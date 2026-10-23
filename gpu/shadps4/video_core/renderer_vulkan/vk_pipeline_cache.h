@@ -11,6 +11,7 @@
 #include "shader_recompiler/profile.h"
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/specialization.h"
+#include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_resource_pool.h"
@@ -123,6 +124,18 @@ public:
                            AmdGpu::Liverpool* liverpool, u32 sparse_page_shift);
     ~PipelineCache();
 
+    /// bbport: why the last cached pipeline or stage did not load. The warm-up deletes the keys
+    /// that never will; Kept ones may load in another start.
+    enum class CacheReject : u8 {
+        None,
+        Kept,      ///< motion key with object motion off, or other motion buffer addresses
+        Missing,   ///< a stage's meta or SPIR-V is gone
+        Old,       ///< written by an older cache format
+        Corrupt,   ///< truncated or damaged file
+        Duplicate, ///< a stage is a duplicate of a permutation loaded at another index
+        Refused,   ///< the driver does not build the stages together
+    };
+
     void WarmUp();
     void Sync();
 
@@ -212,8 +225,9 @@ private:
     /// bbport: the warm-up's motion pipeline keys with their vertex inputs (PrepareStillTwins).
     std::vector<std::pair<GraphicsPipelineKey, GraphicsPipeline::SerializationSupport>>
         preloaded_motion;
-    /// bbport: with BB_PREBUILD_SHADERS, the keys whose shaders the cache no longer has.
-    std::vector<std::string> unbuildable_keys;
+    CacheReject cache_reject{};
+    /// bbport: bad stage files (corrupt or older format), deleted with the bad keys.
+    std::vector<std::pair<Storage::BlobType, std::string>> bad_stage_files;
 
     // Only if Config::collectShadersForDebug()
     tsl::robin_map<vk::ShaderModule,

@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -108,21 +110,24 @@ void RegisterShaderBinary(std::vector<u32>&& spv, u64 pgm_hash, size_t perm_idx)
                                        std::move(spv));
 }
 
-bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
-                    std::optional<Shader::Gcn::FetchShaderData>& fetch_shader_data,
-                    Shader::StageSpecialization& spec, size_t& perm_idx) {
+using CacheReject = PipelineCache::CacheReject;
+
+/// None when the meta loaded, else why not (bbport).
+CacheReject LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
+                           std::optional<Shader::Gcn::FetchShaderData>& fetch_shader_data,
+                           Shader::StageSpecialization& spec, size_t& perm_idx) {
     Serialization::Reader meta{ar};
 
     u32 meta_version{};
     meta.Read(meta_version);
-    if (meta_version != Serialization::ShaderMetaVersion) {
-        return false;
-    }
-
     u32 binary_version{};
     meta.Read(binary_version);
-    if (binary_version != Serialization::ShaderBinaryVersion) {
-        return false;
+    if (ar.Failed()) {
+        return CacheReject::Corrupt;
+    }
+    if (meta_version != Serialization::ShaderMetaVersion ||
+        binary_version != Serialization::ShaderBinaryVersion) {
+        return CacheReject::Old;
     }
 
     u64 perm_hash_ar{};
@@ -131,29 +136,37 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
 
     spec.Deserialize(ar);
     info.Deserialize(ar);
+    if (ar.Failed()) {
+        return CacheReject::Corrupt;
+    }
 
     // Motion vertex shaders embed the object motion buffer addresses (RegisterShaderMeta
     // records them). Loaded only while this start has the same ones; an older entry without
     // them is compiled again.
     if (info.hw_stage == Shader::HwStage::Vertex && spec.runtime_info.hw.vs.motion_vectors) {
+        if (!Shader::MotionVectors::positions_address) {
+            return CacheReject::Kept;
+        }
         // The addresses follow the Info (an entry without them has only the archive's slack
         // byte left here).
-        if (ar.Remaining() < 3 * sizeof(u64) || !Shader::MotionVectors::positions_address) {
-            return false;
+        if (ar.Remaining() < 3 * sizeof(u64)) {
+            return CacheReject::Old;
         }
         u64 tag{}, params_address{}, positions_address{};
         meta.Read(tag);
         meta.Read(params_address);
         meta.Read(positions_address);
-        if (tag != Serialization::MotionAddressesTag ||
-            params_address != Shader::MotionVectors::params_address ||
+        if (tag != Serialization::MotionAddressesTag) {
+            return CacheReject::Old;
+        }
+        if (params_address != Shader::MotionVectors::params_address ||
             positions_address != Shader::MotionVectors::positions_address) {
-            return false;
+            return CacheReject::Kept;
         }
     }
 
     fetch_shader_data = spec.fetch_shader_data;
-    return true;
+    return CacheReject::None;
 }
 
 void ComputePipelineKey::Serialize(Serialization::Archive& ar) const {
@@ -182,22 +195,38 @@ bool PipelineCache::LoadComputePipeline(Serialization::Archive& ar) {
 
     ComputePipeline::SerializationSupport sdata{};
     sdata.Deserialize(ar);
+    if (ar.Failed()) {
+        cache_reject = CacheReject::Corrupt;
+        return false;
+    }
 
+    const auto meta_name = fmt::format("{:#018x}", compute_key.value);
     std::vector<u8> meta_blob;
-    Storage::DataBase::Instance().Load(Storage::BlobType::ShaderMeta,
-                                       fmt::format("{:#018x}", compute_key.value), meta_blob);
+    Storage::DataBase::Instance().Load(Storage::BlobType::ShaderMeta, meta_name, meta_blob);
     if (meta_blob.empty()) {
+        cache_reject = CacheReject::Missing;
         return false;
     }
 
     Serialization::Archive meta_ar{std::move(meta_blob)};
 
     if (!LoadPipelineStage(meta_ar, 0)) {
+        if (cache_reject == CacheReject::Old || cache_reject == CacheReject::Corrupt) {
+            bad_stage_files.emplace_back(Storage::BlobType::ShaderMeta, meta_name);
+        }
+        sel.infos.fill(nullptr);
+        sel.modules.fill(nullptr);
         return false;
     }
 
+    // bbport: two key files of one pipeline (named by an older key hash).
+    if (compute_pipelines.contains(compute_key)) {
+        cache_reject = CacheReject::Duplicate;
+        sel.infos.fill(nullptr);
+        sel.modules.fill(nullptr);
+        return false;
+    }
     const auto [it, is_new] = compute_pipelines.try_emplace(compute_key);
-    ASSERT(is_new);
 
     it.value() =
         std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile, *pipeline_cache,
@@ -250,11 +279,16 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
 
     GraphicsPipeline::SerializationSupport sdata{};
     sdata.Deserialize(ar);
+    if (ar.Failed()) {
+        cache_reject = CacheReject::Corrupt;
+        return false;
+    }
 
     // Motion keys build only with object motion on: their vertex shaders load only while the
     // motion buffers keep the addresses those embed (LoadShaderMeta); otherwise the key is
     // stale and compiles at runtime.
     if (sel.graphics_key.motion_vectors && !Shader::MotionVectors::positions_address) {
+        cache_reject = CacheReject::Kept;
         return false;
     }
 
@@ -264,16 +298,14 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
             continue;
         }
 
+        // bbport: a stage the cache lost, or one that never loads, makes the key bad (the
+        // warm-up deletes it: a new permutation could take a lost index and pair with the old
+        // key's other stages).
+        const auto meta_name = fmt::format("{:#018x}", hash);
         std::vector<u8> meta_blob;
-        Storage::DataBase::Instance().Load(Storage::BlobType::ShaderMeta,
-                                           fmt::format("{:#018x}", hash), meta_blob);
+        Storage::DataBase::Instance().Load(Storage::BlobType::ShaderMeta, meta_name, meta_blob);
         if (meta_blob.empty()) {
-            // bbport: the cache lost this stage, so the key never builds; a pre-build deletes
-            // it (a new permutation could take the index and pair with the old key's stages).
-            if (std::getenv("BB_PREBUILD_SHADERS")) {
-                unbuildable_keys.push_back(fmt::format(
-                    "g_{:#018x}", std::hash<GraphicsPipelineKey>{}(sel.graphics_key)));
-            }
+            cache_reject = CacheReject::Missing;
             sel.infos.fill(nullptr);
             sel.modules.fill(nullptr);
             return false;
@@ -282,12 +314,25 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
         Serialization::Archive meta_ar{std::move(meta_blob)};
 
         if (!LoadPipelineStage(meta_ar, stage_idx)) {
+            if (cache_reject == CacheReject::Old || cache_reject == CacheReject::Corrupt) {
+                bad_stage_files.emplace_back(Storage::BlobType::ShaderMeta, meta_name);
+            }
+            sel.infos.fill(nullptr);
+            sel.modules.fill(nullptr);
+            sel.fetch_shader.reset();
             return false;
         }
     }
 
+    // bbport: two key files of one pipeline (named by an older key hash).
+    if (graphics_pipelines.contains(sel.graphics_key)) {
+        cache_reject = CacheReject::Duplicate;
+        sel.infos.fill(nullptr);
+        sel.modules.fill(nullptr);
+        sel.fetch_shader.reset();
+        return false;
+    }
     const auto [it, is_new] = graphics_pipelines.try_emplace(sel.graphics_key);
-    ASSERT(is_new);
 
     it.value() = std::make_unique<GraphicsPipeline>(
         instance, scheduler, desc_heap, profile, sel.graphics_key, *pipeline_cache, sel.infos,
@@ -299,15 +344,9 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
 
     if (!it.value()->Handle()) {
         // bbport: the driver refused this key's stages together (GraphicsPipeline logged it).
-        // Its shaders stay loaded (each fits its own specialization); the key is deleted so
-        // the next start does not build it again, and a draw that needs it builds it anew.
-        auto& storage = Storage::DataBase::Instance();
-        const auto name =
-            fmt::format("g_{:#018x}", std::hash<GraphicsPipelineKey>{}(sel.graphics_key));
-        const bool stored = storage.Exists(Storage::BlobType::PipelineKey, name);
-        storage.Remove(Storage::BlobType::PipelineKey, name);
-        LOG_WARNING(Render_Vulkan, "Pipeline key {} {}", name,
-                    stored ? "removed" : "not found under that name");
+        // Its shaders stay loaded (each fits its own specialization); the warm-up deletes the
+        // key so the next start does not build it again, and a draw that needs it builds it anew.
+        cache_reject = CacheReject::Refused;
         graphics_pipelines.erase(it);
         return false;
     }
@@ -461,15 +500,23 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
     Shader::StageSpecialization spec{};
     spec.info = &program->info;
     size_t perm_idx{};
-    if (!LoadShaderMeta(ar, program->info, sel.fetch_shader, spec, perm_idx)) {
+    cache_reject = LoadShaderMeta(ar, program->info, sel.fetch_shader, spec, perm_idx);
+    if (cache_reject != CacheReject::None) {
         return false;
     }
 
+    const auto spv_name = fmt::format("{:#018x}_{}", program->info.pgm_hash, perm_idx);
     std::vector<u32> spv{};
-    Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary,
-                                       fmt::format("{:#018x}_{}", program->info.pgm_hash, perm_idx),
-                                       spv);
+    Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary, spv_name, spv);
     if (spv.empty()) {
+        cache_reject = CacheReject::Missing;
+        return false;
+    }
+    // bbport: a damaged SPIR-V file (no header) is never handed to the driver.
+    constexpr u32 SpirvMagic = 0x07230203;
+    if (spv.size() < 5 || spv[0] != SpirvMagic) {
+        cache_reject = CacheReject::Corrupt;
+        bad_stage_files.emplace_back(Storage::BlobType::ShaderBinary, spv_name);
         return false;
     }
 
@@ -489,11 +536,14 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
             // the store holds entries from more than one cache generation, so this pipeline is
             // left to compile at runtime.
             const auto idx = std::distance(it_pgm.value()->modules.begin(), it);
+            // bbport: such a duplicate comes from Specialization::operator== comparing only the
+            // other side's bound resources: the runtime made a second permutation for a draw
+            // with more bindings, and its key is deleted (draws find the loaded one).
             if (perm_idx != idx) {
-                LOG_WARNING(Render_Vulkan,
-                            "Cached permutation {} of {}_{:x} conflicts with index {}, skipping "
-                            "preload",
-                            perm_idx, program->info.hw_stage, program->info.pgm_hash, idx);
+                LOG_DEBUG(Render_Vulkan,
+                          "Cached permutation {} of {}_{:x} duplicates index {}, skipping preload",
+                          perm_idx, program->info.hw_stage, program->info.pgm_hash, idx);
+                cache_reject = CacheReject::Duplicate;
                 return false;
             }
             module = it->module;
@@ -556,57 +606,71 @@ void PipelineCache::WarmUp() {
 
     u32 num_pipelines{};
     u32 num_total_pipelines{};
+    // bbport: every key that does not load says why (cache_reject). The ones that never will
+    // (bad: duplicate, missing or damaged shaders, older format, refused by the driver) are
+    // deleted at this start instead of being read again at every start.
+    std::array<u32, 7> rejects{};
+    std::vector<std::string> bad_keys;
+    bad_stage_files.clear();
 
     Storage::DataBase::Instance().ForEachBlob(
-        Storage::BlobType::PipelineKey, [&](std::vector<u8>&& data) {
+        Storage::BlobType::PipelineKey, [&](std::vector<u8>&& data, const std::string& name) {
             ++num_total_pipelines;
+            cache_reject = CacheReject::None;
 
             Serialization::Archive ar{std::move(data)};
             Serialization::Reader pldata{ar};
 
             u32 version{};
             pldata.Read(version);
-            if (version != Serialization::PipelineKeyVersion) {
-                return;
-            }
-
             u32 is_compute{};
             pldata.Read(is_compute);
-
-            bool result{};
-            if (is_compute) {
-                result = LoadComputePipeline(ar);
-            } else {
-                result = LoadGraphicsPipeline(ar);
-            }
-
-            if (result) {
+            if (ar.Failed()) {
+                cache_reject = CacheReject::Corrupt;
+            } else if (version != Serialization::PipelineKeyVersion) {
+                cache_reject = CacheReject::Old;
+            } else if (is_compute ? LoadComputePipeline(ar) : LoadGraphicsPipeline(ar)) {
                 ++num_pipelines;
+                return;
+            }
+            if (cache_reject == CacheReject::None) {
+                cache_reject = CacheReject::Kept;
+            }
+            ++rejects[static_cast<size_t>(cache_reject)];
+            if (cache_reject != CacheReject::Kept) {
+                bad_keys.push_back(name);
             }
         });
 
     LOG_INFO(Render, "Preloaded {} pipelines", num_pipelines);
-    if (num_total_pipelines > num_pipelines) {
-        LOG_WARNING(Render, "{} stale pipelines were found. Consider re-generating the cache",
-                    num_total_pipelines - num_pipelines);
-    }
 
     // bbport: BB_PREBUILD_SHADERS=1 builds the pipelines the cache can derive before the game
-    // starts (still twins) and deletes keys whose shaders are gone; =only ends the run then.
+    // starts (still twins); =only ends the run then.
     const char* prebuild = std::getenv("BB_PREBUILD_SHADERS");
     const bool build = prebuild && prebuild[0] && prebuild[0] != '0';
     PrepareStillTwins(build);
-    if (build) {
-        auto& storage = Storage::DataBase::Instance();
-        for (const auto& name : unbuildable_keys) {
-            storage.Remove(Storage::BlobType::PipelineKey, name);
-        }
-        std::printf("Shader pre-build: %zu cached pipelines on %s; %u preloaded, %zu keys "
-                    "removed (their shaders are no longer cached)\n",
-                    size_t(num_total_pipelines), std::string{instance.GetModelName()}.c_str(),
-                    num_pipelines, unbuildable_keys.size());
-        unbuildable_keys.clear();
+
+    auto& storage = Storage::DataBase::Instance();
+    for (const auto& name : bad_keys) {
+        storage.Remove(Storage::BlobType::PipelineKey, name);
     }
+    std::ranges::sort(bad_stage_files);
+    const auto [first_same, last_same] = std::ranges::unique(bad_stage_files);
+    bad_stage_files.erase(first_same, last_same);
+    for (const auto& [type, name] : bad_stage_files) {
+        storage.Remove(type, name);
+    }
+    const auto count = [&](CacheReject reject) { return rejects[static_cast<size_t>(reject)]; };
+    std::printf("Shader cache check: %u of %u pipelines loaded on %s; %zu bad pipelines deleted "
+                "(%u duplicate shaders, %u missing shaders, %u older format, %u damaged, %u "
+                "refused by the driver), %zu bad shader files deleted; %u kept for other "
+                "settings\n",
+                num_pipelines, num_total_pipelines, std::string{instance.GetModelName()}.c_str(),
+                bad_keys.size(), count(CacheReject::Duplicate), count(CacheReject::Missing),
+                count(CacheReject::Old), count(CacheReject::Corrupt), count(CacheReject::Refused),
+                bad_stage_files.size(), count(CacheReject::Kept));
+    std::fflush(stdout);
+    bad_stage_files.clear();
 
     Storage::DataBase::Instance().FinishPreload();
 
@@ -678,6 +742,13 @@ bool PersistentSrtInfo::Deserialize(Serialization::Archive& ar) {
 
     srt.Read(this, sizeof(*this));
 
+    // bbport: a truncated file has no walker code left to register.
+    if (ar.Failed() || walker_func_size > ar.Remaining()) {
+        walker_func_size = 0;
+        walker_func = nullptr;
+        ar.Fail();
+        return false;
+    }
     if (walker_func_size) {
         walker_func = RegisterWalkerCode(ar.CurrPtr(), walker_func_size);
         ar.Advance(walker_func_size);

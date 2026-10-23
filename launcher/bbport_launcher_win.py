@@ -2566,6 +2566,17 @@ class Launcher:
                             self.prebuild_summary = _('Shaders pre-built: {}',
                                                       'Шейдеры собраны: {}').format(line[:150])
                         self.status.configure(text=line[:160], fg=GOLD)
+                    elif 'Shader cache check:' in item:
+                        # The warm-up deletes bad shader cache entries (duplicates, damaged or
+                        # older-format files) at every start; say so when it found some.
+                        found = re.search(r'(\d+) bad pipelines deleted.*?(\d+) bad shader files', item)
+                        bad = (int(found.group(1)) + int(found.group(2))) if found else 0
+                        if bad:
+                            note = _('Shader cache: {} bad entries found and deleted',
+                                     'Кэш шейдеров: найдено и удалено плохих записей: {}').format(bad)
+                            self.status.configure(text=note, fg=GOLD)
+                            if getattr(self, 'prebuild_summary', None):
+                                self.prebuild_summary += ' · ' + note
                     elif 'Entering original x86-64 code' in item:
                         self.status.configure(text=_('The game is running.', 'Игра запущена.'), fg=GOLD)
                     elif 'restarting through run.py' in item:

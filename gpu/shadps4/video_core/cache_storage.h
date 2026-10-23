@@ -55,7 +55,9 @@ public:
     /// warm-up: BB_PREBUILD_SHADERS=only).
     void Drain();
 
-    void ForEachBlob(BlobType type, const std::function<void(std::vector<u8>&& data)>& func);
+    /// bbport: `name` is the blob's name without the extension (as Save, Load and Remove take).
+    void ForEachBlob(BlobType type,
+                     const std::function<void(std::vector<u8>&& data, const std::string& name)>& func);
 
 private:
     std::jthread io_worker{};
