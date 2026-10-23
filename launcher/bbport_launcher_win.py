@@ -1346,7 +1346,7 @@ class Launcher:
                                    bg=BG, fg=GOLD, font=('Georgia', 13),
                                    anchor='w', justify='left', wraplength=brand_width, bd=0, padx=0)
         self.brand_title.pack(fill='x', padx=self.px(18), pady=(self.px(12), self.px(4)))
-        self.brand_author = tk.Label(side, text='by rakefire impala, with love <3', bg=BG, fg=TEXT,
+        self.brand_author = tk.Label(side, text='by rakefire impala', bg=BG, fg=TEXT,
                                     font=('Segoe UI', 9), anchor='w', bd=0, padx=0)
         self.brand_author.pack(fill='x', padx=self.px(18))
         self.brand_origin = tk.Label(side, text='Native CPU Windows port with GPU\ncode borrowed and edited '
