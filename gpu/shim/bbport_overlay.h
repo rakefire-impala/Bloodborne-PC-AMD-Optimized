@@ -38,6 +38,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent,
 /// A menu (settings, lamp travel) or a text entry is shown: the game's input is held neutral.
 bool CapturesInput();
 
+/// The force save hotkey was pressed since the last call (the game thread acts on it).
+bool TakeForceSave();
+
 /// Window thread: the game's text dialog (sceImeDialog). Shown as a box on screen until
 /// `active` is false; typing goes to the window (sdl_window), the box only displays it.
 void SetTextEntry(bool active, const std::string& prompt, const std::string& text);

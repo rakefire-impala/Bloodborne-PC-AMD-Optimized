@@ -24,7 +24,8 @@ Lamps show the travel dialog only in single player, so co-op never sets these fl
 
 Saving at lamps (save=True, with or without travel): the lamp's dialog also sets LAMP_SAVE, and
 common event 7260 waits for it, clears it and requests a save (2000[05], as the game's own events
-do after a boss or a shortcut).
+do after a boss or a shortcut). Event 7260 is generated with travel alone too: the port's force
+save hotkey sets LAMP_SAVE.
 """
 import argparse
 import os
@@ -388,8 +389,9 @@ def generate(source, out: Path, language=1, travel=True, save=False):
     common = F.Emevd(common_dcx.data)
     if travel:
         patch_common(common, warps)
-    if save:
-        add_save_event(common)
+    # The save event also serves the port's force save hotkey (src/runtime_lamp.c), so it is
+    # there with travel alone; only with save do the lamps set its flag.
+    add_save_event(common)
     (root / COMMON_EVENTS).parent.mkdir(parents=True, exist_ok=True)
     (root / COMMON_EVENTS).write_bytes(common_dcx.write(common.write()))
     if travel:

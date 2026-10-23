@@ -69,6 +69,20 @@ float base_scale = 1.0f;
 std::chrono::steady_clock::time_point last_present{};
 float frame_ms_avg = 0.0f;
 
+// Debug hotkeys (force save: L3 + d-pad up / F5; frame generation on/off: L3 + d-pad down / F6).
+// Their confirmation is shown for a moment; the text is guarded by imgui_mutex, the deadline is
+// also read by Visible() before the lock.
+std::string notice_text;
+std::atomic<long long> notice_until_ms{0};
+std::atomic<bool> force_save_requested{false};
+int frame_generation_before_toggle = BbSettings::FrameGenerationFsr;
+
+long long NowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
 const char* Text(const char* english, const char* russian) {
     return BbSettings::Get().menu_language == BbSettings::MenuRussian ? russian : english;
 }
@@ -1036,6 +1050,50 @@ void TextEntryBox() {
     ImGui::End();
 }
 
+void ShowNotice(const char* text) {
+    notice_text = text;
+    notice_until_ms = NowMs() + 2500;
+    std::printf("Hotkey: %s\n", text);
+    std::fflush(stdout);
+}
+
+// The game thread sets the save request flag (bbgpu_take_force_save, src/runtime_lamp.c).
+void RequestForceSave() {
+    force_save_requested = true;
+    ShowNotice(Text("Saving the game...", "Сохранение игры..."));
+}
+
+// Off and back to the mode it had, for this session (the menu's choice stays in the settings).
+void ToggleFrameGeneration() {
+    auto& s = BbSettings::Get();
+    const int mode = s.frame_generation;
+    if (mode != BbSettings::FrameGenerationOff) {
+        frame_generation_before_toggle = mode;
+        s.frame_generation = BbSettings::FrameGenerationOff;
+        ShowNotice(Text("Frame generation: off", "Генерация кадров: выкл."));
+        return;
+    }
+    s.frame_generation = frame_generation_before_toggle;
+    ShowNotice(frame_generation_before_toggle == BbSettings::FrameGenerationNvidia
+                   ? Text("Frame generation: on (NVIDIA)", "Генерация кадров: вкл. (NVIDIA)")
+                   : Text("Frame generation: on (FSR)", "Генерация кадров: вкл. (FSR)"));
+}
+
+void Notice() {
+    if (NowMs() >= notice_until_ms) return;
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
+                                   viewport->WorkPos.y + 48.0f * base_scale),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.6f);
+    ImGui::Begin("##notice", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing);
+    ImGui::TextUnformatted(notice_text.c_str());
+    ImGui::End();
+}
+
 void FpsCounter() {
     const auto& s = BbSettings::Get();
     if (!s.show_fps) return;
@@ -1252,6 +1310,11 @@ bool HandleEvent(const SDL_Event& event) {
             SetOpen(event.key.key == SDLK_INSERT ? !is_open : false);
             return true;
         }
+        if (down && !event.key.repeat && !is_open &&
+            (event.key.key == SDLK_F5 || event.key.key == SDLK_F6)) {
+            event.key.key == SDLK_F5 ? RequestForceSave() : ToggleFrameGeneration();
+            return true;
+        }
         if (!is_open) {
             return false;
         }
@@ -1274,6 +1337,13 @@ bool HandleEvent(const SDL_Event& event) {
         }
         if (down && l3_down && r3_down) {
             SetOpen(!is_open);
+            return true;
+        }
+        // L3 does nothing in the game; with it held, d-pad up/down are the hotkeys (and the
+        // game does not see them: src/runtime_pad.c).
+        if (down && l3_down && !r3_down && !is_open &&
+            (button == SDL_GAMEPAD_BUTTON_DPAD_UP || button == SDL_GAMEPAD_BUTTON_DPAD_DOWN)) {
+            button == SDL_GAMEPAD_BUTTON_DPAD_UP ? RequestForceSave() : ToggleFrameGeneration();
             return true;
         }
         if (!is_open) {
@@ -1330,7 +1400,11 @@ bool HandleEvent(const SDL_Event& event) {
 
 bool Visible() {
     return initialized && (menu_open || text_entry_active || BbLampMenu::IsOpen() ||
-                           BbSettings::Get().show_fps);
+                           BbSettings::Get().show_fps || NowMs() < notice_until_ms);
+}
+
+bool TakeForceSave() {
+    return force_save_requested.exchange(false);
 }
 
 bool CapturesInput() {
@@ -1400,6 +1474,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent,
     }
     if (BbSettings::Get().show_fps && !menu_open) {
         FpsCounter();
+    }
+    if (!menu_open) {
+        Notice();
     }
     if (text_entry_active) {
         TextEntryBox();

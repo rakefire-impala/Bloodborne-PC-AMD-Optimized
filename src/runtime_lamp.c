@@ -23,6 +23,11 @@ enum {
     FLAGS_READY = 0x553b0d8,     /* non-null once the game has event flags */
     EVENT_FLAG_MAN = 0x553b100,  /* SprjEventFlagMan singleton */
 };
+/* scripts/lamp_travel.py: common event 7260 waits for this flag, clears it and requests a save
+ * (generated with lamp travel or lamp save). The lamps set it with lamp save; the force save
+ * hotkey sets it too. */
+enum { SAVE_REQUEST_FLAG = 6985 };
+
 typedef int (ABI *IsEventFlag)(void *, uint32_t);
 typedef void (ABI *SetEventFlag)(void *, uint32_t, uint32_t);
 
@@ -95,7 +100,20 @@ static void watch_lit(void) {
     known = 1;
 }
 
+static void force_save(void) {
+    if (!active) {
+        puts("Force save: off (it needs lamp travel, whose events request the save)");
+    } else if (!ready()) {
+        puts("Force save: not in the world yet");
+    } else {
+        set(SAVE_REQUEST_FLAG, 1);
+        puts("Force save: requested (the game saves when it allows it)");
+    }
+    fflush(stdout);
+}
+
 void runtime_lamp_poll(void) {
+    if (bbgpu_take_force_save()) force_save();
     if (!active || !ready()) return;
     watch_lit();
     if (!shown) {
