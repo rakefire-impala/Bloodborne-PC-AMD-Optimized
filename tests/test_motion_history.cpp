@@ -151,10 +151,51 @@ int main() {
     assert(*std::max_element(scans_per_frame.begin()+3,scans_per_frame.end())==0);
     std::printf("Index content fixture: %u meshes; 16 reused allocations rejected immediately; unchanged meshes keep cached bounds\n",meshes);
 
+    // One mesh drawn for several characters: each copy takes last frame's copy nearest it,
+    // also when culling swapped the draw order.
+    History crowd(1024);
+    const Draw body{.shader = 3, .geometry = 4, .instances = 1, .vertices = {0, 8}};
+    const Position a{10.0f, 0.0f, 5.0f, true}, b{12.0f, 0.0f, 5.0f, true};
+    const auto a0 = crowd.Prepare(body, a), b0 = crowd.Prepare(body, b);
+    crowd.NextFrame();
+    const auto b1 = crowd.Prepare(body, {12.1f, 0.0f, 5.0f, true});
+    const auto a1 = crowd.Prepare(body, {10.2f, 0.0f, 5.1f, true});
+    assert(b1.load == b0.store && a1.load == a0.store && crowd.stats.positioned == 2);
+    // A copy leaves: the one left still matches; one appears: it gets none.
+    crowd.NextFrame();
+    const auto a2 = crowd.Prepare(body, {10.3f, 0.0f, 5.1f, true});
+    assert(a2.load == a1.store);
+    crowd.NextFrame();
+    const auto a3 = crowd.Prepare(body, {10.4f, 0.0f, 5.1f, true});
+    const auto c3 = crowd.Prepare(body, {10.9f, 0.0f, 5.1f, true});
+    assert(a3.load == a2.store && !c3.load);
+    // A single copy that is not the one of last frame (it left, another came): too far away.
+    crowd.NextFrame();
+    assert(crowd.Prepare(body, {11.0f, 0.0f, 5.1f, true}).load == c3.store);
+    crowd.NextFrame();
+    assert(!crowd.Prepare(body, {16.0f, 0.0f, 5.1f, true}).load);
+    // Two copies at one place (parts of one object): ambiguous, camera motion.
+    History twins(1024);
+    twins.Prepare(body, a);
+    twins.Prepare(body, {10.01f, 0.0f, 5.0f, true});
+    twins.NextFrame();
+    assert(!twins.Prepare(body, a).load && !twins.Prepare(body, a).load);
+    // Copies without a position keep the old rule.
+    History blind(1024);
+    blind.Prepare(body);
+    blind.Prepare(body);
+    blind.NextFrame();
+    assert(!blind.Prepare(body).load && blind.stats.ambiguous == 2 && !blind.stats.positioned);
+    const float model[12] = {1, 0, 0, 7, 0, 1, 0, -3, 0, 0, 1, 2};
+    const auto where = ModelPosition(model);
+    assert(where.valid && where.x == 7 && where.y == -3 && where.z == 2);
+    const float broken[12] = {1, 0, 0, NAN, 0, 1, 0, 0, 0, 0, 1, 0};
+    assert(!ModelPosition(broken).valid);
+
     assert(JitterPhases(1920, 1920) == 8);
     assert(JitterPhases(1280, 1920) == 18);
     assert(JitterPhases(960, 1920) == 32);
     assert(JitterPhases(640, 1920) == 72);
     assert(JitterPhases(0, 1920) == 8);
-    std::puts("Motion history: PASS (ranges, restart, offsets, unique matching, ambiguous instance rejection, capacity, camera cut allocations, gating, immediate index-content validation, jitter)");
+    std::puts("Motion history: PASS (ranges, restart, offsets, unique matching, ambiguous instance rejection, repeated meshes matched by position, capacity, camera cut allocations, gating, immediate index-content validation, jitter)");
 }

@@ -30,7 +30,9 @@ public:
     }
 
     using DrawInfo = Motion::Draw;
-    u32 PrepareDraw(const DrawInfo& draw);
+    /// `position`: the object's world position (Motion::ModelPosition), which tells copies of
+    /// a mesh drawn for several objects apart.
+    u32 PrepareDraw(const DrawInfo& draw, Motion::Position position = {});
     /// Small skeletons: whether the bone palette changed (Motion::History::Moving).
     bool Moving(const Motion::History::GateKey& key, u64 palette) {
         return history.Moving(key, palette);
@@ -86,6 +88,7 @@ private:
 
     u64 frame = 0;
     u32 params_used = 0;
+    bool positioned_logged = false; ///< the first match by position was logged
     VideoCore::UniqueImage image;
     vk::UniqueImageView view;
     u32 image_width = 0, image_height = 0; ///< the size of the pass that writes it

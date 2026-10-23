@@ -1195,6 +1195,30 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                     topology = scanned.topology;
                 }
             }
+            // The object's world position, from its model constants (the snapshot this draw
+            // reads): one character mesh drawn for several characters is told apart by it.
+            Motion::Position position{};
+            for (u32 buffer_index = 0; buffer_index < vs.buffers.size(); ++buffer_index) {
+                const auto& resource = vs.buffers[buffer_index];
+                if (resource.IsSpecial()) continue;
+                const auto buffer = resource.GetSharp(vs);
+                if (!buffer.Valid() || buffer.GetStride() != 16 ||
+                    buffer.GetSize() != Motion::ModelConstantsSize) {
+                    continue;
+                }
+                const RingBinding* ring =
+                    num_ring_stages ? FindRingBinding(vs, buffer_index) : nullptr;
+                const VAddr address = buffer.base_address;
+                if (ring) {
+                    position = Motion::ModelPosition(
+                        reinterpret_cast<const float*>(constant_ring->Data(ring->offset)));
+                } else if (memory->IsValidGpuMapping(address, 0) &&
+                           memory->ClampRangeSize(address, 48) == 48 &&
+                           !buffer_cache.IsRegionGpuModified(address, 48)) {
+                    position = Motion::ModelPosition(reinterpret_cast<const float*>(address));
+                }
+                break;
+            }
             push_data.motion_param = object_motion->PrepareDraw({
                 .shader = vs.pgm_hash,
                 .geometry = motion_geometry,
@@ -1204,7 +1228,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 .instances = regs.num_instances.NumInstances(),
                 .first_instance = first_instance,
                 .vertices = range,
-            });
+            }, position);
         }
     }
     // bbport: a motion draw without vectors this frame (still, or no history) draws with the

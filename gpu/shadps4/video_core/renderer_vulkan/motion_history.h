@@ -40,6 +40,7 @@ VertexRange IndexedRange(std::span<const Index, Extent> indices, int32_t base_ve
 // scene constants (camera), 416-byte model constants and palettes of 3x4 bone matrices
 // (48 bytes per bone). Characters have 656+ bytes; weapons and props 2-8 bones (96-384).
 enum class BufferRole { Other, Skeleton, SmallSkeleton };
+constexpr uint32_t ModelConstantsSize = 416;
 inline BufferRole ClassifyBuffer(uint32_t size) {
     if (size == 864 || size > 16384) {
         return BufferRole::Other;
@@ -217,6 +218,19 @@ struct Draw {
     bool operator==(const Draw& rhs) const = default;
 };
 
+// The world position of a draw's object: the translation of the first matrix (3x4 rows) of its
+// model constants. One character mesh is drawn for every character wearing it (enemies of one
+// kind, hunters sharing armor with the player); the position tells those copies apart.
+struct Position {
+    float x{}, y{}, z{};
+    bool valid{};
+};
+inline Position ModelPosition(const float* model) {
+    const Position position{model[3], model[7], model[11], true};
+    const auto usable = [](float v) { return std::isfinite(v) && std::abs(v) < 1.0e6f; };
+    return usable(position.x) && usable(position.y) && usable(position.z) ? position : Position{};
+}
+
 // CPU bookkeeping shared with the regression test. Draw identity includes topology and
 // offsets: a reused index buffer or another submesh must never read uninitialised history.
 class History {
@@ -227,8 +241,14 @@ public:
         uint32_t store{}, load{}, vertices{}, instances{}, first_vertex{}, first_instance{};
     };
     struct Stats {
-        uint64_t draws{}, stored{}, loaded{}, unmatched{}, exhausted{}, invalid{}, still{}, ambiguous{};
+        uint64_t draws{}, stored{}, loaded{}, unmatched{}, exhausted{}, invalid{}, still{}, ambiguous{},
+            positioned{};
     } stats;
+    /// Farthest an object moves between two frames (world units, metres), and the separation
+    /// that keeps a match unambiguous: the copy nearest last frame's must be clearly nearer than
+    /// any other copy that is still free.
+    static constexpr float MaxStep = 2.0f;
+    static constexpr float MinSeparation = 0.05f;
 
     // A small skeleton (weapon, prop; most are static world pieces) only needs history
     // while its bone palette changes: with last frame's bones its motion is the camera's.
@@ -255,6 +275,9 @@ public:
     void NextFrame() {
         previous.swap(current);
         current.clear();
+        previous_positions.swap(current_positions);
+        current_positions.clear();
+        claimed.clear();
         previous_occurrences.swap(occurrences);
         occurrences.clear();
         gate_previous.swap(gate_current);
@@ -269,12 +292,14 @@ public:
     // this frame's allocations/parity; only the preceding camera's tables are stale.
     void DiscardPrevious() {
         previous.clear();
+        previous_positions.clear();
+        claimed.clear();
         previous_occurrences.clear();
         gate_previous.clear();
         gate_previous_occurrences.clear();
     }
 
-    Allocation Prepare(const Draw& draw) {
+    Allocation Prepare(const Draw& draw, Position position = {}) {
         ++stats.draws;
         Key key{draw, 0};
         key.occurrence = occurrences[key]++;
@@ -284,12 +309,21 @@ public:
             ++stats.invalid;
             return {};
         }
-        // Repeated meshes can exchange draw order after culling. An occurrence
-        // number is not an object identity: use camera motion for ambiguous matches.
+        // Repeated meshes can exchange draw order after culling. An occurrence number is not an
+        // object identity: with object positions each copy takes last frame's copy nearest it;
+        // without, ambiguous matches use camera motion. Rejecting every repeated mesh left
+        // groups of one enemy kind, and hunters wearing the player's armor, with camera motion
+        // only: FSR and frame generation smeared them whenever they moved.
         const auto* count_previous = previous_occurrences.find(Key{draw, 0});
         const bool ambiguous = key.occurrence != 0 || (count_previous && *count_previous > 1);
-        const auto* prev = ambiguous ? nullptr : previous.find(key);
-        stats.ambiguous += ambiguous ? 1 : 0;
+        const uint32_t* prev = nullptr;
+        if (position.valid) {
+            prev = count_previous ? Nearest(draw, *count_previous, position) : nullptr;
+        } else if (!ambiguous) {
+            prev = previous.find(key);
+        }
+        stats.ambiguous += ambiguous && !prev ? 1 : 0;
+        stats.positioned += ambiguous && prev ? 1 : 0;
         Allocation result{0, 0, draw.vertices.count, draw.instances,
                           draw.vertices.first, draw.first_instance};
         if (prev) {
@@ -302,6 +336,9 @@ public:
             result.store = 1 + uint32_t(frame & 1) * capacity + used;
             used += uint32_t(count);
             current.emplace(key, result.store);
+            if (position.valid) {
+                current_positions.emplace(key, position);
+            }
             ++stats.stored;
         } else {
             ++stats.exhausted;
@@ -328,9 +365,45 @@ private:
             return size_t(h);
         }
     };
+    // Last frame's copy of `draw` nearest `position` among those no draw of this frame took:
+    // within MaxStep, and clearly nearer than the next free copy (two copies at one place are
+    // parts of one object, not two objects).
+    const uint32_t* Nearest(const Draw& draw, uint32_t count, const Position& position) {
+        const uint32_t* best = nullptr;
+        Key best_key{};
+        float best_distance = std::numeric_limits<float>::infinity();
+        float rival_distance = std::numeric_limits<float>::infinity();
+        for (uint32_t occurrence = 0; occurrence < count; ++occurrence) {
+            const Key candidate{draw, occurrence};
+            const auto* where = previous_positions.find(candidate);
+            const auto* store = previous.find(candidate);
+            if (!where || !store || claimed.find(candidate)) {
+                continue;
+            }
+            const float distance = std::hypot(where->x - position.x, where->y - position.y,
+                                              where->z - position.z);
+            if (distance < best_distance) {
+                rival_distance = best_distance;
+                best_distance = distance;
+                best = store;
+                best_key = candidate;
+            } else {
+                rival_distance = std::min(rival_distance, distance);
+            }
+        }
+        if (!best || !(best_distance <= MaxStep) ||
+            rival_distance < 2.0f * best_distance + MinSeparation) {
+            return nullptr;
+        }
+        claimed.emplace(best_key, 1);
+        return best;
+    }
+
     uint32_t capacity{}, used{};
     uint64_t frame{};
     FlatMap<Key, uint32_t, Hash> previous, current, occurrences, previous_occurrences;
+    FlatMap<Key, Position, Hash> previous_positions, current_positions;
+    FlatMap<Key, uint8_t, Hash> claimed; ///< last frame's copies a draw of this frame took
     struct GateHash {
         size_t operator()(const GateKey& key) const {
             uint64_t h = 0;

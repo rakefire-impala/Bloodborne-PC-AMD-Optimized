@@ -98,13 +98,14 @@ void ObjectMotion::OnFrameStart() {
     if (BbStats::enabled && (frame % 600) == 0 && history.stats.draws) {
         const auto& s = history.stats;
         std::printf("Object motion: %llu draws, %llu stored, %llu with history, %llu unmatched, "
-                    "%llu capacity skips, %llu invalid, %llu still, %llu ambiguous histories rejected (600 frames); last frame %u/%u vertices; "
+                    "%llu capacity skips, %llu invalid, %llu still, %llu ambiguous histories rejected, "
+                    "%llu matched by position (600 frames); last frame %u/%u vertices; "
                     "index ranges %llu reused, %llu scanned (%llu found changed), %zu cached\n",
                     (unsigned long long)s.draws, (unsigned long long)s.stored,
                     (unsigned long long)s.loaded, (unsigned long long)s.unmatched,
                     (unsigned long long)s.exhausted, (unsigned long long)s.invalid,
                     (unsigned long long)s.still,
-                    (unsigned long long)s.ambiguous,
+                    (unsigned long long)s.ambiguous, (unsigned long long)s.positioned,
                     history.Used(), PositionsPerFrame, (unsigned long long)index_ranges.stats.hits,
                     (unsigned long long)index_ranges.stats.scans,
                     (unsigned long long)index_ranges.stats.stale, index_ranges.Size());
@@ -138,11 +139,16 @@ void ObjectMotion::OnFrameStart() {
     });
 }
 
-u32 ObjectMotion::PrepareDraw(const DrawInfo& draw) {
+u32 ObjectMotion::PrepareDraw(const DrawInfo& draw, Motion::Position position) {
     if (!enabled || BbToggle::Disabled(1u << 29) || params_used >= ParamsPerFrame) {
         return 0;
     }
-    const auto allocation = history.Prepare(draw);
+    const auto allocation = history.Prepare(draw, position);
+    if (history.stats.positioned && !positioned_logged) {
+        positioned_logged = true;
+        std::printf("Object motion: repeated meshes matched by position (first at frame %llu)\n",
+                    static_cast<unsigned long long>(frame));
+    }
     u32 flags = (allocation.store ? Shader::MotionVectors::FlagStore : 0) |
                 (allocation.load ? Shader::MotionVectors::FlagLoad : 0);
     if (!flags) {
