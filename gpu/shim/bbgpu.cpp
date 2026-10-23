@@ -31,6 +31,7 @@
 #include "core/libraries/libs.h"
 #include "core/memory.h"
 #include "core/signals.h"
+#include "bbport_splash.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
@@ -245,6 +246,7 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
     g_window_thread = std::thread([title, width, height] {
         Common::SetCurrentThreadName("bb:window");
         auto* window = new Frontend::WindowSDL(width, height, title.c_str());
+        BbSplash::Start(window->GetWindowInfo().render_surface);
         {
             std::scoped_lock lock{g_window_mutex};
             g_window = window;
@@ -252,6 +254,7 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
         }
         g_window_cv.notify_all();
         while (window->PollEvents()) {
+            BbSplash::Paint();
             SDL_Delay(BbSettings::Get().window_focused ? 2 : 20);
         }
         LOG_INFO(Frontend, "Window closed by user");

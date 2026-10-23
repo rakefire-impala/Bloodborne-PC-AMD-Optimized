@@ -14,6 +14,7 @@
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
+#include "bbport_splash.h"
 #ifdef _WIN32
 #include <windows.h>
 #include <vulkan/vulkan_win32.h>
@@ -229,6 +230,7 @@ bool Swapchain::Present(vk::Queue queue) {
     acquired = false;
     acquired_fenced = false;
     auto result = (queue ? queue : instance.GetPresentQueue()).presentKHR(present_info);
+    BbSplash::OnFramePresented(); // bbport: the startup splash ends at the first frame
     if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
         needs_recreation = true;
     } else {

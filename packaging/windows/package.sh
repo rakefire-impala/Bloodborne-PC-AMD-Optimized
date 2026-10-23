@@ -52,7 +52,7 @@ ldd "$dest/bin/bb-probe.exe" "$dest/bin/bb-gpu-capabilities.exe" |
         cp -u "$dll" "$dest/bin/"
     done
 cp -r scripts patches "$dest/"
-cp run.py LICENSE README.md packaging/windows/README-Windows.txt "$dest/"
+cp run.py LICENSE README.md packaging/windows/README-Windows.txt bb.jpg "$dest/"
 cp -r docs "$dest/"
 cp packaging/windows/bbport.menu.ini "$dest/"
 if [[ -d fsr4_shaders ]]; then cp -r fsr4_shaders "$dest/"; fi

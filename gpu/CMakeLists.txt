@@ -175,7 +175,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     set_source_files_properties(shim/bbport_nvidia.cpp PROPERTIES COMPILE_OPTIONS "-std=c++23")
 endif()
 if(WIN32)
-    target_link_libraries(bbgpu PRIVATE wintrust crypt32)
+    target_link_libraries(bbgpu PRIVATE wintrust crypt32 windowscodecs ole32)
 endif()
 # bbport co-op: PS4 network and PSN libraries with the shadNet client, from shadp2p
 # (github.com/Wozzardman/shadp2p, GPL-2.0), for private Bloodborne co-op servers.
