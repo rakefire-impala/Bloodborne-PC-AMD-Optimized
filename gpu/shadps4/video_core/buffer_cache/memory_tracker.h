@@ -104,15 +104,21 @@ public:
                             return true;
                         }
                     } else {
+                        // bbport: on_gpu_pages twins GPU-written bytes the GPU still writes;
+                        // false: they are downloaded first, as with readbacks Relaxed.
+                        bool download = false;
                         manager->template ForEachGpuModifiedRange<false>(
                             offset, size, [&](VAddr address, u64 bytes) {
                                 if (audit) {
                                     skipped.emplace_back(address, bytes);
                                 }
-                                if (!unmapping) {
-                                    on_gpu_pages(address, bytes);
+                                if (!unmapping && !on_gpu_pages(address, bytes)) {
+                                    download = true;
                                 }
                             });
+                        if (download) {
+                            return true;
+                        }
                     }
                     manager->template ChangeRegionState<Type::CPU, true>(
                         manager->GetCpuAddr() + offset, size);

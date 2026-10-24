@@ -185,14 +185,39 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
         [this, device_addr, size, assume_locks] {
             ReadMemory(device_addr, size, true, assume_locks);
         },
-        [this](VAddr address, u64 bytes) { TwinGpuPages(address, bytes); });
+        [this, assume_locks](VAddr address, u64 bytes) {
+            // bbport: readbacks Off. A twin keeps the GPU's bytes wherever the guest's write
+            // left a word as it was; that is only right for bytes the GPU still writes
+            // (exposure, counters, particles: every frame). Older GPU bytes are downloaded
+            // instead, as with readbacks Relaxed: a respawn rewrites the player's model data
+            // over memory the GPU wrote, often with the same words, and the twins kept stale
+            // GPU words there (triangles spiking off the character after a respawn). Such
+            // writes are rare outside loading. Only the game's own threads download (on the
+            // GPU thread, through the command queue): a GPU-side thread would download inline,
+            // in the middle of its own recording. BB_TWIN_LIVENESS=0: twins for every write.
+            static const bool liveness = [] {
+                const char* env = std::getenv("BB_TWIN_LIVENESS");
+                return !env || env[0] != '0';
+            }();
+            if (liveness && !assume_locks && !GpuWrittenRecently(address, bytes)) {
+                const u32 downloads = stale_downloads.fetch_add(1, std::memory_order_relaxed);
+                if (downloads % 200 == 0) {
+                    std::printf("Buffer cache: guest write into GPU bytes the GPU no longer "
+                                "writes; downloaded first (%u times so far)\n",
+                                downloads + 1);
+                }
+                return false;
+            }
+            TwinGpuPages(address, bytes);
+            return true;
+        });
 }
 
 void BufferCache::UnmapMemory(VAddr device_addr, u64 size) {
     DropTwins(device_addr, size);
     memory_tracker->InvalidateRegion(
         device_addr, size, true, [this, device_addr, size] { ReadMemory(device_addr, size, true); },
-        [](VAddr, u64) {});
+        [](VAddr, u64) { return true; });
 }
 
 void BufferCache::TwinGpuPages(VAddr address, u64 size) {
@@ -242,6 +267,31 @@ void BufferCache::DropTwins(VAddr address, u64 size) {
             twin_count.fetch_sub(1, std::memory_order_relaxed);
         }
     }
+}
+
+void BufferCache::RotateGpuWrites(std::chrono::steady_clock::time_point now) {
+    const auto age = now - gpu_writes_since;
+    if (age < GpuWriteWindow) {
+        return;
+    }
+    gpu_writes_current ^= 1;
+    gpu_writes[gpu_writes_current].Clear();
+    if (age >= 2 * GpuWriteWindow) {
+        gpu_writes[gpu_writes_current ^ 1].Clear(); // nothing written for a whole window
+    }
+    gpu_writes_since = now;
+}
+
+void BufferCache::NoteGpuWrite(VAddr address, u64 size) {
+    std::scoped_lock lk{gpu_writes_mutex};
+    RotateGpuWrites(std::chrono::steady_clock::now());
+    gpu_writes[gpu_writes_current].Add(address, size);
+}
+
+bool BufferCache::GpuWrittenRecently(VAddr address, u64 size) {
+    std::scoped_lock lk{gpu_writes_mutex};
+    RotateGpuWrites(std::chrono::steady_clock::now());
+    return gpu_writes[0].Intersects(address, size) || gpu_writes[1].Intersects(address, size);
 }
 
 template <typename Upload>
@@ -570,6 +620,7 @@ std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 s
     }
     if (is_written) {
         gpu_modified_ranges.Add(device_addr, size);
+        NoteGpuWrite(device_addr, size);
     }
     return {arena, arena->Offset(device_addr)};
 }

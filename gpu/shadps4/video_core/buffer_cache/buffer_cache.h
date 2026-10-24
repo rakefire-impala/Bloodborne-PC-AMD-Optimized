@@ -6,6 +6,7 @@
 #include "bbport_copy.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -264,6 +265,18 @@ private:
     std::unique_ptr<std::array<Twin, MaxTwins>> twins;
     size_t twin_high_water = 0;          ///< slots in use are below it
     std::atomic<u32> twin_count{0};
+    /// bbport: GPU writes (written bindings) of the current and the previous window. A guest
+    /// write into GPU-written bytes the GPU still writes takes a twin; into older ones, the
+    /// GPU's bytes are downloaded first, as with readbacks Relaxed (InvalidateMemory).
+    static constexpr auto GpuWriteWindow = std::chrono::milliseconds(500);
+    std::mutex gpu_writes_mutex; ///< the write fault handler checks them on a guest thread
+    std::array<RangeSet, 2> gpu_writes;
+    u32 gpu_writes_current = 0;
+    std::chrono::steady_clock::time_point gpu_writes_since{};
+    std::atomic<u32> stale_downloads{0}; ///< guest writes into older GPU bytes (downloaded)
+    void NoteGpuWrite(VAddr address, u64 size);
+    bool GpuWrittenRecently(VAddr address, u64 size);
+    void RotateGpuWrites(std::chrono::steady_clock::time_point now);
 
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;
