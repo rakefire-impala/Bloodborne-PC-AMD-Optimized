@@ -734,6 +734,25 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     }
 
     const auto base_addr = reinterpret_cast<uintptr_t>(dcb.data());
+    // bbport: where an invalid header was read (a command buffer the game rewrote before it
+    // was parsed, or one read past its end), for the log before the assert.
+    const size_t dcb_words = dcb.size();
+    u32 last_opcode = ~0u;
+    size_t last_offset = 0;
+    const auto report_bad_packet = [&] {
+        const auto* start = reinterpret_cast<const u32*>(base_addr);
+        const size_t offset = size_t(dcb.data() - start);
+        std::printf("PM4: invalid header %#010x in a command buffer at %#llx: dword %zu of %zu, "
+                    "depth %d, previous packet opcode %#x at dword %zu; dwords from %zu:",
+                    dcb[0], static_cast<unsigned long long>(base_addr), offset, dcb_words,
+                    dcb_depth, last_opcode, last_offset, offset - std::min<size_t>(offset, 8));
+        for (size_t i = offset - std::min<size_t>(offset, 8);
+             i < std::min(dcb_words, offset + 8); ++i) {
+            std::printf(" %08x", start[i]);
+        }
+        std::printf("\n");
+        std::fflush(stdout);
+    };
     while (!dcb.empty()) {
         ProcessCommands();
 
@@ -742,9 +761,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
 
         switch (type) {
         default:
+            report_bad_packet();
             UNREACHABLE_MSG("Wrong PM4 type {}", type);
             break;
         case 0:
+            report_bad_packet();
             UNREACHABLE_MSG("Unimplemented PM4 type 0, base reg: {}, size: {}",
                             header->type0.base.Value(), header->type0.NumWords());
             break;
@@ -755,6 +776,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
         case 3:
             const u32 count = header->type3.NumWords();
             const PM4ItOpcode opcode = header->type3.opcode;
+            last_opcode = static_cast<u32>(opcode);
+            last_offset = size_t(dcb.data() - reinterpret_cast<const u32*>(base_addr));
             ApplyGraphicsRegisterPacket(regs, header, gfx_reg_checksum, &pipe_dirty);
             // DmaData to 0x3022C does nothing here (skipped below): no need to wait.
             if (rasterizer && !PipelinedOpcode(opcode) &&

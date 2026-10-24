@@ -183,7 +183,8 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
     memory_tracker->InvalidateRegion(
         device_addr, size, false,
         [this, device_addr, size, assume_locks] {
-            ReadMemory(device_addr, size, true, assume_locks);
+            ReadMemory(device_addr, size, true, assume_locks,
+                       EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Disabled);
         },
         [this, assume_locks](VAddr address, u64 bytes) {
             // bbport: readbacks Off. A twin keeps the GPU's bytes wherever the guest's write
@@ -419,13 +420,22 @@ void BufferCache::ExtendWriteFault(VAddr device_addr) {
     memory_tracker->ExtendWriteFault(Common::AlignDown(device_addr, window), window);
 }
 
-void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool assume_locks) {
-    const auto flush_request = [this, device_addr, size, is_write] {
+void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool assume_locks,
+                             bool pages_only) {
+    const auto flush_request = [this, device_addr, size, is_write, pages_only] {
         // GPU-modified ranges come as many small scattered islands,
         // so the download is widened to a window around the request
+        // bbport: except with readbacks Off (pages_only). There a page can hold both guest
+        // writes not uploaded yet and GPU-written bytes (twinned pages): a window download
+        // put stale GPU bytes over the game's newest data around the fault (command buffers:
+        // "Unimplemented PM4 type 0"). The faulting pages are write-protected, so the guest
+        // has written nothing there since their last upload.
         constexpr u64 WindowSize = 512_KB;
-        const VAddr window_start = Common::AlignDown(device_addr, WindowSize);
-        const VAddr window_end = std::max<VAddr>(window_start + WindowSize, device_addr + size);
+        const VAddr window_start = pages_only ? Common::AlignDown(device_addr, TwinPageSize)
+                                              : Common::AlignDown(device_addr, WindowSize);
+        const VAddr window_end =
+            pages_only ? Common::AlignUp(device_addr + size, TwinPageSize)
+                       : std::max<VAddr>(window_start + WindowSize, device_addr + size);
         // bbport: from the owner arenas, which hold every resident block (GPU-written ones
         // included); a page without one has nothing to download.
         for (VAddr start = window_start; start < window_end;) {
