@@ -177,6 +177,8 @@ def main():
         env.pop('BB_BOSS_RETRY_LIST', None)
     # Safe menu (src/runtime_pause.c): the start menu stops the world.
     env['BB_SAFE_MENU'] = env.get('BB_SAFE_MENU') or ini_value(config, 'qol_safe_menu') or '0'
+    # The same stop while the game window is not focused (alt-tab, another window clicked).
+    env['BB_FOCUS_PAUSE'] = env.get('BB_FOCUS_PAUSE') or ini_value(config, 'qol_focus_pause') or '0'
     mod_view = game if game.resolve() != original_game else None
     try:
         run_script('prepare.py', game, '--out', out)

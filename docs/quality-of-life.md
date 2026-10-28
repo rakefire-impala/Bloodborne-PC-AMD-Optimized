@@ -85,6 +85,14 @@ or as a guest, nothing pauses.
 `src/runtime_pause.c` checks the 1.09 executable byte for byte before hooking; otherwise it logs
 `Safe menu: executable/version guard failed` and the menu does not pause.
 
+## The world pauses while the game window is not focused
+
+`qol_focus_pause=1` in `bbport.ini` (or `BB_FOCUS_PAUSE=1`). The same stop as the safe menu's,
+with or without it, while the game window does not have input focus (Alt+Tab, a click on another
+window); it ends when the window gets focus back. The game keeps drawing (the launcher's "When the
+window loses focus" choice still sets its frame rate, or pauses the whole game instead). Single
+player only, 1.09 only, like the safe menu.
+
 ## Retry a boss fight after dying in it
 
 `qol_boss_retry=1` in `bbport.ini` (or `BB_BOSS_RETRY=1`). After a death to a story boss (a boss bar

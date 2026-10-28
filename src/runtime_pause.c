@@ -3,6 +3,8 @@
  * player, the whole world stands still: the player, enemies, projectiles, elevators and other
  * map objects, the camera, event scripts, the world's sounds and its effects (fire, fog, ...);
  * the menus (with their sounds) run as usual.
+ * Focus pause (launcher: Quality of Life, BB_FOCUS_PAUSE=1): the same stop while the game window
+ * does not have input focus (alt-tab, another window clicked), with or without the safe menu.
  *
  * The world stops the way it does while a cutscene plays. The field's update (1.09 image
  * 0x193ac10) decides once per frame whether the world runs: not during a cutscene, otherwise
@@ -29,6 +31,7 @@
  *
  * Polled on the thread that reads the pad, once per read. */
 #include "runtime.h"
+#include "../gpu/bbgpu.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -65,7 +68,7 @@ enum {
 
 static unsigned char *game;
 static volatile unsigned char paused; /* read by the hooks */
-static int active;
+static int active, menu_pause, focus_pause;
 static uintptr_t frozen[MAX_FROZEN];
 static int frozen_count;
 
@@ -273,14 +276,16 @@ void runtime_pause_install(void *image, size_t size, const char *app_version) {
         {0x193bb09, 5, {0x45,0x84,0xe4,0x74,0x40}},
         {0x193822d, 10, {0x41,0x80,0xbe,0x52,0x01,0x00,0x00,0x00,0x74,0x14}},
     };
-    const char *enabled = getenv("BB_SAFE_MENU");
-    if (!enabled || strcmp(enabled, "1")) return;
+    const char *menu = getenv("BB_SAFE_MENU"), *focus = getenv("BB_FOCUS_PAUSE");
+    menu_pause = menu && !strcmp(menu, "1");
+    focus_pause = focus && !strcmp(focus, "1");
+    if (!menu_pause && !focus_pause) return;
     const unsigned char *code = image;
     int ok = app_version && !strcmp(app_version, "01.09") && size > MENU_MAN + 8;
     for (size_t i = 0; ok && i < sizeof(checks) / sizeof(checks[0]); ++i)
         ok = memcmp(code + checks[i].offset, checks[i].bytes, checks[i].length) == 0;
     if (!ok) {
-        puts("Safe menu: executable/version guard failed; the start menu does not pause");
+        puts("Safe menu: executable/version guard failed; the world does not pause");
         return;
     }
     /* Each site keeps its call or jmp, now to a stub: movabs rax,&paused; cmp byte [rax],0;
@@ -357,12 +362,16 @@ void runtime_pause_install(void *image, size_t size, const char *app_version) {
     }
     game = image;
     active = 1;
-    puts("Safe menu: verified 1.09; the world stops while the start menu is open");
+    printf("Safe menu: verified 1.09; the world stops %s\n",
+           menu_pause && focus_pause ? "while the start menu is open or the window is not focused"
+           : menu_pause              ? "while the start menu is open"
+                                     : "while the window is not focused");
 }
 
 void runtime_pause_poll(void) {
     if (!active) return;
-    if (in_game() && start_menu_open() && single_player()) {
+    const int stop = (menu_pause && start_menu_open()) || (focus_pause && !bbgpu_window_focused());
+    if (in_game() && stop && single_player()) {
         each_enemy(freeze);
         pause_effects();
         paused = 1;

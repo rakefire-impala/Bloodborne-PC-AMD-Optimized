@@ -60,6 +60,8 @@ else
 fi
 # Safe menu (src/runtime_pause.c): the start menu stops the world.
 export BB_SAFE_MENU=${BB_SAFE_MENU:-$(sed -n 's/^qol_safe_menu=//p' "$BB_CONFIG" 2>/dev/null | tail -n1 | grep . || echo 0)}
+# The same stop while the game window is not focused (alt-tab, another window clicked).
+export BB_FOCUS_PAUSE=${BB_FOCUS_PAUSE:-$(sed -n 's/^qol_focus_pause=//p' "$BB_CONFIG" 2>/dev/null | tail -n1 | grep . || echo 0)}
 # A private merged view lasts for this launch, including restarts. Cleanup only our own view.
 if [[ $game != "$(realpath "$original_game")" ]]; then
     mod_game=$game

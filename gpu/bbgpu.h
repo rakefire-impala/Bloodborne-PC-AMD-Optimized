@@ -32,6 +32,8 @@ int bbgpu_text_input_begin(const char *initial_utf8, const char *prompt_utf8);
 int bbgpu_text_input_poll(char *out_utf8, uint64_t size);
 /* 1 while the in-game settings menu is open: the game's pad input is held neutral. */
 int bbgpu_overlay_captures_input(void);
+/* 1 while the game window has input focus (also before the window exists). */
+int bbgpu_window_focused(void);
 /* 1 once after the force save hotkey (L3 + d-pad up, F5); src/runtime_lamp.c saves. */
 int bbgpu_take_force_save(void);
 void bbgpu_before_input(void);

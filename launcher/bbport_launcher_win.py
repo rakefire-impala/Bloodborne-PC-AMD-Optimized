@@ -178,6 +178,8 @@ QOL = [
      False),
     ('qol_lamp_save', ('Lamps save the game', 'Фонари сохраняют игру'), False),
     ('qol_safe_menu', ('The world pauses while the start menu is open', 'Мир замирает, пока открыто меню'), False),
+    ('qol_focus_pause', ('The world pauses while the game window is not focused',
+                         'Мир замирает, пока окно игры не активно'), False),
     ('qol_boss_retry', ('Retry a boss fight after dying in it', 'Повтор боя с боссом после смерти'), False),
 ]
 INI_FLAGS = {'sharpen', 'object_motion', 'show_fps', *(k for k, _t, _o in EFFECTS + EXTRAS + QOL + CHEATS + TWEAKS)}
@@ -1936,6 +1938,12 @@ class Launcher:
                                'мира и эффекты вроде огня и тумана. Звуки меню остаются, инвентарь, снаряжение и '
                                'предметы работают как обычно. Только в одиночной игре (кооператив не ставится на '
                                'паузу).'),
+            'qol_focus_pause': _('Switching to another window (Alt+Tab, a click elsewhere) pauses the whole world '
+                                 'the same way as the start menu above, until you come back to the game. The '
+                                 'game keeps drawing. Single player only (co-op is never paused).',
+                                 'Переключение на другое окно (Alt+Tab, щелчок в другом месте) ставит весь мир '
+                                 'на паузу так же, как стартовое меню выше, пока вы не вернётесь в игру. Игра '
+                                 'продолжает отрисовку. Только в одиночной игре (кооператив не ставится на паузу).'),
             'qol_boss_retry': _('After dying to a story boss (not to NPC hunters), once you are back at a lamp you are '
                                 'asked whether to retry the fight; retrying takes you to the boss\'s fog gate. Single '
                                 'player, outside the Chalice Dungeons. Made from your game files at start.',

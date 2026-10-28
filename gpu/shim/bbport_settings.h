@@ -52,6 +52,7 @@ inline constexpr Effect Effects[] = {
     {"qol_lamp_travel", "Путешествие между фонарями", "Travel between lamps", false},
     {"qol_lamp_save", "Фонари сохраняют игру", "Lamps save the game", false},
     {"qol_safe_menu", "Мир замирает в меню", "World pauses in the start menu", false},
+    {"qol_focus_pause", "Мир замирает вне окна игры", "World pauses when the game loses focus", false},
     {"qol_boss_retry", "Повтор боя с боссом", "Retry boss fights", false},
     {"debug_camera", "Свободная камера (Cross + L3)", "Free camera (Cross + L3)", false},
     {"debug_menu", "Debug menu (нужны файлы шрифтов)", "Debug menu (requires font files)", false},

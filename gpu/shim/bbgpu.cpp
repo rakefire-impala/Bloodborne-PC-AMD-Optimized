@@ -368,6 +368,10 @@ extern "C" int bbgpu_overlay_captures_input(void) {
     return BbOverlay::CapturesInput() ? 1 : 0;
 }
 
+extern "C" int bbgpu_window_focused(void) {
+    return BbSettings::Get().window_focused ? 1 : 0;
+}
+
 extern "C" int bbgpu_take_force_save(void) {
     return BbOverlay::TakeForceSave() ? 1 : 0;
 }
