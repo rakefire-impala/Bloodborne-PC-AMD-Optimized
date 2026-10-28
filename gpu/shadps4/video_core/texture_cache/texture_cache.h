@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <boost/container/small_vector.hpp>
 #include <queue>
@@ -306,6 +307,16 @@ public:
     [[nodiscard]] u64 GetCriticalMark() const noexcept {
         return critical_gc_memory;
     }
+    /// bbport: collections that started at or past the pressure mark (any thread: FG's VRAM
+    /// guard waits for a stretch without them).
+    [[nodiscard]] u64 GetPressuredCollections() const noexcept {
+        return pressured_collections.load(std::memory_order_relaxed);
+    }
+    /// bbport: bytes of images evicted within ~3 s (300 collections) of their last use: the
+    /// game's images no longer fit and come straight back (any thread, for FG's VRAM guard).
+    [[nodiscard]] u64 GetHotEvictedBytes() const noexcept {
+        return hot_evicted_bytes.load(std::memory_order_relaxed);
+    }
 
     template <typename Func>
     void ForEachImageInRegion(VAddr cpu_addr, size_t size, Func&& func) {
@@ -432,6 +443,34 @@ private:
     u64 gc_passes = 0, gc_passes_quota = 0;
     u64 gc_written_tiled = 0, gc_written_bytes = 0, gc_unevictable = 0;
     u64 gc_budget = 0;        ///< bbport: the live budget the thresholds follow (0: none)
+    std::atomic<u64> pressured_collections{0}; ///< bbport: GetPressuredCollections
+    std::atomic<u64> hot_evicted_bytes{0};     ///< bbport: GetHotEvictedBytes
+    /// bbport: collections a second (RunGarbageCollector measures it; 30 at 30 FPS), and the
+    /// collections in `seconds`: the collector's ages are times, not collection counts.
+    double gc_ticks_per_second = 30.0;
+    u64 gc_rate_tick = 0;
+    std::chrono::steady_clock::time_point gc_rate_time{};
+    [[nodiscard]] u64 GcTicks(double seconds) const {
+        return static_cast<u64>(std::max(1.0, seconds * gc_ticks_per_second));
+    }
+    /// bbport: images evicted lately by guest address, and those that came back (registered at
+    /// the same address within ~5 s): the pressure report's measure of evicting what the game
+    /// still uses. Its own lock: images are registered outside `mutex` too.
+    std::mutex evicted_mutex;
+    std::unordered_map<VAddr, u64> recently_evicted;
+    u64 gc_returned = 0, gc_returned_bytes = 0, gc_hot_reported = 0;
+    /// bbport: counts an image about to be evicted for GetHotEvictedBytes (used within ~10 s:
+    /// with nothing older left to evict, the images no longer fit) and the report.
+    void NoteEviction(const Image& image) {
+        if (image.lru_touched_tick != ~0ULL && gc_tick - image.lru_touched_tick < GcTicks(10.0)) {
+            hot_evicted_bytes.fetch_add(image.info.guest_size, std::memory_order_relaxed);
+        }
+        std::scoped_lock lk{evicted_mutex};
+        if (recently_evicted.size() >= 65536) {
+            recently_evicted.clear();
+        }
+        recently_evicted[image.info.guest_address] = gc_tick;
+    }
     std::chrono::steady_clock::time_point gc_report_time{};
     std::chrono::steady_clock::time_point census_time{};
     u64 trigger_gc_memory = 0;

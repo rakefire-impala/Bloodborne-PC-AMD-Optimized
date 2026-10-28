@@ -466,6 +466,14 @@ private:
     u64 last_demote_frame{};
     u64 last_promote_frame{};
     u64 last_migrate_frame{};
+    /// bbport: display frames a second (TickArenas measures it), and the frames in `seconds`:
+    /// the arenas' ages were tuned at 30 FPS (300 frames ~10 s), which at 60 FPS halved them.
+    double arena_fps = 30.0;
+    u32 arena_fps_frame{};
+    std::chrono::steady_clock::time_point arena_fps_time{};
+    [[nodiscard]] u32 ArenaFrames(double seconds) const {
+        return static_cast<u32>(std::max(1.0, seconds * arena_fps));
+    }
     ArenaReclaimStats reclaim_stats;
 
     /// Allocates the next VRAM chunk on a worker thread before the current ones fill up: a new

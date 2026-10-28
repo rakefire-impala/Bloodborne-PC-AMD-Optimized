@@ -75,6 +75,9 @@ inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
 
 struct Values {
     std::atomic<int> frame_generation{FrameGenerationOff}, frame_generation_active{0};
+    // bbport: FSR frame generation paused for video memory (Presenter::GuardFgVram): the
+    // real-frame cap stays what it was while it generated (EffectiveFrameLimit).
+    std::atomic<bool> frame_generation_vram_paused{false};
     // Negotiated multiplier for the cap, independent of delayed SDK statistics.
     std::atomic<int> frame_generation_cap_multiplier{0};
     std::atomic<float> nvidia_real_fps{-1.0f}, nvidia_output_fps{-1.0f};

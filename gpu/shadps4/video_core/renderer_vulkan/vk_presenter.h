@@ -11,6 +11,7 @@
 #include <condition_variable>
 
 #include "core/libraries/videoout/buffer.h"
+#include "video_core/renderer_vulkan/fg_vram_guard.h"
 #include "video_core/renderer_vulkan/host_passes/fsr_pass.h"
 #include "video_core/renderer_vulkan/host_passes/pp_pass.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -193,11 +194,12 @@ private:
     std::array<bool, 8> fg_query_used{}, fg_query_split{};
     u32 fg_query_slot{};
     float fg_query_period{1.0f};
-    /// bbport: GuardFgVram: the last check, checks in a row near/clear of the budget, and the
-    /// device usage when frame generation paused.
+    /// bbport: GuardFgVram: the last check, real frames since then, the texture cache's
+    /// pressured collections and hot evicted bytes at the last check, and the pause decisions.
     std::chrono::steady_clock::time_point fg_vram_checked{};
-    u32 fg_vram_full_checks{}, fg_vram_clear_checks{};
-    u64 fg_vram_paused_usage{};
+    u32 fg_vram_frames{};
+    u64 fg_vram_pressured{}, fg_vram_hot_evicted{};
+    FgVramGuard fg_vram_guard;
 };
 
 } // namespace Vulkan

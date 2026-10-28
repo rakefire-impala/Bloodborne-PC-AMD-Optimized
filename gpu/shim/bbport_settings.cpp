@@ -30,8 +30,14 @@ unsigned EffectiveFrameLimit(unsigned foreground_limit) {
         // bbport: and only with the frame-time patch. The 30/60/90 patches advance the game
         // by a fixed step per frame: fewer real frames than the patch's rate are slow
         // motion (a 60 total cap with FSR FG made the 60 FPS patch run at half speed).
+        // bbport: FSR FG paused for VRAM counts as generating: with a 120 total cap the game
+        // went from 60 to 120 real frames, and Bloodborne at 90-120 real FPS in a busy Old
+        // Yharnam street stopped for ~190 ms every second or two, its own threads waiting
+        // (none at a 60 cap, Oct 24).
+        const int fsr_active=s.frame_generation==FrameGenerationFsr && s.frame_generation_vram_paused.load() ?
+            2 : s.frame_generation_active.load();
         const unsigned multiplier=unsigned(std::max(1,s.frame_generation==FrameGenerationNvidia ?
-            s.frame_generation_cap_multiplier.load() : s.frame_generation_active.load()));
+            s.frame_generation_cap_multiplier.load() : fsr_active));
         if (s.limit_generated_fps && multiplier>1 && s.variable_frame_time) {
             const unsigned real_cap=unsigned(std::clamp(s.generated_fps_limit.load(),30,1000))/multiplier;
             return foreground_limit ? std::min(foreground_limit,real_cap) : real_cap;

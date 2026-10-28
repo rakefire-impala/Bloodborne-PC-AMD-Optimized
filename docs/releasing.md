@@ -56,6 +56,8 @@ g++ -std=c++20 -O2 -I. tests/test_temporal_history.cpp -o temporal-history-test
 ./temporal-history-test
 g++ -std=c++20 -O2 -I. tests/test_motion_history.cpp -o motion-history-test
 ./motion-history-test
+g++ -std=c++20 -O2 -I. tests/test_fg_vram_guard.cpp -o fg-vram-guard-test
+./fg-vram-guard-test
 g++ -std=c++20 -pthread -Igpu/shim tests/test_background_pause.cpp gpu/shim/bbport_background.cpp -o background-pause-test
 ./background-pause-test
 ```

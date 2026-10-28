@@ -150,6 +150,7 @@ private:
     vk::Format context_format{};
     std::atomic<bool> failed{false};
     std::atomic<bool> vram_paused{false};
+    u32 allocation_wait{}; ///< bbport: frames before Capture tries its images again (over budget)
     struct Pending {
         u64 id{}, tick{};
         std::shared_ptr<Snapshot> snapshot;

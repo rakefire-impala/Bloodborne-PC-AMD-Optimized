@@ -105,9 +105,13 @@ void FrameGeneration::Capture(vk::CommandBuffer cmdbuf, const FrameGenerationSou
                               vk::ImageView color_view, u32 w, u32 h, vk::Format format,
                               std::shared_ptr<Snapshot>& snapshot) {
     auto& settings=BbSettings::Get();
-    // bbport: paused for VRAM: no copies, but the snapshot keeps its images (freeing memory at
-    // the budget blocked in the driver for seconds; see Record).
-    if (settings.frame_generation==BbSettings::FrameGenerationFsr && VramPaused()) return;
+    // bbport: paused for VRAM: the snapshot's images (~24 MiB a frame at 1080p) go back to the
+    // textures, which no longer fit (FgVramGuard), once the GPU is done with them (pending holds
+    // them until then). Images inside VMA's blocks: freeing them makes no driver call that can
+    // block, unlike the FI/OF context's own memory (kept, see Record).
+    if (settings.frame_generation==BbSettings::FrameGenerationFsr && VramPaused()) {
+        snapshot.reset(); return;
+    }
     const bool nvidia=settings.frame_generation==BbSettings::FrameGenerationNvidia;
     const bool sdr_unorm=format==vk::Format::eR8G8B8A8Unorm || format==vk::Format::eB8G8R8A8Unorm;
     const bool hdr=format==vk::Format::eA2B10G10R10UnormPack32 || format==vk::Format::eA2R10G10B10UnormPack32;
@@ -136,6 +140,10 @@ void FrameGeneration::Capture(vk::CommandBuffer cmdbuf, const FrameGenerationSou
     if (!snapshot || snapshot->width!=w || snapshot->height!=h || snapshot->hdr!=hdr || snapshot->sdr_unorm!=sdr_unorm || snapshot->nvidia_input_only!=nvidia ||
         snapshot->srgb8!=srgb8 ||
         snapshot->source.render_width!=rw || snapshot->source.render_height!=rh) {
+        if (allocation_wait) {
+            --allocation_wait;
+            snapshot.reset(); return;
+        }
         snapshot=std::make_shared<Snapshot>(); snapshot->width=w; snapshot->height=h; snapshot->hdr=hdr;
         snapshot->nvidia_input_only=nvidia;
         snapshot->sdr_unorm=sdr_unorm;
@@ -148,8 +156,11 @@ void FrameGeneration::Capture(vk::CommandBuffer cmdbuf, const FrameGenerationSou
             !CreateImage(device,allocator,snapshot->motion,snapshot->motion_view,vk::Format::eR16G16Sfloat,rw,rh,queue_families) ||
             ((hdr || (sdr_unorm && !srgb8)) && !nvidia && !CreateImage(device,allocator,snapshot->encoded,snapshot->encoded_view,vk::Format::eR16G16B16A16Sfloat,w,h,queue_families)) ||
             (srgb8 && !CreateImage(device,allocator,snapshot->hud_mask,snapshot->hud_mask_view,vk::Format::eR8Unorm,w,h,queue_families))) {
-            settings.frame_generation_problem="FG could not allocate its input images. The real frame is kept.";
-            failed=true;
+            // bbport: within the budget only (CreateImage): over it, frames are not generated and
+            // a frame 30 later tries again, as after a pause for VRAM. Was failed=true: FG off
+            // for the rest of the session after its images came back at a full budget.
+            settings.frame_generation_problem="FG is waiting for video memory. The real frame is kept.";
+            allocation_wait=30;
             snapshot.reset(); return;
         }
     }

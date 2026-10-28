@@ -40,6 +40,7 @@
 #include <span>
 #include <sstream>
 #include <system_error>
+#include <utility>
 #include <vector>
 #include <vk_mem_alloc.h>
 #ifdef MemoryBarrier
@@ -1130,66 +1131,99 @@ void Presenter::FgTimestamp(vk::CommandBuffer cmdbuf, bool end) {
     fg_query_used[fg_query_slot] = end;
 }
 
-// bbport: FSR frame generation (its FI/OF context, HUD history and per-frame input copies,
-// a few hundred MiB at 1080p) steps aside while VRAM is nearly exhausted. At the budget Windows
-// pages the game's memory on every submission: on an RX 5500M, with another process taking
-// ~760 MiB mid-session, usage sat at 97% of a 2516 MiB budget and every frame took 340 ms
-// (3 FPS, never recovering; healthy runs sit near 68%). It resumes once the usage it had when
-// it paused fits well within the budget again.
+// bbport: FSR frame generation steps aside while the game's video memory no longer fits: Windows
+// pages it (340 ms frames on an RX 5500M with another process holding ~760 MiB) or the texture
+// cache evicts images straight back. Near the budget alone is normal play on a 4 GB GPU:
+// FgVramGuard decides. Paused, its frame images go back to the textures (Capture, Generate).
 void Presenter::GuardFgVram() {
     auto& settings = BbSettings::Get();
     if (settings.frame_generation != BbSettings::FrameGenerationFsr) {
         if (frame_generation->VramPaused()) {
             frame_generation->SetVramPaused(false);
+            settings.frame_generation_vram_paused = false;
             settings.frame_generation_problem = nullptr;
         }
-        fg_vram_full_checks = fg_vram_clear_checks = 0;
+        fg_vram_guard.Reset();
+        fg_vram_checked = {};
         return;
     }
+    ++fg_vram_frames;
     // Every 0.5 s, not every N frames: paging makes frames slow (1.6 s each with another
     // process holding 900 MiB), and 30 frames then took long enough that FG never paused.
     const auto now = std::chrono::steady_clock::now();
+    if (fg_vram_checked == std::chrono::steady_clock::time_point{}) {
+        // BB_FG_VRAM_PAUSE_PERCENT / _FPS / _THRASH_MIB / _FULL_PERCENT: for testing the pause.
+        static const FgVramGuard::Limits limits = [] {
+            FgVramGuard::Limits limits;
+            if (const char* env = std::getenv("BB_FG_VRAM_PAUSE_PERCENT")) {
+                limits.percent = u64(std::clamp(std::atoi(env), 1, 100));
+            }
+            if (const char* env = std::getenv("BB_FG_VRAM_PAUSE_FPS")) {
+                limits.slow_fps = std::max(std::atof(env), 0.0);
+            }
+            if (const char* env = std::getenv("BB_FG_VRAM_THRASH_MIB")) {
+                limits.thrash_mib = std::max(std::atof(env), 0.0);
+            }
+            if (const char* env = std::getenv("BB_FG_VRAM_FULL_PERCENT")) {
+                limits.full_percent = u64(std::clamp(std::atoi(env), 1, 1000));
+            }
+            return limits;
+        }();
+        fg_vram_guard.limits = limits;
+        fg_vram_checked = now;
+        fg_vram_frames = 0;
+        fg_vram_pressured = texture_cache.GetPressuredCollections();
+        fg_vram_hot_evicted = texture_cache.GetHotEvictedBytes();
+        return;
+    }
     if (now - fg_vram_checked < std::chrono::milliseconds(500)) {
         return;
     }
+    const double seconds = std::chrono::duration<double>(now - fg_vram_checked).count();
+    const u32 frames = std::exchange(fg_vram_frames, 0);
     fg_vram_checked = now;
-    const u64 budget = instance.GetDeviceMemoryBudgetNow();
-    const u64 usage = instance.GetDeviceMemoryUsage();
-    if (!budget) {
-        return;
-    }
+    const u64 pressured_collections = texture_cache.GetPressuredCollections();
+    const bool pressured = std::exchange(fg_vram_pressured, pressured_collections) !=
+                           pressured_collections;
+    const u64 hot_evicted_total = texture_cache.GetHotEvictedBytes();
+    const u64 hot_evicted =
+        hot_evicted_total - std::exchange(fg_vram_hot_evicted, hot_evicted_total);
+    // The main heap only, as the texture cache measures it: AMD's 256 MiB CPU-visible heap is
+    // always full and pulled the sums up.
+    const auto levels = instance.GetMemoryLevels();
     constexpr u64 MiB = 1ull << 20;
-    if (!frame_generation->VramPaused()) {
-        // Three checks in a row (1.5 s) above 95% of the budget
-        // (BB_FG_VRAM_PAUSE_PERCENT, for testing the pause).
-        static const u64 percent = [] {
-            const char* env = std::getenv("BB_FG_VRAM_PAUSE_PERCENT");
-            return env ? u64(std::clamp(std::atoi(env), 1, 100)) : 95ull;
-        }();
-        fg_vram_full_checks = usage * 100 > budget * percent ? fg_vram_full_checks + 1 : 0;
-        if (fg_vram_full_checks >= 3) {
-            fg_vram_full_checks = 0;
-            fg_vram_paused_usage = usage;
-            frame_generation->SetVramPaused(true);
-            settings.frame_generation_problem =
-                "FG paused: video memory is nearly full (other programs use it too). It resumes "
-                "by itself when there is room.";
-            std::printf("FSR Frame Generation: paused, VRAM %llu of %llu MiB budget\n",
-                        (unsigned long long)(usage / MiB), (unsigned long long)(budget / MiB));
-            std::fflush(stdout);
-        }
-        return;
-    }
-    // ~10 s in a row with room for the usage it had when it paused, plus a margin.
-    const u64 needed = std::max(fg_vram_paused_usage, usage + 256 * MiB);
-    fg_vram_clear_checks = needed * 100 < budget * 88 ? fg_vram_clear_checks + 1 : 0;
-    if (fg_vram_clear_checks >= 20) {
-        fg_vram_clear_checks = 0;
+    // What VMA's blocks hold in use, as the texture cache measures it: room for FG's images.
+    const u64 used = levels.usage - std::min(levels.usage, levels.vma_free);
+    switch (fg_vram_guard.Check(levels.usage, levels.budget, frames, seconds, pressured,
+                                hot_evicted, used)) {
+    case FgVramGuard::Action::Pause:
+        frame_generation->SetVramPaused(true);
+        settings.frame_generation_vram_paused = true;
+        settings.frame_generation_problem =
+            "FG paused: video memory is full and the game slowed down (other programs use it "
+            "too). It resumes by itself once there is room again.";
+        std::printf("FSR Frame Generation: paused (%s), VRAM %llu of %llu MiB budget, %.1f real "
+                    "FPS, %.0f MiB/s of textures evicted soon after use; resumes after %u s of "
+                    "normal frames without texture memory pressure\n",
+                    fg_vram_guard.LastReason() == FgVramGuard::Reason::TexturesDoNotFit
+                        ? "textures do not fit"
+                    : fg_vram_guard.LastReason() == FgVramGuard::Reason::MemoryFull
+                        ? "video memory full"
+                        : "slow frames",
+                    (unsigned long long)(levels.usage / MiB), (unsigned long long)(levels.budget / MiB),
+                    frames / seconds, hot_evicted / seconds / MiB, fg_vram_guard.ResumeChecks() / 2);
+        std::fflush(stdout);
+        break;
+    case FgVramGuard::Action::Resume:
         frame_generation->SetVramPaused(false);
+        settings.frame_generation_vram_paused = false;
         settings.frame_generation_problem = nullptr;
         std::printf("FSR Frame Generation: resumed, VRAM %llu of %llu MiB budget\n",
-                    (unsigned long long)(usage / MiB), (unsigned long long)(budget / MiB));
+                    (unsigned long long)(levels.usage / MiB), (unsigned long long)(levels.budget / MiB));
         std::fflush(stdout);
+        break;
+    case FgVramGuard::Action::None:
+        break;
     }
 }
 
@@ -1211,13 +1245,10 @@ void Presenter::Generate(Frame* frame, vk::CommandBuffer cmdbuf) {
     frame->generated = frame_generation->Record(cmdbuf, frame->frame_generation);
     if (frame->frame_generation) FgTimestamp(cmdbuf, true);
     frame_generation->Submitted(draw_scheduler.CurrentTick());
-    if (frame_generation->VramPaused()) {
-        // Paused for VRAM: the frame and its snapshot keep their images (FrameGeneration::Record).
-        return;
-    }
     if (!frame->frame_generation && frame->generated_image) {
-        // Frame generation is off: its copy of this frame goes (the frame is reused only after
-        // its present_done, so nothing uses it).
+        // Frame generation is off or paused for VRAM (no snapshot: Capture): its copy of this
+        // frame goes, back to the textures (the frame is reused only after its present_done,
+        // so nothing uses it). An image inside VMA's blocks: no driver call that can block.
         instance.GetDevice().destroyImageView(frame->generated_view);
         vmaDestroyImage(instance.GetAllocator(), frame->generated_image, frame->generated_allocation);
         frame->generated_image = vk::Image{};

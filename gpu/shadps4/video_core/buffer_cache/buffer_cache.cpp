@@ -1593,7 +1593,8 @@ BufferCache::ArenaReclaimStats BufferCache::TakeArenaReclaimStats() {
             const u64 unit = (block << block_shift) >> UNIT_SHIFT;
             const u64 end = std::min<u64>(backing.end, ((unit + 1) << UNIT_SHIFT) >> block_shift);
             const u64 size = (end - block) << block_shift;
-            if (((frame - (unit_last_use[unit] & ~FAULTED_UNIT)) & ~FAULTED_UNIT) <= 30) {
+            if (((frame - (unit_last_use[unit] & ~FAULTED_UNIT)) & ~FAULTED_UNIT) <=
+                ArenaFrames(1.0)) {
                 stats.hot_system_bytes += size;
                 if (memory_tracker->IsRegionGpuModified(block << block_shift, size)) {
                     stats.hot_system_gpu_bytes += size;
@@ -1606,6 +1607,21 @@ BufferCache::ArenaReclaimStats BufferCache::TakeArenaReclaimStats() {
 }
 
 void BufferCache::TickArenas(const MemoryLevels& levels) {
+    // bbport: display frames a second, measured, for the ages in seconds (ArenaFrames).
+    {
+        const auto now = std::chrono::steady_clock::now();
+        const u32 frames = static_cast<u32>(BbStats::gpu_frames.load(std::memory_order_relaxed));
+        if (arena_fps_time == std::chrono::steady_clock::time_point{}) {
+            arena_fps_time = now;
+            arena_fps_frame = frames;
+        } else if (now - arena_fps_time >= std::chrono::seconds(1)) {
+            const double seconds = std::chrono::duration<double>(now - arena_fps_time).count();
+            const double measured = std::clamp((frames - arena_fps_frame) / seconds, 10.0, 500.0);
+            arena_fps += (measured - arena_fps) * 0.5;
+            arena_fps_time = now;
+            arena_fps_frame = frames;
+        }
+    }
     ReleaseRetiredRanges();
     ReleaseReplacedRanges();
     // Copies to VRAM that completed switch their ranges in this submission's bind batch.
@@ -1656,8 +1672,12 @@ void BufferCache::TickArenas(const MemoryLevels& levels) {
     const auto age = [frame](u32 entry) { return (frame - (entry & ~FAULTED_UNIT)) & ~FAULTED_UNIT; };
     const u64 tick = scheduler.CurrentTick();
     // Bound within the last second: worth VRAM, wherever it was placed.
-    const auto hot = [&](u32 entry) { return age(entry) <= 30; };
-    if (demote && frame - last_demote_frame >= 10) {
+    // bbport: ages in seconds (ArenaFrames); they were frame counts tuned at 30 FPS, and at
+    // 60 FPS ranges went to system memory after 5 s (1.5 s at the critical mark) and came back:
+    // an RX 5500M in Old Yharnam moved 730 MiB there and 592 MiB back in 5 s.
+    const u32 hot_frames = ArenaFrames(1.0);
+    const auto hot = [&](u32 entry) { return age(entry) <= hot_frames; };
+    if (demote && frame - last_demote_frame >= ArenaFrames(1.0 / 3.0)) {
         // A few MiB every third of a second: the guest copy runs on the copy threads while this
         // thread waits, ~1-2 ms per 8 MiB.
         last_demote_frame = frame;
@@ -1674,7 +1694,8 @@ void BufferCache::TickArenas(const MemoryLevels& levels) {
                 const char* env = std::getenv("BB_ARENA_DEMOTE_AGE");
                 return env && env[0] ? std::atoi(env) : -1;
             }();
-            const u32 min_age = forced_age >= 0 ? u32(forced_age) : critical ? 90 : 300;
+            const u32 min_age =
+                forced_age >= 0 ? u32(forced_age) : ArenaFrames(critical ? 3.0 : 10.0);
             reclaim_stats.demoted_bytes +=
                 DemoteRanges(critical ? 16_MB : 8_MB, tick, [&](u32 entry) {
                     return age(entry) >= min_age && (critical || !(entry & FAULTED_UNIT));

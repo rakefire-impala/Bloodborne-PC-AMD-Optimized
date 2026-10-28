@@ -936,6 +936,15 @@ void TextureCache::RegisterImage(ImageId image_id) {
     image.lru_touched_tick = gc_tick;
     ForEachPage(image.info.guest_address, image.info.guest_size,
                 [this, image_id](u64 page) { page_table[page].push_back(image_id); });
+    std::scoped_lock lk{evicted_mutex};
+    if (const auto it = recently_evicted.find(image.info.guest_address);
+        it != recently_evicted.end()) {
+        if (gc_tick - it->second <= GcTicks(5.0)) {
+            ++gc_returned;
+            gc_returned_bytes += image.info.guest_size;
+        }
+        recently_evicted.erase(it);
+    }
 }
 
 void TextureCache::UnregisterImage(ImageId image_id) {
@@ -1161,11 +1170,14 @@ void TextureCache::GarbageCollectImages() {
     const auto configure = [&](bool allow_aggressive) {
         pressured = used() >= pressure_gc_memory;
         aggresive = allow_aggressive && used() >= critical_gc_memory;
-        // Minimum ages in submissions (~30 a second). The aggressive pass runs after the
-        // pressured one and takes more images, but only old ones (~5 s): evicting images used a
-        // second ago (tried on an RX 5500M) re-uploaded them at once and stuttered badly.
+        // Minimum ages. The aggressive pass runs after the pressured one and takes more images,
+        // but only old ones (~5 s): evicting images used a second ago (tried on an RX 5500M)
+        // re-uploaded them at once and stuttered badly.
         // bbport: unpressured passes trim only what has been idle for ~10 s (was ~0.5 s).
-        ticks_to_destroy = aggresive ? 160 : pressured ? 80 : 300;
+        // bbport: in seconds (GcTicks). They were 160/80/300 collections, tuned at 30 FPS (a
+        // collection a game frame); at 60 FPS that was 2.7/1.3/5 s, and an RX 5500M in Old
+        // Yharnam evicted 2.7 GiB of images every 5 s, all of them back within a second.
+        ticks_to_destroy = GcTicks(aggresive ? 5.3 : pressured ? 2.7 : 10.0);
         ticks_to_destroy = std::min(ticks_to_destroy, gc_tick);
         num_deletions = aggresive ? 40 : pressured ? 20 : 10;
     };
@@ -1218,6 +1230,7 @@ void TextureCache::GarbageCollectImages() {
             gc_evicted_bytes += image.info.guest_size;
             BbHitch::evictions.fetch_add(1, std::memory_order_relaxed);
             BbHitch::evicted_bytes.fetch_add(image.info.guest_size, std::memory_order_relaxed);
+            NoteEviction(image);
             FreeImage(image_id);
         }
         if (used() < critical_gc_memory) {
@@ -1249,12 +1262,32 @@ void TextureCache::GarbageCollectImages() {
 
     // Try to remove anything old enough and not high priority.
     configure(false);
+    if (pressured) {
+        pressured_collections.fetch_add(1, std::memory_order_relaxed);
+    }
     run_pass();
+    // bbport: still past the pressure mark: images idle ~1.3 s go too, as every pressured pass
+    // took them while the ages were collection counts (at 60 FPS). Only then: where the longer
+    // ages suffice they evict less (73% less, and arenas moved 95% less, with a 2150 MiB test
+    // budget on an RX 5500M), and where they do not the cache holds no more than it did. With
+    // this fallback at the critical mark instead, a 2050 MiB test went 59 MiB past that mark
+    // and the arenas, seeing it, moved more to system memory and back.
+    if (used() >= pressure_gc_memory) {
+        configure(false);
+        ticks_to_destroy = std::min(GcTicks(1.3), gc_tick);
+        run_pass();
+    }
 
     if (total_used_memory >= critical_gc_memory) {
         // If we are still over the critical limit, run an aggressive GC
         configure(true);
         run_pass();
+        // bbport: likewise images idle ~2.7 s, what the aggressive pass took at 60 FPS.
+        if (used() >= critical_gc_memory) {
+            configure(true);
+            ticks_to_destroy = std::min(GcTicks(2.7), gc_tick);
+            run_pass();
+        }
     }
     // Images nothing can evict leave the head of the list, so later passes do not walk past
     // them again (they come back in order once they stop being GPU-written or are freed).
@@ -1322,6 +1355,20 @@ void TextureCache::GarbageCollectImages() {
                 (unsigned long long)(vma.type_largest_free[buffer_cache.GetArenaMemoryType()] >>
                                      10),
                 instance.DescribeMemory().c_str());
+            {
+                // bbport: evicting what the game still uses (NoteEviction, RegisterImage).
+                std::scoped_lock lk{evicted_mutex};
+                const u64 hot = hot_evicted_bytes.load(std::memory_order_relaxed);
+                std::printf("Texture cache: %llu images (%llu MiB) back within 5 s of their "
+                            "eviction; %llu MiB evicted within 10 s of use (collections at "
+                            "%.0f a second)\n",
+                            (unsigned long long)gc_returned,
+                            (unsigned long long)(gc_returned_bytes >> 20),
+                            (unsigned long long)((hot - gc_hot_reported) >> 20),
+                            gc_ticks_per_second);
+                gc_returned = gc_returned_bytes = 0;
+                gc_hot_reported = hot;
+            }
             PrintImageCensus();
             census_time = now;
             gc_report_time = now;
@@ -1360,7 +1407,7 @@ void TextureCache::PrintImageCensus() {
         bytes_proxy += image.scene_proxy ? bytes : 0;
         const u64 idle = image.lru_touched_tick == ~0ULL ? ~0ULL
                                                          : gc_tick - image.lru_touched_tick;
-        by_age[idle < 120 ? 0 : idle < 1200 ? 1 : 2] += bytes;
+        by_age[idle < GcTicks(1.0) ? 0 : idle < GcTicks(10.0) ? 1 : 2] += bytes;
     }
     instance.DumpVmaMap();
     const auto levels = instance.GetMemoryLevels();
@@ -1497,6 +1544,7 @@ void TextureCache::WriteBackAndFree(std::span<const ImageId> images) {
         gc_written_bytes += sizes[i];
         BbHitch::evictions.fetch_add(1, std::memory_order_relaxed);
         BbHitch::evicted_bytes.fetch_add(image.info.guest_size, std::memory_order_relaxed);
+        NoteEviction(image);
         FreeImage(image_id);
     }
 }
@@ -1545,6 +1593,18 @@ void TextureCache::RunGarbageCollector() {
     SCOPE_EXIT {
         ++gc_tick;
     };
+    // bbport: collections a second (one a game frame), measured, for the ages in seconds.
+    const auto now = std::chrono::steady_clock::now();
+    if (gc_rate_time == std::chrono::steady_clock::time_point{}) {
+        gc_rate_time = now;
+        gc_rate_tick = gc_tick;
+    } else if (now - gc_rate_time >= std::chrono::seconds(1)) {
+        const double seconds = std::chrono::duration<double>(now - gc_rate_time).count();
+        const double measured = std::clamp((gc_tick - gc_rate_tick) / seconds, 10.0, 1000.0);
+        gc_ticks_per_second += (measured - gc_ticks_per_second) * 0.5;
+        gc_rate_time = now;
+        gc_rate_tick = gc_tick;
+    }
 
     GarbageCollectImages();
     GarbageCollectSamplers();

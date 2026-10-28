@@ -33,6 +33,12 @@ int main() {
     s.frame_generation=FrameGenerationFsr;s.frame_generation_active=2;s.generated_fps_limit=60;
     assert(EffectiveFrameLimit(0)==0 && EffectiveFrameLimit(60)==60);
     s.variable_frame_time=true;s.real_fps_limit=-1;assert(EffectiveFrameLimit(0)==30);
+    // FSR FG paused for VRAM keeps the cap it had while generating: a 120 total cap stays 60
+    // real frames (at 120 the game stalled ~190 ms every second or two in Old Yharnam).
+    s.generated_fps_limit=120;s.frame_generation_active=0;assert(EffectiveFrameLimit(120)==120);
+    s.frame_generation_vram_paused=true;assert(EffectiveFrameLimit(120)==60);
+    s.frame_generation=FrameGenerationOff;assert(EffectiveFrameLimit(120)==120);
+    s.frame_generation=FrameGenerationFsr;s.frame_generation_vram_paused=false;s.frame_generation_active=2;
     s.limit_generated_fps=false;
 
     const auto dir=std::filesystem::temp_directory_path()/
