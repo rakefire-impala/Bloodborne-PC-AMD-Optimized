@@ -12,7 +12,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import sys
 
@@ -257,7 +256,9 @@ def main():
                         creationflags=no_console())
     finally:
         if mod_view:
-            shutil.rmtree(mod_view, ignore_errors=True)
+            sys.path.insert(0, str(PORT / 'scripts'))
+            from mods import remove_overlay
+            remove_overlay(mod_view)
 
 
 if __name__ == '__main__':

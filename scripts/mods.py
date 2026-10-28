@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import struct
 import sys
@@ -137,6 +138,55 @@ def symlinks_work(directory):
         shutil.rmtree(probe, ignore_errors=True)
 
 
+# mod-game-<pid of the launching script>-<random>; overlays from before the pid have none.
+OVERLAY_NAME = re.compile(r'mod-game-(?:(\d+)-)?[a-z0-9_]{8}')
+# Inside the game folder, for overlays that need the game's volume (needs_game_volume).
+OVERLAY_FOLDER = 'bbport-overlays'
+
+
+def process_running(pid):
+    """Whether process `pid` exists (ids are reused: a wrong yes only delays a cleanup)."""
+    if os.name != 'nt':
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            pass
+        return True
+    # os.kill would terminate the process on Windows.
+    import ctypes
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.GetExitCodeProcess.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ctypes.get_last_error() == 5  # access denied: it exists
+    try:
+        code = ctypes.c_ulong()
+        return not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value == 259
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def remove_stale_overlays(directory):
+    """Overlays left by earlier runs. run.py removes its own once the game exits, but not when
+    it was ended itself (launcher closed, process tree ended) or a file was still in use: they
+    piled up beside the game. One whose launching script still runs is in use."""
+    directory = Path(directory)
+    if not directory.is_dir():
+        return
+    for entry in directory.iterdir():
+        match = OVERLAY_NAME.fullmatch(entry.name)
+        if not match or is_link(entry) or not entry.is_dir():
+            continue
+        if match[1] and process_running(int(match[1])):
+            continue
+        # Links and copies only: the game and mod files they point to stay.
+        shutil.rmtree(entry, ignore_errors=True)
+
+
 def is_link(path):
     return path.is_symlink() or str(path) in LINKED or (hasattr(path, 'is_junction') and path.is_junction())
 
@@ -169,8 +219,33 @@ def expand(directory):
         directory.mkdir(exist_ok=True)
 
 
+def needs_game_volume(game, out):
+    """Hard links only reach files on the same volume: without symlinks (Windows, Developer Mode
+    off) an overlay of a game on another drive has to be on the game's drive."""
+    return os.name == 'nt' and not symlinks_work(out) and out.drive.casefold() != game.drive.casefold()
+
+
+def remove_overlay(overlay):
+    """Removes an overlay, and the game's overlay folder once it is empty (run.py, at exit)."""
+    overlay = Path(overlay)
+    shutil.rmtree(overlay, ignore_errors=True)
+    if overlay.parent.name == OVERLAY_FOLDER:
+        try:
+            overlay.parent.rmdir()
+        except OSError:
+            pass
+
+
 def build_overlay(game, out, mods):
     game = Path(game).resolve(strict=True)
+    in_game = game / OVERLAY_FOLDER
+    # Those of earlier runs, including the ones older versions put beside the game folder.
+    for folder in (Path(out).resolve(), in_game, game.parent):
+        remove_stale_overlays(folder)
+    try:
+        in_game.rmdir()
+    except OSError:
+        pass
     replacements = []
     owners = {}
     for name, root in mods:
@@ -187,12 +262,17 @@ def build_overlay(game, out, mods):
         return game
     out = Path(out).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    if os.name == 'nt' and not symlinks_work(out) and out.drive.casefold() != game.drive.casefold():
-        # Hard links only reach files on the same volume: the overlay goes beside the game.
-        out = game.parent
-    overlay = Path(tempfile.mkdtemp(prefix='mod-game-', dir=out))
+    if needs_game_volume(game, out):
+        # Inside the game folder rather than beside it: nothing outside the game's and the
+        # launcher's folders.
+        out = in_game
+        out.mkdir(exist_ok=True)
+    # Named after the script that runs the game (run.py, run.sh): in use while it runs.
+    overlay = Path(tempfile.mkdtemp(prefix=f'mod-game-{os.getppid()}-', dir=out))
     try:
         for entry in game.iterdir():
+            if entry.name.casefold() == OVERLAY_FOLDER:
+                continue
             make_link(overlay / entry.name, entry)
         replaced = added = 0
         for relative, source in replacements:
@@ -213,7 +293,7 @@ def build_overlay(game, out, mods):
         print(f'Mods: {replaced} game files replaced, {added} added', file=sys.stderr)
         return overlay
     except BaseException:
-        shutil.rmtree(overlay)
+        remove_overlay(overlay)
         raise
 
 

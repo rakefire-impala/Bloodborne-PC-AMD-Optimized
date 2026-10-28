@@ -59,6 +59,49 @@ class ModTests(unittest.TestCase):
         config.write_text(json.dumps({'order': ['B', 'A', 'deleted'], 'disabled': ['A']}))
         self.assertEqual(mods.selected(self.moddir, config), ['B', 'C'])
 
+    def test_stale_overlays_removed_live_and_foreign_kept(self):
+        out = self.root / 'out'
+        out.mkdir()
+        finished = subprocess.run([sys.executable, '-c', 'import os; print(os.getpid())'],
+                                  capture_output=True, text=True, check=True)
+        names = {'old': 'mod-game-ab_c12de', 'dead': f'mod-game-{int(finished.stdout)}-abcdefgh',
+                 'live': f'mod-game-{os.getpid()}-abcdefgh', 'foreign': 'mod-game-backup'}
+        for name in names.values():
+            overlay = out / name
+            overlay.mkdir()
+            # The links of a real overlay: deleting them must leave the game's files.
+            mods.make_link(overlay / 'dvdroot_ps4', self.game / 'dvdroot_ps4')
+            mods.make_link(overlay / 'eboot.bin', self.game / 'eboot.bin')
+        mods.make_link(out / 'mod-game-linked_1', self.game)
+        mods.remove_stale_overlays(out)
+        self.assertEqual({p.name for p in out.iterdir()},
+                         {names['live'], names['foreign'], 'mod-game-linked_1'})
+        self.assertEqual((self.assets / 'a.dcx').read_bytes(), b'original')
+        self.assertEqual((self.game / 'eboot.bin').read_bytes(), b'original executable')
+
+    def test_overlay_on_the_game_volume_stays_inside_the_game_folder(self):
+        stale = self.root / 'mod-game-ab_c12de'  # where older versions put them
+        stale.mkdir()
+        original = mods.needs_game_volume
+        mods.needs_game_volume = lambda game, out: True
+        self.addCleanup(setattr, mods, 'needs_game_volume', original)
+        result = mods.build_overlay(self.game, self.root / 'out', [('A', self.mod('A'))])
+        self.assertEqual(result.parent, self.game / mods.OVERLAY_FOLDER)
+        self.assertFalse(stale.exists())
+        # The overlay mirrors the game without its own folder.
+        self.assertEqual({p.name for p in result.iterdir()}, {'dvdroot_ps4', 'eboot.bin'})
+        self.assertEqual((result / 'dvdroot_ps4/chr/a.dcx').read_bytes(), b'mod')
+        mods.remove_overlay(result)
+        self.assertEqual({p.name for p in self.game.iterdir()}, {'dvdroot_ps4', 'eboot.bin'})
+        self.assertEqual((self.assets / 'a.dcx').read_bytes(), b'original')
+
+    def test_overlay_named_after_its_launcher(self):
+        result = mods.build_overlay(self.game, self.root / 'out', [('A', self.mod('A'))])
+        self.assertRegex(result.name, rf'^mod-game-{os.getppid()}-')
+        mods.build_overlay(self.game, self.root / 'out', [('A', self.mod('A'))])
+        # The parent of this test still runs: both overlays are in use.
+        self.assertTrue(result.is_dir())
+
     def test_no_mod_returns_original_game(self):
         self.assertEqual(mods.build_overlay(self.game, self.root / 'out', []), self.game)
         self.assertFalse((self.root / 'out').exists())

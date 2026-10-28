@@ -71,12 +71,13 @@ Insert or L3+R3 opens the port's settings menu. Keyboard fallback: WASD move, ar
 
 - Saves and shader caches: user\ beside Bloodborne.exe, unless you select another directory in the launcher.
 - Shared settings: bbport.ini and bbport.menu.ini beside Bloodborne.exe.
-- Launcher options: %APPDATA%\bbport-launcher.
-- Prepared game image and patches: out\.
+- Launcher options: bbport.launcher.json beside Bloodborne.exe (versions up to 1.13 kept them in %APPDATA%\bbport-launcher; they move on the first start).
+- Prepared game image and patches: out\ (downloaded updates too).
+- Nothing else is written outside this folder and the game folder.
 
 Mods and community patches
 
-Put each mod in its own folder under mods\, using dvdroot_ps4\… or the game directories directly. Enable and order them on Mods & patches. The port creates a temporary view instead of changing your game files. Without Windows Developer Mode it uses directory junctions and file hard links; with the game on another drive, the temporary view is made next to the game folder. Third-party shadPS4/GoldHEN XML patches for 1.09 go in patches\.
+Put each mod in its own folder under mods\, using dvdroot_ps4\… or the game directories directly. Enable and order them on Mods & patches. The port creates a temporary view instead of changing your game files. Without Windows Developer Mode it uses directory junctions and file hard links; with the game on another drive, the temporary view is made inside the game folder (bbport-overlays, removed when the game closes). Third-party shadPS4/GoldHEN XML patches for 1.09 go in patches\.
 
 Online play (upstream beta)
 

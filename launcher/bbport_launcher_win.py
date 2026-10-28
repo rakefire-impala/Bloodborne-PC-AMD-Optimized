@@ -5,7 +5,7 @@
 Every setting of the port in one window: the game folder and saves, bbport.ini (upscaler,
 preset, output, effects), start-up options passed to run.py as environment variables
 (frame rate, presentation, HDR, ...), mods, third-party patches and the FSR 4 assets.
-Launcher options live in %APPDATA%/bbport-launcher/settings.json.
+Launcher options live in bbport.launcher.json beside bbport.ini (moved from %APPDATA% on start).
 
 Frozen with PyInstaller (packaging/windows/package.sh) the same Bloodborne.exe also runs the
 game without the window (`--play`), run.py (`--run`) and the preparation scripts (`--script`),
@@ -37,8 +37,10 @@ if FROZEN:
 DATA_DIR = Path(os.environ.get('BB_DATA_DIR', PORT_DIR))
 # Co-op test build: its own settings, and no updates (a public release would replace it).
 COOP_TEST = False
-CONFIG_DIR = Path(os.environ.get('APPDATA', Path.home())) / ('bbport-launcher-coop' if COOP_TEST else 'bbport-launcher')
-CONFIG_FILE = CONFIG_DIR / 'settings.json'
+# Beside bbport.ini: everything the port writes stays in its own folder (or the game's).
+CONFIG_FILE = DATA_DIR / ('bbport.launcher-coop.json' if COOP_TEST else 'bbport.launcher.json')
+# Where versions up to 1.13 kept it; moved on start (migrate_settings).
+LEGACY_CONFIG_DIR = Path(os.environ.get('APPDATA', Path.home())) / ('bbport-launcher-coop' if COOP_TEST else 'bbport-launcher')
 PATCH_VERSION = '01.09'
 MAX_LOG_LINES = 6000
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
@@ -52,9 +54,10 @@ LAUNCHER_BUILD = 'TatsunaKyo revision'
 COMMUNITY_SERVER = 'https://thehuntersdream.com'
 RELEASES_API = 'https://api.github.com/repos/TatsunaKyo/bloodborne_pc/releases/latest'
 RELEASES_PAGE = 'https://github.com/TatsunaKyo/bloodborne_pc/releases/latest'
-UPDATE_DIR = Path(tempfile.gettempdir()) / 'bbport-update'
+UPDATE_DIR = DATA_DIR / 'out' / 'update'
 # Never copied over an installation by an update (the package does not hold them either).
-USER_FILES = ('user', 'out', 'mods', 'bbport.ini', 'bbport.menu.ini', 'mods.json', 'patches.json', 'last_run.log')
+USER_FILES = ('user', 'out', 'mods', 'bbport.ini', 'bbport.menu.ini', 'mods.json', 'patches.json', 'last_run.log',
+              CONFIG_FILE.name)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -345,6 +348,28 @@ def load_json(path, default):
         return json.loads(Path(path).read_text(encoding='utf-8'))
     except (OSError, ValueError):
         return default
+
+
+def migrate_settings():
+    """Moves the options of versions up to 1.13 from %APPDATA% into the launcher's folder. The
+    folder goes once it holds nothing else (update-check.json: an older update checker's). With
+    options here already, the old ones belong to another installation and stay."""
+    legacy = LEGACY_CONFIG_DIR / 'settings.json'
+    if CONFIG_FILE.is_file() or not legacy.is_file():
+        return
+    try:
+        CONFIG_FILE.write_bytes(legacy.read_bytes())
+    except OSError:
+        return  # not writable here: the old file stays in use
+    for name in ('settings.json', 'update-check.json'):
+        try:
+            (LEGACY_CONFIG_DIR / name).unlink()
+        except OSError:
+            pass
+    try:
+        LEGACY_CONFIG_DIR.rmdir()
+    except OSError:
+        pass
 
 
 def ini_path():
@@ -2450,7 +2475,7 @@ class Launcher:
         self.app['window_mode'] = self.menu['window_mode']
         self.app['fullscreen'] = self.menu['window_mode'] != 'windowed'
         self.ini['show_fps'] = self.menu['show_fps']
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
         CONFIG_FILE.write_text(json.dumps(self.app, indent=2, ensure_ascii=False), encoding='utf-8')
         save_ini({key: self.ini[key] for key in INI_DEFAULTS}, self.ini_lines)
         self.ini, self.ini_lines = load_ini()
@@ -2895,10 +2920,17 @@ def main():
     args = sys.argv[1:]
     if args and args[0] in ('--run', '--script'):
         sys.exit(run_role(args))
-    settings = {**APP_DEFAULTS, **load_json(CONFIG_FILE, {})}
+    installing = args[:1] == ['--install-update'] and len(args) == 3
+    if installing:
+        # Run from the download: the installation's options give the language of its messages.
+        settings = {**APP_DEFAULTS, **load_json(Path(args[1]) / CONFIG_FILE.name,
+                                                load_json(LEGACY_CONFIG_DIR / 'settings.json', {}))}
+    else:
+        migrate_settings()
+        settings = {**APP_DEFAULTS, **load_json(CONFIG_FILE, {})}
     settings = geometry_diagnostic_settings(settings, args)
     LANG = settings.get('ui_language') or windows_language()
-    if args[:1] == ['--install-update'] and len(args) == 3:
+    if installing:
         sys.exit(install_update(args[1], args[2]))
     if FROZEN and UPDATE_DIR not in PORT_DIR.parents:
         shutil.rmtree(UPDATE_DIR, ignore_errors=True)  # what a finished update left behind
