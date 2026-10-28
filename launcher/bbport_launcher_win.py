@@ -45,7 +45,7 @@ PATCH_VERSION = '01.09'
 MAX_LOG_LINES = 6000
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 # Fork releases use windows-v<upstream version>-tatsunakyo.<revision>.
-VERSION = '1.13'
+VERSION = '1.14'
 # The updater reads TatsunaKyo's releases, whose versions compare higher than this fork's:
 # off until this fork publishes its own (then point RELEASES_* and the tag pattern at it).
 UPDATES_ENABLED = False
