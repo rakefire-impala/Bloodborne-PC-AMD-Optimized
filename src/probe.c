@@ -143,6 +143,15 @@ static void write_crash_dump(EXCEPTION_POINTERS *info) {
     FlushFileBuffers(file); CloseHandle(file);
     fprintf(stderr,"Diagnostics: crash dump %s (Windows error %lu)\n",written ? "saved" : "failed",error);
 }
+/* " 'name'" of the calling thread (bb:DrawRec, shadPS4:GpuCommandProcessor, guest names), or "". */
+static void describe_thread(char *out,size_t size) {
+    PWSTR name=NULL;
+    out[0]=0;
+    if (SUCCEEDED(GetThreadDescription(GetCurrentThread(),&name)) && name) {
+        if (name[0]) snprintf(out,size," '%ls'",name);
+        LocalFree(name);
+    }
+}
 static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     if (__atomic_exchange_n(&fatal_reported,1,__ATOMIC_ACQ_REL)) {
         if (__atomic_load_n(&fatal_thread,__ATOMIC_ACQUIRE)==GetCurrentThreadId()) TerminateProcess(GetCurrentProcess(),3);
@@ -151,14 +160,15 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     __atomic_store_n(&fatal_thread,GetCurrentThreadId(),__ATOMIC_RELEASE);
     const EXCEPTION_RECORD *record=info->ExceptionRecord;
     const CONTEXT *c=info->ContextRecord;
-    char where[MAX_PATH+64];
+    char where[MAX_PATH+64], thread[96];
     describe_address(where,sizeof(where),(uintptr_t)c->Rip);
+    describe_thread(thread,sizeof(thread));
     if (record->ExceptionCode==EXCEPTION_ACCESS_VIOLATION && record->NumberParameters>=2)
-        fprintf(stderr,"Fault: %s access to %p at %s (thread %lu)\n",
+        fprintf(stderr,"Fault: %s access to %p at %s (thread %lu%s)\n",
                 record->ExceptionInformation[0]==1 ? "write" : record->ExceptionInformation[0]==8 ? "execute" : "read",
-                (void *)record->ExceptionInformation[1],where,GetCurrentThreadId());
+                (void *)record->ExceptionInformation[1],where,GetCurrentThreadId(),thread);
     else
-        fprintf(stderr,"Fault: exception 0x%08lx at %s (thread %lu)\n",record->ExceptionCode,where,GetCurrentThreadId());
+        fprintf(stderr,"Fault: exception 0x%08lx at %s (thread %lu%s)\n",record->ExceptionCode,where,GetCurrentThreadId(),thread);
     fprintf(stderr,"  rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n  rsi=%016llx rdi=%016llx rbp=%016llx rsp=%016llx\n",
             c->Rax,c->Rbx,c->Rcx,c->Rdx,c->Rsi,c->Rdi,c->Rbp,c->Rsp);
     fprintf(stderr,"  r8=%016llx r9=%016llx r10=%016llx r11=%016llx\n  r12=%016llx r13=%016llx r14=%016llx r15=%016llx eflags=%08lx mxcsr=%08lx\n",

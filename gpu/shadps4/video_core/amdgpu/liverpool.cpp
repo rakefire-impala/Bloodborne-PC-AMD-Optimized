@@ -87,11 +87,17 @@ Liverpool::~Liverpool() {
 }
 
 void Liverpool::ProcessCommands() {
-    if (num_commands && rasterizer) {
-        rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCommands); // bbport: commands touch the caches
-    }
     // Process incoming commands with high priority
+    bool drained = false;
     while (num_commands) {
+        // bbport: commands touch the caches, so the draw recording thread has to run dry first.
+        // The drain sits in the loop: checked before it, a command queued between that check
+        // and the loop ran while the recorder was still recording on the same scheduler
+        // (a fault download's Finish() took its chunk: crash in RecordChunk::Push at 0x20000).
+        if (!drained && rasterizer) {
+            rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCommands);
+            drained = true;
+        }
         Common::UniqueFunction<void> callback{};
         {
             std::scoped_lock lk{submit_mutex};
