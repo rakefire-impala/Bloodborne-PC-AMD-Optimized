@@ -240,6 +240,20 @@ FSR_FG_LOCKED = ('Window mode and Frame rate are locked while FSR Frame Generati
                  '(Graphics → Frame Generation explains why).',
                  'Режим окна и частота кадров заблокированы, пока включена FSR Frame Generation '
                  '(причина — в разделе «Графика» → «Генерация кадров»).')
+# The (!) beside "EXPERIMENTAL" under Graphics → Frame Generation.
+FG_EXPERIMENTAL = (
+    'Frame generation is still experimental. FSR FG needs about 250 MB of video memory on top of '
+    'the game. On 4 GB graphics cards a few minutes of play (lamp travel, new areas) can fill the '
+    "rest, and Windows then starts moving the game's memory out of the card: the game becomes a "
+    'slideshow for a second or two, FSR FG pauses itself to keep it playable, and it may stay off '
+    'for the rest of the session (the FPS counter shows it). Turning it off and on in the in-game '
+    'menu (Insert or L3+R3) tries again.',
+    'Генерация кадров пока экспериментальная. FSR FG нужно примерно 250 МБ видеопамяти сверх самой '
+    'игры. На видеокартах с 4 ГБ несколько минут игры (путешествия между фонарями, новые локации) '
+    'могут занять всё остальное, и тогда Windows начинает выгружать память игры из видеокарты: на '
+    'секунду-две игра превращается в слайд-шоу, FSR FG сама встаёт на паузу, чтобы в игру можно было '
+    'играть, и может не включиться до конца сеанса (это видно по счётчику FPS). Выключите и снова '
+    'включите её во внутриигровом меню (Insert или L3+R3), чтобы попробовать снова.')
 REFLEX_MODES = [('off', ('Off', 'Выключено')), ('on', ('On', 'Включено')), ('boost', ('On + Boost', 'Включено + Boost'))]
 NVIDIA_MULTIPLIERS = [(str(n-1), (f'{n}x', f'{n}x')) for n in range(2, 7)]
 BACKGROUND_MODES = [('run', ('Keep running', 'Продолжать работу')),
@@ -1026,6 +1040,7 @@ class Launcher:
         s.configure('TLabel', background=PANEL, foreground=TEXT)
         s.configure('Muted.TLabel', background=PANEL, foreground=MUTED, font=('Segoe UI', 9))
         s.configure('Section.TLabel', background=PANEL, foreground=GOLD, font=('Georgia', 13))
+        s.configure('Experimental.TLabel', background=PANEL, foreground=GOLD, font=('Segoe UI', 9, 'bold'))
         s.configure('TCheckbutton', background=PANEL, foreground=TEXT, padding=(0, 3))
         s.map('TCheckbutton', background=[('active', PANEL)], foreground=[('disabled', MUTED)])
         s.configure('Warning.TLabel', background='#2a1d12', foreground='#e3b25a', padding=(10, 6))
@@ -1116,6 +1131,13 @@ class Launcher:
         upscaler.trace_add('write', availability)
         availability()
         return box
+
+    def experimental_tag(self, parent):
+        """EXPERIMENTAL and a (!) explaining why (FG_EXPERIMENTAL), under the Frame Generation choice."""
+        tag = self.ttk.Frame(parent)
+        self.ttk.Label(tag, text=_('EXPERIMENTAL', 'ЭКСПЕРИМЕНТАЛЬНО'), style='Experimental.TLabel').pack(side='left')
+        self.warning_icon(tag, _(*FG_EXPERIMENTAL)).pack(side='left', padx=(4, 0))
+        return tag
 
     def fsr_fg_lock(self, widget, unlocked='readonly'):
         """A control FSR frame generation locks (FSR_FG_SETTINGS); `unlocked` is its usual state."""
@@ -1526,6 +1548,7 @@ class Launcher:
         self.frame_generation_choice(quick_fg, 22).grid(row=0, column=0)
         self.fsr_fg_shown(self.warning_icon(quick_fg, _(*FSR_FG_NOTE))).grid(row=0, column=1, padx=(6, 0))
         self.row(quick, _('Frame Generation', 'Генерация кадров'), quick_fg)
+        self.experimental_tag(quick).grid(row=self.next_row(quick), column=1, sticky='w', pady=(2, 0))
         quick_multiplier = self.choice(quick, 'nvidia_generated_frames', 'menu', NVIDIA_MULTIPLIERS, 26)
         self.quick_fg_multiplier_row = quick_multiplier
         self.row(quick, _('NVIDIA FG multiplier', 'Множитель NVIDIA FG'), quick_multiplier)
@@ -1721,10 +1744,13 @@ class Launcher:
         self.check(f, 'object_motion', 'ini', _('Object motion vectors', 'Векторы движения объектов'),
                    _('Less ghosting on characters, cloth and weapons; costs about 10% FPS.',
                      'Меньше гостинга на персонажах и одежде; стоит около 10% FPS.'))
-        self.row(f, _('Frame Generation', 'Генерация кадров'),
-                 self.frame_generation_choice(f),
-                 _('FSR FG adds one interpolated frame between real frames. Supports SDR and HDR10 with a temporal upscaler. The normal FPS limit counts real frames: 75 can produce 150 with FG 2x.',
-                   'FSR FG добавляет один промежуточный кадр. Поддерживает SDR и HDR10 с временным апскейлером. Обычный лимит относится к реальным кадрам: 75 даёт до 150 с FG 2x.'))
+        self.row(f, _('Frame Generation', 'Генерация кадров'), self.frame_generation_choice(f))
+        fg_hint = self.ttk.Frame(f)
+        self.experimental_tag(fg_hint).pack(anchor='w')
+        self.ttk.Label(fg_hint, text=_('FSR FG adds one interpolated frame between real frames. Supports SDR and HDR10 with a temporal upscaler. The normal FPS limit counts real frames: 75 can produce 150 with FG 2x.',
+                                       'FSR FG добавляет один промежуточный кадр. Поддерживает SDR и HDR10 с временным апскейлером. Обычный лимит относится к реальным кадрам: 75 даёт до 150 с FG 2x.'),
+                       style='Muted.TLabel', wraplength=self.px(560), justify='left').pack(anchor='w')
+        fg_hint.grid(row=self.next_row(f), column=1, sticky='w', pady=(2, 2))
         fsr_note = self.ttk.Label(f, text=_(*FSR_FG_NOTE), style='Warning.TLabel', wraplength=self.px(540),
                                   justify='left')
         fsr_note.grid(row=self.next_row(f), column=1, sticky='w', pady=(2, 4))
