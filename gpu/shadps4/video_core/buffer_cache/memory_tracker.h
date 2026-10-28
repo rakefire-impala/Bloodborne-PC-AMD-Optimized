@@ -63,6 +63,15 @@ public:
                             });
     }
 
+    /// bbport: see RegionManager::ForEachProtectedGpuRange.
+    void ForEachProtectedGpuRange(VAddr cpu_addr, u64 size, auto&& func) {
+        IteratePages<false>(cpu_addr, size,
+                            [&func](RegionManager* manager, u64 offset, size_t size) {
+                                std::scoped_lock lk{manager->lock};
+                                manager->ForEachProtectedGpuRange(offset, size, func);
+                            });
+    }
+
     /// Unmark region as modified from the host GPU
     void UnmarkRegionAsGpuModified(VAddr dirty_cpu_addr, u64 query_size) noexcept {
         IteratePages<false>(dirty_cpu_addr, query_size,

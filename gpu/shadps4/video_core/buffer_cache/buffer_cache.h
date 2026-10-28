@@ -11,6 +11,7 @@
 #include <deque>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <thread>
 #include <boost/container/small_vector.hpp>
 
@@ -149,7 +150,8 @@ public:
     void ExtendWriteFault(VAddr device_addr);
 
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
-    /// `pages_only`: download the faulting pages only, not the window around them (readbacks Off).
+    /// `pages_only`: download the faulting pages, and in the write-fault window only the pages
+    /// the guest has not written since their last upload (readbacks Off, StalePagesAround).
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false, bool assume_locks = false,
                     bool pages_only = false);
 
@@ -205,6 +207,8 @@ private:
     void EnsureResident(u64 first_block, u64 last_block);
 
     void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size);
+    /// bbport: (address, size) ranges of one arena page with one copy and one GPU wait.
+    void DownloadMemory(const Buffer* arena, std::span<const std::pair<VAddr, u64>> ranges);
 
     bool SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size, bool is_written,
                            bool is_texel_buffer);
@@ -276,9 +280,16 @@ private:
     u32 gpu_writes_current = 0;
     std::chrono::steady_clock::time_point gpu_writes_since{};
     std::atomic<u32> stale_downloads{0}; ///< guest writes into older GPU bytes (downloaded)
+    std::atomic<u64> stale_window_pages{0}; ///< pages downloaded with them (StalePagesAround)
     void NoteGpuWrite(VAddr address, u64 size);
     bool GpuWrittenRecently(VAddr address, u64 size);
     void RotateGpuWrites(std::chrono::steady_clock::time_point now);
+    /// bbport: the pages of the write-fault window around [address, address + size) that hold
+    /// GPU bytes the GPU no longer writes and are still write-protected, appended to `ranges`.
+    void StalePagesAround(VAddr address, u64 size,
+                          boost::container::small_vector<std::pair<VAddr, u64>, 8>& ranges);
+    /// bbport: bytes unprotected around a guest write fault (BB_FAULT_WINDOW KiB, 256).
+    static u64 FaultWindow();
 
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;

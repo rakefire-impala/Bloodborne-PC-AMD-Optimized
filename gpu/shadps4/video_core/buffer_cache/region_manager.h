@@ -222,6 +222,22 @@ public:
         }
     }
 
+    /// bbport: calls func(address, size) for each run of GPU-modified pages in the range that
+    /// are still protected for CPU writes: the guest wrote nothing there since their last upload.
+    void ForEachProtectedGpuRange(u64 offset, u64 size, auto&& func) const {
+        const size_t start_page = SanitizeAddress(offset) / TRACKER_BYTES_PER_PAGE;
+        const size_t end_page =
+            Common::DivCeil(SanitizeAddress(offset + size), TRACKER_BYTES_PER_PAGE);
+        if (start_page >= NUM_PAGES_PER_REGION || end_page <= start_page ||
+            !gpu.AnyInRange(start_page, end_page)) {
+            return;
+        }
+        const RegionBits mask(gpu & ~(cpu | writeable), start_page, end_page);
+        for (const auto& [start, end] : mask) {
+            func(cpu_addr + start * TRACKER_BYTES_PER_PAGE, (end - start) * TRACKER_BYTES_PER_PAGE);
+        }
+    }
+
     LockType lock;
 
 private:

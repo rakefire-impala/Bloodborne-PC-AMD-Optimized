@@ -204,8 +204,11 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_lock
                 const u32 downloads = stale_downloads.fetch_add(1, std::memory_order_relaxed);
                 if (downloads % 200 == 0) {
                     std::printf("Buffer cache: guest write into GPU bytes the GPU no longer "
-                                "writes; downloaded first (%u times so far)\n",
-                                downloads + 1);
+                                "writes; downloaded first (%u times so far, %llu more pages "
+                                "around them)\n",
+                                downloads + 1,
+                                static_cast<unsigned long long>(
+                                    stale_window_pages.load(std::memory_order_relaxed)));
                 }
                 return false;
             }
@@ -408,16 +411,63 @@ void BufferCache::SmallGuestCopy(const BbCopy::Item& item) {
     BbCopy::QueueCopy(item);
 }
 
-void BufferCache::ExtendWriteFault(VAddr device_addr) {
+u64 BufferCache::FaultWindow() {
     static const u64 window = [] {
         const char* env = std::getenv("BB_FAULT_WINDOW");
         const u64 kib = env ? std::strtoull(env, nullptr, 10) : 256;
         return std::bit_ceil(std::clamp<u64>(kib, 4, 1024)) * 1024;
     }();
+    return window;
+}
+
+void BufferCache::ExtendWriteFault(VAddr device_addr) {
+    const u64 window = FaultWindow();
     if (window <= TRACKER_BYTES_PER_PAGE || BbToggle::Disabled(BbToggle::FaultWindow)) {
         return;
     }
     memory_tracker->ExtendWriteFault(Common::AlignDown(device_addr, window), window);
+}
+
+void BufferCache::StalePagesAround(
+    VAddr address, u64 size, boost::container::small_vector<std::pair<VAddr, u64>, 8>& ranges) {
+    // bbport: a guest write into GPU bytes the GPU no longer writes is usually one of many: after
+    // an area load the game fills memory the GPU wrote in the previous area. The fault window
+    // (ExtendWriteFault) leaves GPU-modified pages protected, so each 4 KiB page of such a region
+    // cost a fault, a command to the GPU thread and a full GPU wait: ~9,400 in one Old Yharnam
+    // reload, 190-860 ms frames. Its pages that the guest has not written since their last upload
+    // (still protected, so no twin and no guest data newer than the GPU's) come down in the same
+    // copy; then the window unprotects them. Bytes the GPU still writes keep their twins.
+    // BB_STALE_WINDOW=0: the faulting pages only.
+    static const bool enabled = [] {
+        const char* env = std::getenv("BB_STALE_WINDOW");
+        return !env || env[0] != '0';
+    }();
+    const u64 window = FaultWindow();
+    if (!enabled || window <= TwinPageSize || BbToggle::Disabled(BbToggle::FaultWindow)) {
+        return;
+    }
+    const VAddr fault_start = Common::AlignDown(address, TwinPageSize);
+    const VAddr fault_end = Common::AlignUp(address + size, TwinPageSize);
+    boost::container::small_vector<std::pair<VAddr, u64>, 8> protected_ranges;
+    memory_tracker->ForEachProtectedGpuRange(
+        Common::AlignDown(address, window), window,
+        [&](VAddr start, u64 bytes) { protected_ranges.emplace_back(start, bytes); });
+    u64 pages = 0;
+    for (const auto& [start, bytes] : protected_ranges) {
+        for (VAddr page = start; page < start + bytes; page += TwinPageSize) {
+            if ((page >= fault_start && page < fault_end) ||
+                GpuWrittenRecently(page, TwinPageSize)) {
+                continue;
+            }
+            if (!ranges.empty() && ranges.back().first + ranges.back().second == page) {
+                ranges.back().second += TwinPageSize;
+            } else {
+                ranges.emplace_back(page, TwinPageSize);
+            }
+            ++pages;
+        }
+    }
+    stale_window_pages.fetch_add(pages, std::memory_order_relaxed);
 }
 
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool assume_locks,
@@ -438,13 +488,35 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
                        : std::max<VAddr>(window_start + WindowSize, device_addr + size);
         // bbport: from the owner arenas, which hold every resident block (GPU-written ones
         // included); a page without one has nothing to download.
-        for (VAddr start = window_start; start < window_end;) {
-            const u64 page = start >> arena_page_bits;
-            const VAddr end = std::min<VAddr>((page + 1) << arena_page_bits, window_end);
-            if (const Buffer* owner = address_space[page]) {
-                DownloadMemory(owner, start, end - start);
+        const auto download = [this](VAddr start, VAddr stop) {
+            while (start < stop) {
+                const u64 page = start >> arena_page_bits;
+                const VAddr end = std::min<VAddr>((page + 1) << arena_page_bits, stop);
+                if (const Buffer* owner = address_space[page]) {
+                    DownloadMemory(owner, start, end - start);
+                }
+                start = end;
             }
-            start = end;
+        };
+        boost::container::small_vector<std::pair<VAddr, u64>, 8> ranges{
+            {window_start, window_end - window_start}};
+        if (pages_only) {
+            StalePagesAround(device_addr, size, ranges);
+        }
+        const u64 arena_page = window_start >> arena_page_bits;
+        const bool one_arena = std::ranges::all_of(ranges, [&](const auto& range) {
+            return (range.first >> arena_page_bits) == arena_page &&
+                   ((range.first + range.second - 1) >> arena_page_bits) == arena_page;
+        });
+        if (ranges.size() > 1 && one_arena) {
+            // One copy and one GPU wait for the faulting pages and the stale ones around them.
+            if (const Buffer* owner = address_space[arena_page]) {
+                DownloadMemory(owner, std::span{ranges.data(), ranges.size()});
+            }
+        } else {
+            for (const auto& [start, bytes] : ranges) {
+                download(start, start + bytes);
+            }
         }
         if (is_write) {
             memory_tracker->MarkRegionAsCpuModified(device_addr, size);
@@ -458,26 +530,34 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
 }
 
 void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size) {
+    const std::pair<VAddr, u64> range{device_addr, size};
+    DownloadMemory(arena, std::span{&range, 1});
+}
+
+void BufferCache::DownloadMemory(const Buffer* arena,
+                                 std::span<const std::pair<VAddr, u64>> ranges) {
     boost::container::small_vector<vk::BufferCopy, 1> copies;
     u64 total_size_bytes = 0;
     const VAddr arena_base = arena->cpu_addr;
-    memory_tracker->ForEachDownloadRange<false>(device_addr, size, [&](u64 address, u64 size) {
-        const auto add_download = [&](VAddr start, VAddr end) {
-            const u64 new_offset = start - arena_base;
-            const u64 new_size = end - start;
-            copies.push_back(vk::BufferCopy{
-                .srcOffset = new_offset,
-                .dstOffset = total_size_bytes,
-                .size = new_size,
-            });
-            // Align up to avoid cache conflicts
-            constexpr u64 align = 64ULL;
-            constexpr u64 mask = ~(align - 1ULL);
-            total_size_bytes += (new_size + align - 1) & mask;
-        };
-        gpu_modified_ranges.ForEachInRange(address, size, add_download);
-        gpu_modified_ranges.Subtract(address, size);
-    });
+    for (const auto& [device_addr, size] : ranges) {
+        memory_tracker->ForEachDownloadRange<false>(device_addr, size, [&](u64 address, u64 size) {
+            const auto add_download = [&](VAddr start, VAddr end) {
+                const u64 new_offset = start - arena_base;
+                const u64 new_size = end - start;
+                copies.push_back(vk::BufferCopy{
+                    .srcOffset = new_offset,
+                    .dstOffset = total_size_bytes,
+                    .size = new_size,
+                });
+                // Align up to avoid cache conflicts
+                constexpr u64 align = 64ULL;
+                constexpr u64 mask = ~(align - 1ULL);
+                total_size_bytes += (new_size + align - 1) & mask;
+            };
+            gpu_modified_ranges.ForEachInRange(address, size, add_download);
+            gpu_modified_ranges.Subtract(address, size);
+        });
+    }
     if (total_size_bytes == 0) {
         return;
     }
@@ -494,7 +574,9 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
         memory->TryWriteBacking(dst_addr, download.mapped + (copy.dstOffset - download.offset),
                                 copy.size);
     }
-    memory_tracker->UnmarkRegionAsGpuModified(device_addr, size);
+    for (const auto& [device_addr, size] : ranges) {
+        memory_tracker->UnmarkRegionAsGpuModified(device_addr, size);
+    }
 }
 
 namespace {
