@@ -57,5 +57,17 @@ common.add_event(7299, [(1001, 0, bytes(4))], params=[(0, 0, 0, 4)])
 after = fsformats.Emevd(common.write())
 assert len(after.event_ins(0)) == before + 1 and after.event_ins(7299) == [(1001, 0, bytes(4))]
 assert after.event_ins(7200) == fsformats.Emevd(fsformats.Dcx((root / 'event/common.emevd.dcx').read_bytes()).data).event_ins(7200)
-print(f'PASS: {len(talk)} talk archives ({esd_count} scripts) and {len(events)} event scripts round-trip; '
-      'edits read back')
+
+layouts = sorted((root / 'map' / 'MapStudio').glob('m[23]*.msb.dcx'))
+for path in layouts:
+    msb = fsformats.Msb(fsformats.Dcx(path.read_bytes()).data)
+    assert msb.write() == msb.raw, f'{path.name}: map layout rewrite differs'
+# An added region reads back where it was put; the rest stays (Old Yharnam: Darkbeast Paarl's fog).
+msb = fsformats.Msb(fsformats.Dcx((root / 'map/MapStudio/m23_00_00_00.msb.dcx').read_bytes()).data)
+regions, parts = msb.region_positions(), msb.part_positions()
+msb.add_region(2302810, 2302990, (1.0, 2.0, 3.0), 45.0, 'test region with a longer name')
+again = fsformats.Msb(msb.write())
+assert again.region_positions() == regions + [(2302990, (1.0, 2.0, 3.0))]
+assert again.part_positions() == parts and again.respawn_points() == msb.respawn_points()
+print(f'PASS: {len(talk)} talk archives ({esd_count} scripts), {len(events)} event scripts and '
+      f'{len(layouts)} map layouts round-trip; edits read back')

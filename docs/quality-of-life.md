@@ -96,18 +96,29 @@ player only, 1.09 only, like the safe menu.
 ## Retry a boss fight after dying in it
 
 `qol_boss_retry=1` in `bbport.ini` (or `BB_BOSS_RETRY=1`). After a death to a story boss (a boss bar
-naming a boss, not an NPC hunter) behind a fog gate, once you are on your feet again the overlay asks
-"Retry the fight?" (Cross/A/Enter: retry; Circle/B/Esc: not now). Retrying puts you at the boss's
-fog gate: a short warp when you are in its map, otherwise a respawn-point warp to a lamp of that
-map (that warp takes lamps only) and the short warp on arrival. Single player, 1.09 only, outside
-the Chalice Dungeons (their maps are generated).
+naming a boss, not an NPC hunter) behind a fog gate, once you are on your feet again after the
+loading screen the overlay asks "Retry the fight?" (Cross/A/Enter: retry; Circle/B/Esc: not now).
+Retrying is one loading screen, after which you stand in front of the boss's fog, facing it, with
+its prompt to walk through. If you die again you come back at the lamp of that map that is always
+there (not the one the boss leaves in its arena). Single player, 1.09 only, outside the Chalice
+Dungeons (their maps are generated).
 
 `scripts/boss_retry.py` finds the gates in the map event scripts (the host event turning the player
-toward a point with the fog walk, animation 101130; its defeat flag and the region inside the fog)
-and adds, per gate: a map event that writes the gate's number to flags 6989-6996 and sets 6988
-when you walk in while the boss lives, and common events 7400-7599 that warp on flag 6986 with the
-gate's number. `src/runtime_retry.c` reads the boss bars like the Discord presence, notices the
-death (player HP 0 during the fight) and asks; the list is `out/qol/boss_retry.txt`
+toward a point with the fog walk, animation 101130; its defeat flag, the fog object and the region
+inside the fog) and adds, per gate:
+- a map event that writes the gate's number to flags 6989-6996 and sets 6988 when you walk in
+  while the boss lives;
+- a region a step in front of the fog (the "spot"), in every layout of the map
+  (`map/MapStudio/mAA_BB_00_*.msb.dcx`): the game has no entity there (the point the fog walk
+  turns to is in the arena, at Darkbeast Paarl under its floor, and a short warp to the fog object
+  does nothing);
+- common events 7400-7599: on flag 6986 with the gate's number, a respawn-point warp (lamps only)
+  to the lamp of the map nearest the fog; on arrival, a short warp (EMEVD 2004[41]; 2004[03] would
+  be a second loading screen) to the spot, and the respawn point set to the nearest lamp that is
+  always there, as the nearest lamp is often the one in the arena.
+
+`src/runtime_retry.c` reads the boss bars like the Discord presence, notices the death (player HP 0
+during the fight) and asks once the loading screen is gone; the list is `out/qol/boss_retry.txt`
 (`BB_BOSS_RETRY_LIST`).
 
 ## Planned, not implemented yet

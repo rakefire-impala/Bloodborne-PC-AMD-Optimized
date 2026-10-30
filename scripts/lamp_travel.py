@@ -424,6 +424,14 @@ class GameFiles:
                   and k.endswith('.emevd.dcx')}
         return sorted(f'event/{n}' for n in names)
 
+    def map_layouts(self, map_name):
+        """The layouts of a map (mAA_BB_00_00): the map's variants mAA_BB_00_*."""
+        stem = map_name[:-2]
+        names = {p.name for p in (self.game / 'dvdroot_ps4/map/MapStudio').glob(f'{stem}*.msb.dcx')}
+        names |= {k.split('/')[-1] for k in self.replaced if k.startswith(f'dvdroot_ps4/map/mapstudio/{stem}')
+                  and k.endswith('.msb.dcx')}
+        return sorted(f'map/MapStudio/{n}' for n in names)
+
 
 def game_language():
     try:

@@ -25,6 +25,7 @@ enum {
     SESSION_MAN = 0x5540290,     /* SprjSessionManager *: +0x124 session state */
     BLOCK_LIST = 0x553b148,      /* +0x20 index of the player's block, +0x10 -> +0x18 count, +0x20 entries */
     BOSS_BARS = 0x1658,
+    LOADING_SCREEN = 0x2498,     /* menu manager: the loading screen shown, null without one */
     MAX_GATES = 256,
     MAX_NAMES = 256,
     /* Pad reads (about one per frame) the player must stay on their feet before the question,
@@ -82,6 +83,11 @@ static int single_player(void) {
 static int start_menu_open(void) {
     const uintptr_t menu = load((uintptr_t)game + MENU_MAN);
     return pointer_ok(menu) && load32(menu + 0x54) != 0;
+}
+/* The player exists (and has HP) during the respawn's loading screen as well. */
+static int loading_screen(void) {
+    const uintptr_t menu = load((uintptr_t)game + MENU_MAN);
+    return pointer_ok(menu) && load(menu + LOADING_SCREEN) != 0;
 }
 /* HP of a character (ChrIns +0x3b0 -> +0x20 -> +0xf8), -1 when unreadable. */
 static int32_t hp(uintptr_t chr) {
@@ -255,10 +261,12 @@ void runtime_retry_poll(void) {
         pending = -1;
         return;
     }
-    /* Back on their feet, out of the menus, and either in the gate's map or able to load it. */
+    /* Back on their feet past the loading screen, out of the menus, and either in the gate's map
+     * or able to load it. */
     const int here = player_block(&block) && ((block >> 24) & 0xff) == gates[pending].area &&
                      ((block >> 16) & 0xff) == gates[pending].block;
-    if (life <= 0 || start_menu_open() || bbgpu_overlay_captures_input() || !(here || gates[pending].lamp)) {
+    if (life <= 0 || loading_screen() || start_menu_open() || bbgpu_overlay_captures_input() ||
+        !(here || gates[pending].lamp)) {
         settled = 0;
         return;
     }

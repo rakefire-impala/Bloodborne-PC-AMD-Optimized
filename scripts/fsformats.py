@@ -566,3 +566,100 @@ class Emevd:
         out += self.links + self.strings + self.tail
         assert len(out) == size
         return bytes(out)
+
+
+# --- map layouts (MSB) ----------------------------------------------------------------------------
+
+class Msb:
+    """A map layout: where its entities are, and regions added to it. Sections are a table of entry
+    offsets, the section's name, then the entries; each entry keeps its name and data at offsets
+    relative to itself, so entries move as they are."""
+
+    def __init__(self, raw: bytes):
+        if raw[:4] != b'MSB ':
+            raise ValueError('not an MSB map layout')
+        self.raw = raw
+        self.sections = {}
+        self.layout = []  # [name, version, name bytes, [entry bytes]] per section, for write()
+        off = 0x10
+        while off:
+            version, count = struct.unpack_from('<ii', raw, off)  # entries + the next section's offset
+            name_off = struct.unpack_from('<q', raw, off + 8)[0]
+            entries = struct.unpack_from(f'<{count}q', raw, off + 16)
+            if name_off != off + 16 + 8 * count or list(entries[:-1]) != sorted(entries[:-1]):
+                raise ValueError('unexpected MSB section layout')
+            name = self._text(name_off)
+            self.sections[name] = entries[:-1]
+            ends = list(entries[1:-1]) + [entries[-1] or len(raw)]
+            self.layout.append([name, version, raw[name_off:entries[0] if count > 1 else ends[-1]],
+                                [raw[start:end] for start, end in zip(entries[:-1], ends)]])
+            off = entries[-1]
+
+    def _text(self, off):
+        end = off
+        while self.raw[end:end + 2] != b'\0\0':
+            end += 2
+        return self.raw[off:end].decode('utf-16le')
+
+    def _entity(self, entry, data_slot, at=0):
+        return struct.unpack_from('<i', self.raw, entry + struct.unpack_from('<q', self.raw, entry + data_slot)[0] + at)[0]
+
+    def region_positions(self):
+        """[(entity ID, (x, y, z))] of the regions, in section order (events refer to them by index)."""
+        return [(self._entity(e, 0x48), struct.unpack_from('<3f', self.raw, e + 0x14))
+                for e in self.sections['POINT_PARAM_ST']]
+
+    def part_positions(self):
+        """{entity ID: (x, y, z)} of the parts (map pieces, objects, characters...)."""
+        return {entity: position for entity, (position, _) in self.part_transforms().items()}
+
+    def part_transforms(self):
+        """{entity ID: ((x, y, z), (rotation x, y, z in degrees))} of the parts."""
+        return {self._entity(e, 0xb0): (struct.unpack_from('<3f', self.raw, e + 0x28),
+                                        struct.unpack_from('<3f', self.raw, e + 0x34))
+                for e in self.sections['PARTS_PARAM_ST']}
+
+    def entity_ids(self):
+        """The entity IDs of the regions, parts and events."""
+        return ({entity for entity, _ in self.region_positions()} | set(self.part_transforms())
+                | {self._entity(e, 0x18, 8) for e in self.sections['EVENT_PARAM_ST']})
+
+    def add_region(self, template, entity, position, rotation_y, name):
+        """Append a copy of the region with entity ID template (its type and shape) under a new
+        entity ID, name, position and rotation. Its data blocks follow the name and move with it
+        by whole 8 bytes."""
+        points = next(s for s in self.layout if s[0] == 'POINT_PARAM_ST')[3]
+        source = next(e for e in self.sections['POINT_PARAM_ST'] if self._entity(e, 0x48) == template)
+        old = points[self.sections['POINT_PARAM_ST'].index(source)]
+        name_off = struct.unpack_from('<q', old, 0)[0]
+        data = struct.unpack_from('<4q', old, 0x30)
+        text = name.encode('utf-16le') + b'\0\0'
+        move = -(-(name_off + len(text) - min(data)) // 8) * 8
+        entry = bytearray(old[:name_off] + text)
+        entry += bytes(min(data) + move - len(entry)) + old[min(data):]
+        struct.pack_into('<i', entry, 0x0C, len(points))
+        struct.pack_into('<6f', entry, 0x14, *position, 0.0, rotation_y, 0.0)
+        struct.pack_into('<4q', entry, 0x30, *(d + move for d in data))
+        struct.pack_into('<i', entry, data[3] + move, entity)
+        points.append(bytes(entry))
+
+    def write(self) -> bytes:
+        out = bytearray(self.raw[:0x10])
+        for i, (_, version, name, entries) in enumerate(self.layout):
+            table = len(out) + 16 + 8 * (len(entries) + 1)
+            offsets = [table + len(name) + sum(len(e) for e in entries[:k]) for k in range(len(entries) + 1)]
+            if i == len(self.layout) - 1:
+                offsets[-1] = 0
+            out += struct.pack(f'<iiq{len(offsets)}q', version, len(offsets), table, *offsets)
+            out += name + b''.join(entries)
+        return bytes(out)
+
+    def respawn_points(self):
+        """{entity ID: (x, y, z)} of the respawn point events (lamps), at their regions."""
+        regions = self.region_positions()
+        out = {}
+        for e in self.sections['EVENT_PARAM_ST']:
+            if struct.unpack_from('<i', self.raw, e + 0x0C)[0] == 8:
+                region = struct.unpack_from('<i', self.raw, e + struct.unpack_from('<q', self.raw, e + 0x20)[0])[0]
+                out[self._entity(e, 0x18, 8)] = regions[region][1]
+        return out
