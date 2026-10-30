@@ -58,7 +58,7 @@ void BindDevice(VkDevice dev, bool enabled, PFN_vkGetDeviceProcAddr resolve) {
     // Enabling the device feature must not implicitly enable the user's setting.
     if (update) Send(false);
     ready = update != nullptr;
-    std::printf("AMD Anti-Lag 2: %s (VK_AMD_anti_lag)\n", update ? "available" : "unavailable on this GPU/driver");
+    std::printf("AMD Anti-Lag 2: %s (VK_AMD_anti_lag)\n", update ? "available" : "off");
 }
 
 void BeforeInput() {

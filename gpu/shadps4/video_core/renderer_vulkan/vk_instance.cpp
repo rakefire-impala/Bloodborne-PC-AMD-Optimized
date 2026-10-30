@@ -303,11 +303,12 @@ bool Instance::CreateDevice() {
         return false;
     };
 
-    const bool anti_lag = BbAmd::QueryFeature(VkPhysicalDevice(physical_device),
-        properties.vendorID == 0x1002,
-        std::ranges::find(available_extensions, VK_AMD_ANTI_LAG_EXTENSION_NAME) != available_extensions.end(),
-        VULKAN_HPP_DEFAULT_DISPATCHER.vkGetPhysicalDeviceFeatures2);
-    if (anti_lag) add_extension(VK_AMD_ANTI_LAG_EXTENSION_NAME);
+    // bbport: AMD Anti-Lag 2 stays off. Its input stage (vkAntiLagUpdateAMD, called on the game's
+    // main thread as it reads the pad) slept ~190 ms in the driver every second or two on an RX
+    // 5500M, and the game waited for it: ~30 such stalls in an 8-minute 60 FPS recording with OBS
+    // (Oct 28), 27 a minute uncapped in a street, none with it off. Presenting in order or marking
+    // every present did not change it.
+    const bool anti_lag = false;
 
     // Required
     ASSERT_MSG(add_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME),

@@ -1768,9 +1768,11 @@ class Launcher:
                  self.choice(f, 'reflex', 'menu', REFLEX_MODES),
                  _('Available independently of DLSS FG on supported NVIDIA GPUs. NVIDIA FG enables Reflex automatically; Boost is optional.',
                    'Работает независимо от DLSS FG на совместимых GPU NVIDIA. NVIDIA FG включает Reflex автоматически; Boost необязателен.'))
+        # The port keeps AMD Anti-Lag 2 off (vk_instance.cpp): its driver wait stalled the game.
         self.amd_antilag_check = self.check(f, 'amd_antilag', 'menu', 'AMD Anti-Lag 2',
-                   _('Reduces input latency on supported Radeon GPUs through VK_AMD_anti_lag. Independent of the upscaler and FSR FG; unavailable drivers keep the normal path.',
-                     'Снижает задержку ввода на совместимых Radeon через VK_AMD_anti_lag. Независимо от апскейлера и FSR FG; без поддержки используется обычный режим.'))
+                   _('Off: with it on, the Radeon driver paused the game for about 0.2 s every second or two.',
+                     'Выключено: с ним драйвер Radeon останавливал игру примерно на 0,2 с каждые секунду-две.'))
+        self.amd_antilag_check.configure(state='disabled')
         self.fsr_fg_lock(self.check(f, 'limit_generated_fps', 'menu',
                                     _('Limit total FPS with Frame Generation', 'Лимит общих FPS с генерацией кадров')),
                          'normal')
@@ -2251,7 +2253,7 @@ class Launcher:
             clang64 = Path(os.environ.get('MSYS2_ROOT', r'C:\msys64')) / 'clang64' / 'bin'
             env['PATH'] = f'{clang64}{os.pathsep}{env.get("PATH", "")}'
         text = _('• Graphics card: not checked', '• Видеокарта: не проверена')
-        gpus, antilag = None, None
+        gpus = None
         try:
             # kind, MiB, Vulkan 1.3, selected, name (tab-separated; tools/gpu_capabilities.c)
             result = subprocess.run([str(exe), '--list'], capture_output=True, text=True, timeout=30,
@@ -2270,10 +2272,6 @@ class Launcher:
             elif result.returncode or used:
                 text = _('✗ No Vulkan 1.3 graphics card found (update the driver)',
                          '✗ Не найдена видеокарта с Vulkan 1.3 (обновите драйвер)')
-            capability = subprocess.run([str(exe), '--amd-antilag'], capture_output=True, text=True,
-                                        timeout=30, env=env, creationflags=NO_WINDOW)
-            if capability.returncode == 0 and capability.stdout.strip() in ('0', '1'):
-                antilag = capability.stdout.strip() == '1'
         except (OSError, subprocess.TimeoutExpired):
             pass
 
@@ -2285,8 +2283,6 @@ class Launcher:
                 self.gpus = gpus
                 for show in self.gpu_boxes:
                     show()
-            if antilag is not None:
-                self.amd_antilag_check.configure(state='normal' if antilag else 'disabled')
             self.refresh_status()
         self.ui_calls.put(done)
 

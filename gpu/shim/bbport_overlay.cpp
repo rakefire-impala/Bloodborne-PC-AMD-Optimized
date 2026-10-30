@@ -586,8 +586,8 @@ void FrameSettings() {
     Hint(s.amd_antilag_supported ?
         Text("Reduces input latency through the Radeon Vulkan driver. Works independently of the upscaler and FSR FG.",
              "Снижает задержку ввода через драйвер Radeon Vulkan. Работает независимо от апскейлера и FSR FG.") :
-        Text("AMD Anti-Lag 2 needs a Radeon GPU and a driver with VK_AMD_anti_lag support.",
-             "AMD Anti-Lag 2 требует Radeon и драйвер с поддержкой VK_AMD_anti_lag."));
+        Text("AMD Anti-Lag 2 is off: with it on, the Radeon driver paused the game for about 0.2 s every second or two.",
+             "AMD Anti-Lag 2 выключен: с ним драйвер Radeon останавливал игру примерно на 0,2 с каждые секунду-две."));
     Hint(Text("FSR FG adds one interpolated frame between real frames, in SDR or HDR10. The normal FPS limit counts real frames: 75 can produce 150 with FG 2x. Background FPS caps disable generation. "
               "The launcher starts FSR FG in exclusive fullscreen with the Unlocked frame rate: in a window Windows drops frames while the GPU is busy, and the fixed FPS patches slow the game down below their rate.",
               "FSR FG добавляет промежуточный кадр в SDR или HDR10. Обычный лимит относится к реальным кадрам: 75 даёт до 150 с FG 2x. При лимите FPS в фоне генерация отключается. "
