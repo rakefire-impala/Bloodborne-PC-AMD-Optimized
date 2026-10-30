@@ -69,9 +69,17 @@ float base_scale = 1.0f;
 std::chrono::steady_clock::time_point last_present{};
 float frame_ms_avg = 0.0f;
 
-// Debug hotkeys (force save: L3 + d-pad up / F5; frame generation on/off: L3 + d-pad down / F6).
-// Their confirmation is shown for a moment; the text is guarded by imgui_mutex, the deadline is
-// also read by Visible() before the lock.
+// Debug hotkeys (force save: L3 + d-pad up / F5; frame generation on/off: L3 + d-pad down / F6),
+// only with BB_DEBUG_HOTKEYS=1: they crashed the game in play. Their confirmation is shown for a
+// moment; the text is guarded by imgui_mutex, the deadline is also read by Visible() before the
+// lock.
+bool DebugHotkeys() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_DEBUG_HOTKEYS");
+        return env && env[0] == '1';
+    }();
+    return on;
+}
 std::string notice_text;
 std::atomic<long long> notice_until_ms{0};
 std::atomic<bool> force_save_requested{false};
@@ -1310,7 +1318,7 @@ bool HandleEvent(const SDL_Event& event) {
             SetOpen(event.key.key == SDLK_INSERT ? !is_open : false);
             return true;
         }
-        if (down && !event.key.repeat && !is_open &&
+        if (down && !event.key.repeat && !is_open && DebugHotkeys() &&
             (event.key.key == SDLK_F5 || event.key.key == SDLK_F6)) {
             event.key.key == SDLK_F5 ? RequestForceSave() : ToggleFrameGeneration();
             return true;
@@ -1339,9 +1347,9 @@ bool HandleEvent(const SDL_Event& event) {
             SetOpen(!is_open);
             return true;
         }
-        // L3 does nothing in the game; with it held, d-pad up/down are the hotkeys (and the
-        // game does not see them: src/runtime_pad.c).
-        if (down && l3_down && !r3_down && !is_open &&
+        // L3 does nothing in the game; with it held, d-pad up/down are the debug hotkeys (and
+        // the game does not see them: src/runtime_pad.c).
+        if (down && l3_down && !r3_down && !is_open && DebugHotkeys() &&
             (button == SDL_GAMEPAD_BUTTON_DPAD_UP || button == SDL_GAMEPAD_BUTTON_DPAD_DOWN)) {
             button == SDL_GAMEPAD_BUTTON_DPAD_UP ? RequestForceSave() : ToggleFrameGeneration();
             return true;
