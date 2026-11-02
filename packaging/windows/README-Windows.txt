@@ -19,7 +19,7 @@ Open Bloodborne.exe, choose your game folder under Game & effects, set your opti
 
 After setting things up once, Play Bloodborne.exe starts directly with your saved settings. If no game folder is chosen, it opens the launcher. Bloodborne.exe --play does the same. The normal log is user\last_run.log.
 
-Advanced has Desktop shortcut and Check for updates; Add to Steam is on Play. I pointed the updater at this fork so it accepts matching TatsunaKyo Windows revision packages. It preserves saves, settings and mods. When updating manually, close the game and launcher, keep your saves/mods/INI files and replace all program files, including bin, scripts, run.py and _internal. Replacing only Bloodborne.exe does not update the native renderer.
+Advanced has Desktop shortcut and Check for updates; Add to Steam is on Play. The launcher checks this fork's releases when it opens: when a newer one exists, Update on the left downloads it, checks it, installs it and reopens the launcher. It preserves saves, settings and mods. When updating manually, close the game and launcher, keep your saves/mods/INI files and replace all program files, including bin, scripts, run.py and _internal. Replacing only Bloodborne.exe does not update the native renderer.
 
 Advanced → Launcher language offers English, Russian, Arabic, Spanish, Portuguese, French, German, Italian, Polish, Turkish, Chinese, Japanese and Korean. It defaults to the Windows language. The in-game menu independently offers English and Russian; I made English its default.
 

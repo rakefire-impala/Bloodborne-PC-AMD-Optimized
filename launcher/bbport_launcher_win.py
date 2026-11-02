@@ -12,6 +12,7 @@ game without the window (`--play`), run.py (`--run`) and the preparation scripts
 so a packaged port needs no Python installation.
 """
 import ctypes
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.request
 import webbrowser
 import zipfile
@@ -34,6 +36,13 @@ sys.path.insert(0, str(PORT_DIR / 'scripts'))
 if FROZEN:
     # The packaged CPython 3.14 Pillow modules live beside the bundled runtime.
     sys.path.insert(0, str(PORT_DIR / '_internal'))
+try:
+    # Certificates checked by Windows, which fetches roots on demand. OpenSSL only sees the roots
+    # already in the store: GitHub then failed now and then with "unable to get issuer certificate".
+    import truststore
+    truststore.inject_into_ssl()
+except Exception:  # a source tree without it; never keep the launcher from opening
+    pass
 DATA_DIR = Path(os.environ.get('BB_DATA_DIR', PORT_DIR))
 # Co-op test build: its own settings, and no updates (a public release would replace it).
 COOP_TEST = False
@@ -44,16 +53,16 @@ LEGACY_CONFIG_DIR = Path(os.environ.get('APPDATA', Path.home())) / ('bbport-laun
 PATCH_VERSION = '01.09'
 MAX_LOG_LINES = 6000
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-# Fork releases use windows-v<upstream version>-tatsunakyo.<revision>.
+# This fork's releases are tagged v<VERSION>, with the package as an asset (packaging/windows/package.sh).
 VERSION = '1.15'
-# The updater reads TatsunaKyo's releases, whose versions compare higher than this fork's:
-# off until this fork publishes its own (then point RELEASES_* and the tag pattern at it).
-UPDATES_ENABLED = False
 LAUNCHER_BUILD = 'TatsunaKyo revision'
 # Co-op: the community server that answers the game's own server requests.
 COMMUNITY_SERVER = 'https://thehuntersdream.com'
-RELEASES_API = 'https://api.github.com/repos/TatsunaKyo/bloodborne_pc/releases/latest'
-RELEASES_PAGE = 'https://github.com/TatsunaKyo/bloodborne_pc/releases/latest'
+RELEASES_API = 'https://api.github.com/repos/rakefire-impala/Bloodborne-PC-AMD-Optimized/releases/latest'
+RELEASES_PAGE = 'https://github.com/rakefire-impala/Bloodborne-PC-AMD-Optimized/releases/latest'
+PACKAGE_NAME = 'bbport-windows.zip'
+UPDATE_CHECK_ATTEMPTS = 3
+UPDATE_CHECK_RETRY_SECONDS = 20
 UPDATE_DIR = DATA_DIR / 'out' / 'update'
 # Never copied over an installation by an update (the package does not hold them either).
 USER_FILES = ('user', 'out', 'mods', 'bbport.ini', 'bbport.menu.ini', 'mods.json', 'patches.json', 'last_run.log',
@@ -2681,29 +2690,31 @@ class Launcher:
     # ---- updates -------------------------------------------------------------------------------
     def check_update(self, manual=False):
         """Helper thread: asks GitHub for the newest release and offers it when it is newer."""
-        if not UPDATES_ENABLED:
-            if manual:
-                self.ui_calls.put(lambda: self.messagebox.showinfo(
-                    'Bloodborne', _('Update checks are off until this fork publishes releases.',
-                                    'Проверка обновлений отключена, пока у этого форка нет релизов.')))
-            return
-        try:
-            version, url, page = latest_release()
-        except (OSError, ValueError, KeyError) as failure:
-            if manual:
-                self.ui_calls.put(lambda error=failure: self.messagebox.showerror(
-                    'Bloodborne', _('Could not check for updates: {}', 'Не удалось проверить обновления: {}').format(error)))
-            return
+        attempts = 1 if manual else UPDATE_CHECK_ATTEMPTS
+        while True:
+            attempts -= 1
+            try:
+                version, url, page, sha256 = latest_release()
+                break
+            except (OSError, ValueError, KeyError) as failure:
+                # The network or a certificate may be fine a moment later; GitHub's answer stands.
+                if attempts and isinstance(failure, urllib.error.URLError) and not isinstance(failure, urllib.error.HTTPError):
+                    time.sleep(UPDATE_CHECK_RETRY_SECONDS)
+                    continue
+                if manual:
+                    self.ui_calls.put(lambda error=failure: self.messagebox.showerror(
+                        'Bloodborne', _('Could not check for updates: {}', 'Не удалось проверить обновления: {}').format(error)))
+                return
 
         def show():
             if version_tuple(version) > version_tuple(VERSION):
-                self.offer_update(version, url, page)
+                self.offer_update(version, url, page, sha256)
             elif manual:
                 self.messagebox.showinfo('Bloodborne', _('You have the latest version ({}).',
                                                          'У вас последняя версия ({}).').format(VERSION))
         self.ui_calls.put(show)
 
-    def offer_update(self, version, url, page):
+    def offer_update(self, version, url, page, sha256):
         if self.update_box:
             return
         tk, ttk = self.tk, self.ttk
@@ -2715,16 +2726,18 @@ class Launcher:
         buttons = tk.Frame(box, bg=CARD)
         buttons.pack(fill='x', padx=10, pady=(0, 10))
         self.update_button = ttk.Button(buttons, text=_('Update', 'Обновить'),
-                                        command=lambda: self.install_update(version, url, page))
+                                        command=lambda: self.install_update(version, url, page, sha256))
         self.update_button.pack(fill='x')
-        ttk.Button(buttons, text=_("What's new", 'Что нового'), command=lambda: webbrowser.open(page)).pack(
-            fill='x', pady=(4, 0))
+        # Shown only while downloading.
+        self.update_cancel = ttk.Button(buttons, text=_('Cancel', 'Отмена'))
+        self.update_news = ttk.Button(buttons, text=_("What's new", 'Что нового'), command=lambda: webbrowser.open(page))
+        self.update_news.pack(fill='x', pady=(4, 0))
         box.pack(fill='x', padx=(22, 18), pady=(0, 14), before=self.side_note)
         self.update_box = box
         if not self.process:
             self.status.configure(text=text, fg=GOLD)
 
-    def install_update(self, version, url, page):
+    def install_update(self, version, url, page, sha256):
         if self.process:
             self.messagebox.showinfo('Bloodborne', _('Close the game before updating.', 'Закройте игру перед обновлением.'))
             return
@@ -2737,26 +2750,39 @@ class Launcher:
                 'настройки останутся.').format(version)):
             return
         self.update_button.configure(state='disabled')
+        cancelled = threading.Event()
+
+        def cancel():
+            cancelled.set()
+            self.update_cancel.configure(state='disabled')
+            self.update_label.configure(text=_('Cancelling…', 'Отмена…'))
+
+        self.update_cancel.configure(state='normal', command=cancel)
+        self.update_cancel.pack(fill='x', pady=(4, 0), before=self.update_news)
+
+        def available():
+            self.update_cancel.pack_forget()
+            self.update_button.configure(state='normal')
+            self.update_label.configure(text=_('Version {} is available.', 'Доступна версия {}.').format(version))
 
         def progress(percent):
-            self.update_label.configure(text=_('Downloading version {}… {}%', 'Загрузка версии {}… {}%').format(
-                version, percent))
+            if not cancelled.is_set():
+                self.update_label.configure(text=_('Downloading version {}… {}%', 'Загрузка версии {}… {}%').format(
+                    version, percent))
+
+        def installing():
+            self.update_cancel.configure(state='disabled')
+            self.update_label.configure(text=_('Installing version {}…', 'Установка версии {}…').format(version))
 
         def work():
             try:
                 shutil.rmtree(UPDATE_DIR, ignore_errors=True)
                 UPDATE_DIR.mkdir(parents=True, exist_ok=True)
                 archive = UPDATE_DIR / 'update.zip'
-                request = urllib.request.Request(url, headers={'User-Agent': 'bbport-launcher'})
-                with urllib.request.urlopen(request, timeout=60) as response, open(archive, 'wb') as out:
-                    total, done, shown = int(response.headers.get('Content-Length') or 0), 0, -1
-                    while chunk := response.read(1 << 20):
-                        out.write(chunk)
-                        done += len(chunk)
-                        percent = done * 100 // total if total else 0
-                        if percent != shown:
-                            shown = percent
-                            self.ui_calls.put(lambda p=percent: progress(p))
+                download_package(url, sha256, archive, lambda p: self.ui_calls.put(lambda: progress(p)), cancelled)
+                if cancelled.is_set():  # pressed after the last chunk
+                    raise UpdateCancelled
+                self.ui_calls.put(installing)
                 with zipfile.ZipFile(archive) as package:
                     package.extractall(UPDATE_DIR / 'new')
                 archive.unlink()
@@ -2766,11 +2792,13 @@ class Launcher:
                 # The new launcher copies itself over this installation once this one has closed.
                 subprocess.Popen([str(new / 'Bloodborne.exe'), '--install-update', str(PORT_DIR), str(os.getpid())],
                                  cwd=str(new), stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
-                self.ui_calls.put(self.root.destroy)
+                self.ui_calls.put(self.close)
+            except UpdateCancelled:
+                shutil.rmtree(UPDATE_DIR, ignore_errors=True)
+                self.ui_calls.put(available)
             except (OSError, zipfile.BadZipFile) as failure:
                 def failed(error=failure):
-                    self.update_button.configure(state='normal')
-                    self.update_label.configure(text=_('Version {} is available.', 'Доступна версия {}.').format(version))
+                    available()
                     self.messagebox.showerror('Bloodborne', _('Update failed: {}', 'Не удалось обновить: {}').format(error))
                 self.ui_calls.put(failed)
         threading.Thread(target=work, daemon=True).start()
@@ -2903,19 +2931,44 @@ def version_tuple(text):
 
 
 def latest_release():
-    """(version, Windows package URL, page URL) of this fork's latest revision."""
+    """(version, Windows package URL or None, page URL, its SHA-256 or None) of this fork's latest
+    published release. GitHub leaves drafts and prereleases out of "latest"."""
     request = urllib.request.Request(RELEASES_API, headers={'Accept': 'application/vnd.github+json',
                                                             'User-Agent': 'bbport-launcher'})
     with urllib.request.urlopen(request, timeout=15) as response:
         release = json.load(response)
-    tag = re.fullmatch(r'windows-v(\d+(?:\.\d+)*)-tatsunakyo\.(\d+)', release['tag_name'])
+    tag = re.fullmatch(r'v(\d+(?:\.\d+)*)', release['tag_name'])
     if not tag:
-        raise ValueError('The latest release is not a TatsunaKyo Windows revision.')
-    version = f'{tag[1]}-tatsunakyo.{tag[2]}'
-    package_name = f'Bloodborne-Windows-v{tag[1]}-TatsunaKyo-Revision-{tag[2]}.zip'
-    url = next((asset['browser_download_url'] for asset in release.get('assets', [])
-                if asset.get('name', '') == package_name), None)
-    return version, url, release.get('html_url') or RELEASES_PAGE
+        raise ValueError(f"The latest release is not a version of this fork: {release['tag_name']}")
+    asset = next((a for a in release.get('assets', []) if a.get('name') == PACKAGE_NAME), {})
+    digest = asset.get('digest') or ''
+    return (tag[1], asset.get('browser_download_url'), release.get('html_url') or RELEASES_PAGE,
+            digest[len('sha256:'):] if digest.startswith('sha256:') else None)
+
+
+class UpdateCancelled(Exception):
+    pass
+
+
+def download_package(url, sha256, archive, progress, cancelled=None):
+    """Downloads url to archive, calling progress(percent); OSError unless it matches sha256.
+    UpdateCancelled once the cancelled event is set."""
+    request = urllib.request.Request(url, headers={'User-Agent': 'bbport-launcher'})
+    digest = hashlib.sha256()
+    with urllib.request.urlopen(request, timeout=60) as response, open(archive, 'wb') as out:
+        total, done, shown = int(response.headers.get('Content-Length') or 0), 0, -1
+        while chunk := response.read(1 << 18):
+            if cancelled and cancelled.is_set():
+                raise UpdateCancelled
+            out.write(chunk)
+            digest.update(chunk)
+            done += len(chunk)
+            percent = done * 100 // total if total else 0
+            if percent != shown:
+                shown = percent
+                progress(percent)
+    if sha256 and digest.hexdigest() != sha256.lower():
+        raise OSError('The download is damaged (its checksum does not match the release).')
 
 
 def install_update(target, wait_pid):
@@ -2928,7 +2981,7 @@ def install_update(target, wait_pid):
     if handle:
         kernel.WaitForSingleObject(handle, 60000)
         kernel.CloseHandle(handle)
-    ignore = shutil.ignore_patterns(*USER_FILES)
+    ignore = lambda folder, names: USER_FILES if Path(folder) == PORT_DIR else ()  # noqa: E731
     for attempt in range(30):
         try:
             shutil.copytree(PORT_DIR, target, dirs_exist_ok=True, ignore=ignore)
