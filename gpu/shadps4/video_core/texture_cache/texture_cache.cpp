@@ -733,6 +733,11 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
         download_images.emplace(image_id);
     }
     image.usage.render_target = 1u;
+    // bbport: a color target is no stencil plane; texture sets memoize the redirect.
+    if (image.depth_id) {
+        image.DisassociateDepth();
+        ++registry_generation;
+    }
     UpdateImage(image_id);
 
     // Register meta data for this color buffer
@@ -767,24 +772,52 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
 
     // If there is a stencil attachment, link depth and stencil.
     if (desc.info.stencil_addr != 0) {
+        const VAddr stencil_addr = desc.info.stencil_addr;
+        // bbport: the game's render target pool reuses memory, so what starts at the stencil
+        // address may be another target of a later frame layout. Linked, every read of that
+        // target returned this depth, and each read kept the depth alive in the LRU: a bloom
+        // target read this way put rainbow glare over the screen until the game exited.
         ImageId stencil_id{};
-        ForEachImageInRegion(desc.info.stencil_addr, desc.info.stencil_size,
+        const Image* other = nullptr;
+        ForEachImageInRegion(stencil_addr, desc.info.stencil_size,
                              [&](ImageId image_id, Image& image) {
-                                 if (image.info.guest_address == desc.info.stencil_addr) {
+                                 if (image.info.guest_address != stencil_addr) {
+                                     return;
+                                 }
+                                 const bool stencil_plane =
+                                     image.info.pixel_format == vk::Format::eUndefined ||
+                                     (image.info.num_bits == 8 && !image.usage.render_target &&
+                                      !image.usage.storage);
+                                 if (stencil_plane) {
                                      stencil_id = image_id;
+                                 } else {
+                                     other = &image;
                                  }
                              });
-        if (!stencil_id) {
+        if (!stencil_id && !other) {
             ImageInfo info{};
-            info.guest_address = desc.info.stencil_addr;
+            info.guest_address = stencil_addr;
             info.guest_size = desc.info.stencil_size;
             info.size = desc.info.size;
             stencil_id = slot_images.insert(instance, runtime, slot_image_views, info);
             RegisterImage(stencil_id);
         }
-        Image& stencil_image = slot_images[stencil_id];
-        TouchImage(stencil_image);
-        stencil_image.AssociateDepth(image_id, image.image_uid);
+        if (stencil_id) {
+            Image& stencil_image = slot_images[stencil_id];
+            TouchImage(stencil_image);
+            stencil_image.AssociateDepth(image_id, image.image_uid);
+        } else {
+            // Once per collision: this runs at every bind of the depth.
+            static std::atomic<VAddr> last_refused{0};
+            if (last_refused.exchange(stencil_addr, std::memory_order_relaxed) != stencil_addr) {
+                std::printf("Texture cache: depth at %#llx: %s %ux%u occupies its stencil address "
+                            "%#llx; not linked\n",
+                            (unsigned long long)image.info.guest_address,
+                            vk::to_string(other->info.pixel_format).c_str(),
+                            other->info.size.width, other->info.size.height,
+                            (unsigned long long)stencil_addr);
+            }
+        }
     }
 
     return image.FindView(desc.view_info, false);
