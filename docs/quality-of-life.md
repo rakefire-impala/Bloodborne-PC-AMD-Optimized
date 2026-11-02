@@ -96,11 +96,12 @@ player only, 1.09 only, like the safe menu.
 ## Retry a boss fight after dying in it
 
 `qol_boss_retry=1` in `bbport.ini` (or `BB_BOSS_RETRY=1`). After a death to a story boss (a boss bar
-naming a boss, not an NPC hunter) behind a fog gate, once you are on your feet again after the
-loading screen the overlay asks "Retry the fight?" (Cross/A/Enter: retry; Circle/B/Esc: not now).
-Retrying is one loading screen, after which you stand in front of the boss's fog, facing it, with
-its prompt to walk through. If you die again you come back at the lamp of that map that is always
-there (not the one the boss leaves in its arena). Single player, 1.09 only, outside the Chalice
+naming a boss, not an NPC hunter) behind a fog gate, the overlay asks "Retry the fight?" right after
+YOU DIED, before any loading screen (Cross/A/Enter: retry; Circle/B/Esc: respawn). The game waits for
+the answer. Retrying is the death's one loading screen, after which you stand in front of the boss's
+fog, facing it, with its prompt to walk through; a death counts as usual, blood echoes included.
+Respawning goes to the respawn point as usual; after a retry that is the lamp of that map that is
+always there (not the one the boss leaves in its arena). Single player, 1.09 only, outside the Chalice
 Dungeons (their maps are generated).
 
 `scripts/boss_retry.py` finds the gates in the map event scripts (the host event turning the player
@@ -112,13 +113,15 @@ inside the fog) and adds, per gate:
   (`map/MapStudio/mAA_BB_00_*.msb.dcx`): the game has no entity there (the point the fog walk
   turns to is in the arena, at Darkbeast Paarl under its floor, and a short warp to the fog object
   does nothing);
-- common events 7400-7599: on flag 6986 with the gate's number, a respawn-point warp (lamps only)
-  to the lamp of the map nearest the fog; on arrival, a short warp (EMEVD 2004[41]; 2004[03] would
-  be a second loading screen) to the spot, and the respawn point set to the nearest lamp that is
-  always there, as the nearest lamp is often the one in the arena.
+- common events 7400-7599: on flag 6986 with the gate's number, the lamp of the map nearest the fog
+  as the respawn point (EMEVD 2003[23]), where the death's reload then goes; on arrival, a short
+  warp (2004[41]; 2004[03] would be a second loading screen) to the spot, and the respawn point set
+  to the nearest lamp that is always there, as the nearest lamp is often the one in the arena.
 
-`src/runtime_retry.c` reads the boss bars like the Discord presence, notices the death (player HP 0
-during the fight) and asks once the loading screen is gone; the list is `out/qol/boss_retry.txt`
+`src/runtime_retry.c` reads the boss bars like the Discord presence and notices the death (player
+HP 0 during the fight). The game's solo death is a chain of timed steps; the last one,
+`SoloPlayDeath_2` (1.09 image 0x1381de0), requests the reload. While the question is open a stub
+there holds the step, and the answer schedules it once (it never re-arms itself). The list is `out/qol/boss_retry.txt`
 (`BB_BOSS_RETRY_LIST`).
 
 ## Planned, not implemented yet

@@ -1,7 +1,7 @@
 """Generate the boss retry layer (scripts/boss_retry.py) from the game's files and check it: every
 gate's spot is in all of its map's layouts, a step in front of the fog on the side away from the
-point beyond it; the retry warps to a lamp of the gate's map and on arrival makes a short warp to
-the spot (never the full warp request, a second loading screen) and makes a lamp that is always
+point beyond it; the retry makes a lamp of the gate's map the respawn point (the death's reload
+goes there) and on arrival makes a short warp to the spot (never the full warp request, a second loading screen) and makes a lamp that is always
 there the respawn point, not the one the boss leaves in its arena.
 Needs the game folder (BB_GAME_DIR, or the path given); skipped without.
 """
@@ -49,7 +49,7 @@ with tempfile.TemporaryDirectory(prefix='bb-boss-retry-') as tmp:
         for gate in B.find_gates(original, path):
             warp, arrival = (common.event_ins(B.FIRST_EVENT + B.EVENTS_PER_GATE * number + k) for k in range(2))
             number += 1
-            assert warp[-1][:2] == (2003, 49), warp[-1]
+            assert warp[-1][:2] == (2003, 23), warp[-1]
             lamp = struct.unpack('<i', warp[-1][2])[0]
             assert lamp // 10000 == gate.area * 10 + gate.block, lamp
             moves = [(b, i, a) for b, i, a in arrival if b == 2004 and i in (3, 40, 41, 42)]

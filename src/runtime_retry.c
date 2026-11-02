@@ -1,19 +1,33 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later
- * Boss retry (launcher: Quality of Life). After a death in a major boss fight, once the player is
- * back on their feet, the overlay asks whether to retry it; retrying puts the player at the boss's
- * fog gate. Runs on the thread that reads the pad, once per read.
+ * Boss retry (launcher: Quality of Life). After a death in a major boss fight, the overlay asks
+ * whether to retry it before the game reloads: the reload waits for the answer. Retrying puts the
+ * player at the boss's fog gate after that one loading screen; declining respawns as usual. Polled
+ * on the thread that reads the pad, once per read.
  *
  * The generated event scripts (scripts/boss_retry.py, list in BB_BOSS_RETRY_LIST) do the game
  * side through event flags: walking into a boss's fog writes the gate's number to BITS and sets
- * ENTERED; REQUEST with a gate's number in BITS warps the player to it. A fight is a boss bar of a
- * major boss (a name in the list, not an NPC hunter) appearing after the player walked into a gate
- * whose boss lives; a death is the player's HP at 0 during it. Boss bars are read as the HUD does
- * (see runtime_discord.c): menu manager +0x1658, 3 slots of {name ID, character handle}. */
+ * ENTERED; REQUEST with a gate's number in BITS makes the reload arrive at it. A fight is a boss
+ * bar of a major boss (a name in the list, not an NPC hunter) appearing after the player walked
+ * into a gate whose boss lives; a death is the player's HP at 0 during it. Boss bars are read as
+ * the HUD does (see runtime_discord.c): menu manager +0x1658, 3 slots of {name ID, character
+ * handle}.
+ *
+ * The game's solo death is a chain of named steps on its event timer (registered at 0x138db88):
+ * SoloPlayDeath, SoloPlayDeath_TextWait and, as YOU DIED ends (about 9 s after the death),
+ * SoloPlayDeath_2, which requests the reload. With a retry to offer, that last step returns
+ * without running; the answer puts it back on the timer, as SoloPlayDeath_1 schedules it. (Not
+ * from inside the step: it would fire again at once, over and over, until the game's heap runs
+ * out. It runs on this thread.) */
 #include "runtime.h"
 #include "gpu/bbgpu.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#endif
 
 enum {
     IS_EVENT_FLAG = 0x1399bf0,   /* bool (ignored, flag id): the "IsEventFlag" binding's target */
@@ -25,16 +39,22 @@ enum {
     SESSION_MAN = 0x5540290,     /* SprjSessionManager *: +0x124 session state */
     BLOCK_LIST = 0x553b148,      /* +0x20 index of the player's block, +0x10 -> +0x18 count, +0x20 entries */
     BOSS_BARS = 0x1658,
-    LOADING_SCREEN = 0x2498,     /* menu manager: the loading screen shown, null without one */
+    DEATH_RELOAD = 0x1381de0,    /* the step SoloPlayDeath_2 (arguments: ?, the event proxy) */
+    DEATH_RELOAD_NAME = 0x492e368,
+    SCHEDULE_STEP = 0x132b1c0,   /* (proxy, event id, step name, 0, 3, 1, delay in s) */
+    DEATH_EVENT = 4000,
+    PROXY_SCHEDULING = 0x8a,     /* proxy: byte the game clears around SCHEDULE_STEP */
+    STEP_PROLOGUE = 13,          /* push rbp ... mov r14,rdi: moved to the stub */
     MAX_GATES = 256,
     MAX_NAMES = 256,
-    /* Pad reads (about one per frame) the player must stay on their feet before the question,
-     * and a fight's bar may stay away before the fight counts as over. */
-    SETTLE_READS = 90,
+    /* Pad reads (about one per frame) a fight's bar may stay away before the fight counts as over,
+     * and the event script may take to take a request (the world stops without focus). */
     BAR_GONE_READS = 180,
+    REQUEST_READS = 300,
 };
 typedef int (ABI *IsEventFlag)(void *, uint32_t);
 typedef void (ABI *SetEventFlag)(void *, uint32_t, uint32_t);
+typedef void (ABI *ScheduleStep)(void *, uint32_t, const char *, uint32_t, uint32_t, uint32_t, float);
 
 static unsigned char *game;
 static int active;
@@ -44,9 +64,11 @@ static int gate_count;
 static struct { int id; char name[96]; } names[MAX_NAMES];
 static int name_count;
 static char question[128], retry_text[64], decline_text[64];
-/* The gate the player last walked into, the fight (gate and boss name) and the retry offered. */
+/* The gate the player last walked into, the fight (gate and boss name), the retry offered and
+ * the event proxy of the reload held for it. */
 static int entered = -1, fight = -1, fight_name, pending = -1, pending_name, shown;
-static unsigned bar_gone, settled;
+static unsigned char *held_reload;
+static unsigned bar_gone, request_reads;
 
 static uintptr_t load(uintptr_t address) {
     uintptr_t value;
@@ -84,11 +106,6 @@ static int start_menu_open(void) {
     const uintptr_t menu = load((uintptr_t)game + MENU_MAN);
     return pointer_ok(menu) && load32(menu + 0x54) != 0;
 }
-/* The player exists (and has HP) during the respawn's loading screen as well. */
-static int loading_screen(void) {
-    const uintptr_t menu = load((uintptr_t)game + MENU_MAN);
-    return pointer_ok(menu) && load(menu + LOADING_SCREEN) != 0;
-}
 /* HP of a character (ChrIns +0x3b0 -> +0x20 -> +0xf8), -1 when unreadable. */
 static int32_t hp(uintptr_t chr) {
     const uintptr_t modules = pointer_ok(chr) ? load(chr + 0x3b0) : 0;
@@ -125,6 +142,53 @@ static int major_bar(uintptr_t world) {
         if (pointer_ok(entries) && hp(load(entries + (uintptr_t)entry * 0x38)) > 0) return name;
     }
     return -1;
+}
+
+/* Entered at SoloPlayDeath_2: nonzero skips the step, holding the reload. */
+static int ABI death_reload_step(void *unused, unsigned char *proxy) {
+    (void)unused;
+    if (pending < 0) return 0;
+    held_reload = proxy;
+    return 1;
+}
+/* No retry to offer any more: the reload held for it, if any, goes on. */
+static void end_offer(void) {
+    pending = -1;
+    if (!held_reload) return;
+    unsigned char *proxy = held_reload;
+    held_reload = NULL;
+    proxy[PROXY_SCHEDULING] = 0;
+    ((ScheduleStep)(game + SCHEDULE_STEP))(proxy, DEATH_EVENT, (const char *)game + DEATH_RELOAD_NAME, 0, 3, 1, 0.1f);
+    proxy[PROXY_SCHEDULING] = 1;
+}
+/* The step starts with a jump to a stub: push rdi; push rsi; sub rsp,8; call death_reload_step;
+ * add rsp,8; pop rsi; pop rdi; test eax,eax; je +1; ret; the bytes it replaced; jump back. RAX is
+ * written before it is read after them. */
+static int hook_death_reload(unsigned char *image) {
+    unsigned char *page = runtime_low_map(4096, PROT_READ | PROT_WRITE), *e = page;
+    if (!page || page == (void *)-1) return 0;
+    const uintptr_t handler = (uintptr_t)death_reload_step, back = (uintptr_t)image + DEATH_RELOAD + STEP_PROLOGUE;
+    unsigned char *entry = image + DEATH_RELOAD;
+    const int64_t distance = (int64_t)(uintptr_t)page - (int64_t)(uintptr_t)(entry + 5);
+    if (distance < INT32_MIN || distance > INT32_MAX) return 0;
+    *e++ = 0x57; *e++ = 0x56; *e++ = 0x48; *e++ = 0x83; *e++ = 0xec; *e++ = 0x08;
+    *e++ = 0x48; *e++ = 0xb8; memcpy(e, &handler, 8); e += 8; *e++ = 0xff; *e++ = 0xd0;
+    *e++ = 0x48; *e++ = 0x83; *e++ = 0xc4; *e++ = 0x08; *e++ = 0x5e; *e++ = 0x5f;
+    *e++ = 0x85; *e++ = 0xc0; *e++ = 0x74; *e++ = 0x01; *e++ = 0xc3;
+    memcpy(e, entry, STEP_PROLOGUE); e += STEP_PROLOGUE;
+    *e++ = 0x48; *e++ = 0xb8; memcpy(e, &back, 8); e += 8; *e++ = 0xff; *e++ = 0xe0;
+#ifdef _WIN32
+    DWORD old;
+    if (!VirtualProtect(page, 4096, PAGE_EXECUTE_READ, &old)) return 0;
+    FlushInstructionCache(GetCurrentProcess(), page, 4096);
+#else
+    if (mprotect(page, 4096, PROT_READ | PROT_EXEC)) return 0;
+    __builtin___clear_cache((char *)page, (char *)e);
+#endif
+    const int32_t rel32 = (int32_t)distance;
+    entry[0] = 0xe9;
+    memcpy(entry + 1, &rel32, 4);
+    return 1;
 }
 
 static int load_list(const char *path) {
@@ -185,6 +249,12 @@ void runtime_retry_install(void *image, size_t size, const char *app_version) {
         /* GetLastBlockId: lea rcx,[block list]; ... movsxd rcx,[rdx+0x20]. */
         {0x1332db8, 19, {0x48,0x8d,0x0d,0x89,0x83,0x20,0x04,0x48,0x8b,0x11,0x48,0x85,0xd2,0x74,0x31,0x48,0x63,
                          0x4a,0x20}},
+        /* SoloPlayDeath_1 scheduling SoloPlayDeath_2: lea rdx,[name] ... call schedule. */
+        {0x1381da0, 7, {0x48,0x8d,0x15,0xc1,0xc5,0x5a,0x03}},
+        {0x1381dc5, 5, {0xe8,0xf6,0x93,0xfa,0xff}},
+        /* The step's start and the name. */
+        {DEATH_RELOAD, STEP_PROLOGUE, {0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x53,0x50,0x49,0x89,0xfe}},
+        {DEATH_RELOAD_NAME, 16, {'S','o','l','o','P','l','a','y','D','e','a','t','h','_','2',0}},
     };
     const char *list = getenv("BB_BOSS_RETRY_LIST");
     if (!list || !*list) return;
@@ -201,6 +271,10 @@ void runtime_retry_install(void *image, size_t size, const char *app_version) {
         return;
     }
     game = image;
+    if (!hook_death_reload(image)) {
+        puts("Boss retry: cannot hook the death reload; no retries");
+        return;
+    }
     active = 1;
     printf("Boss retry: %d boss fog gates, %d boss names\n", gate_count, name_count);
 }
@@ -214,17 +288,28 @@ void runtime_retry_poll(void) {
         if (answer == 1) {
             for (int k = 0; k < bit_count; ++k) set(bits_flag + k, pending >> k & 1);
             set(request_flag, 1);
+            request_reads = 1;
             printf("Boss retry: retrying gate %d\n", pending);
+            return;
         }
-        pending = -1;
+        puts("Boss retry: respawning");
+        end_offer();
+        return;
+    }
+    /* The reload waits until the event script has taken the request. */
+    if (request_reads) {
+        if (get(request_flag) && ++request_reads <= REQUEST_READS) return;
+        if (get(request_flag)) {
+            set(request_flag, 0);
+            puts("Boss retry: the request was not taken; respawning as usual");
+        }
+        request_reads = 0;
+        end_offer();
         return;
     }
     const uintptr_t world = load((uintptr_t)game + WORLD_CHR_MAN);
     const uintptr_t player = pointer_ok(world) ? load(world + 0x60) : 0;
-    if (!pointer_ok(player)) { /* loading or in the title menus */
-        settled = 0;
-        return;
-    }
+    if (!pointer_ok(player)) return; /* loading or in the title menus */
     if (get(entered_flag)) {
         int gate = 0;
         for (int k = 0; k < bit_count; ++k) gate |= get(bits_flag + k) << k;
@@ -248,7 +333,6 @@ void runtime_retry_poll(void) {
             pending = fight;
             pending_name = fight_name;
             fight = entered = -1;
-            settled = 0;
             printf("Boss retry: died fighting %s\n", boss_name(pending_name));
         } else if (bar < 0 && ++bar_gone > BAR_GONE_READS) {
             fight = entered = -1; /* the boss died, or the fight ended another way */
@@ -257,20 +341,12 @@ void runtime_retry_poll(void) {
         }
     }
     if (pending < 0) return;
-    if (get(gates[pending].defeat_flag) || !single_player()) {
-        pending = -1;
+    /* Alive again (no reload to hold), the boss died too, or no lamp to arrive at. */
+    if (life > 0 || get(gates[pending].defeat_flag) || !single_player() || !gates[pending].lamp) {
+        end_offer();
         return;
     }
-    /* Back on their feet past the loading screen, out of the menus, and either in the gate's map
-     * or able to load it. */
-    const int here = player_block(&block) && ((block >> 24) & 0xff) == gates[pending].area &&
-                     ((block >> 16) & 0xff) == gates[pending].block;
-    if (life <= 0 || loading_screen() || start_menu_open() || bbgpu_overlay_captures_input() ||
-        !(here || gates[pending].lamp)) {
-        settled = 0;
-        return;
-    }
-    if (++settled < SETTLE_READS) return;
+    if (!held_reload || start_menu_open() || bbgpu_overlay_captures_input()) return;
     bbgpu_retry_prompt_open(boss_name(pending_name), question, retry_text, decline_text);
     shown = 1;
 }
