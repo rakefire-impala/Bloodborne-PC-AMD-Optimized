@@ -172,21 +172,33 @@ void Rule(ImDrawList* d, float x0, float x1, float y, float s) {
     d->AddCircleFilled(ImVec2(x1, y), 2.5f * s, LineColor);
 }
 
+// The text on a keycap, or null for a round controller button.
+const char* KeyLabel(Button button) {
+    if (device != Device::Keyboard && button != Button::Previous && button != Button::Next) return nullptr;
+    switch (button) {
+    case Button::Select: return "Enter";
+    case Button::Back: return "Esc";
+    case Button::Dream: return "E";
+    case Button::Previous: return device == Device::Keyboard ? "1" : device == Device::PlayStation ? "L1" : "LB";
+    case Button::Next: return device == Device::Keyboard ? "3" : device == Device::PlayStation ? "R1" : "RB";
+    }
+    return nullptr;
+}
+
+float GlyphWidth(float s, Button button) {
+    const float round = 26.0f * s;
+    const char* label = KeyLabel(button);
+    if (!label) return round;
+    return std::max(ImGui::GetFont()->CalcTextSizeA(18.0f * s, FLT_MAX, 0.0f, label).x + 14.0f * s, round);
+}
+
 // Controller glyphs: PlayStation symbols, Xbox letters, or a keyboard key.
 void Glyph(ImDrawList* d, ImVec2 c, float s, Button button) {
     const float r = 13.0f * s;
-    if (device == Device::Keyboard || button == Button::Previous || button == Button::Next) {
-        const char* label = "";
-        switch (button) {
-        case Button::Select: label = device == Device::Keyboard ? "Enter" : ""; break;
-        case Button::Back: label = "Esc"; break;
-        case Button::Dream: label = "E"; break;
-        case Button::Previous: label = device == Device::Keyboard ? "1" : device == Device::PlayStation ? "L1" : "LB"; break;
-        case Button::Next: label = device == Device::Keyboard ? "3" : device == Device::PlayStation ? "R1" : "RB"; break;
-        }
+    if (const char* label = KeyLabel(button)) {
         const float size = 18.0f * s;
         const ImVec2 t = ImGui::GetFont()->CalcTextSizeA(size, FLT_MAX, 0.0f, label);
-        const float w = std::max(t.x + 14.0f * s, 2.0f * r);
+        const float w = GlyphWidth(s, button);
         d->AddRectFilled(ImVec2(c.x - w * 0.5f, c.y - r), ImVec2(c.x + w * 0.5f, c.y + r), IM_COL32(20, 20, 22, 230), 4 * s);
         d->AddRect(ImVec2(c.x - w * 0.5f, c.y - r), ImVec2(c.x + w * 0.5f, c.y + r), IM_COL32(210, 204, 190, 255), 4 * s, 0,
                    std::max(1.0f, 1.3f * s));
@@ -220,6 +232,17 @@ void Glyph(ImDrawList* d, ImVec2 c, float s, Button button) {
     const float size = 19.0f * s;
     const ImVec2 t = ImGui::GetFont()->CalcTextSizeA(size, FLT_MAX, 0.0f, letter);
     d->AddText(ImGui::GetFont(), size, ImVec2(c.x - t.x * 0.5f, c.y - t.y * 0.5f), color, letter);
+}
+
+// A button and what it does, on a line through y: the widths are the glyph's own, keycaps are wide.
+float KeyHintWidth(float s, float size, Button button, const char* text) {
+    return GlyphWidth(s, button) + 12.0f * s + TextSize(size, text).x;
+}
+
+void KeyHint(ImDrawList* d, float x, float y, float s, float size, Button button, const char* text, ImU32 color) {
+    const float w = GlyphWidth(s, button);
+    Glyph(d, ImVec2(x + w * 0.5f, y), s, button);
+    Text(d, size, ImVec2(x + w + 12.0f * s, y - TextSize(size, text).y * 0.5f), color, text);
 }
 
 // A headstone (rounded top) beside each lamp; lit gold under the cursor.
@@ -323,9 +346,9 @@ void PromptDraw() {
                std::max(1.0f, s));
 
     // The two choices, each clickable.
-    const float key_size = 25.0f * s, gap = 64.0f * s, glyph = 34.0f * s;
-    const float retry_w = glyph + TextSize(key_size, prompt_retry.c_str()).x;
-    const float decline_w = glyph + TextSize(key_size, prompt_decline.c_str()).x;
+    const float key_size = 25.0f * s, gap = 64.0f * s;
+    const float retry_w = KeyHintWidth(s, key_size, Button::Select, prompt_retry.c_str());
+    const float decline_w = KeyHintWidth(s, key_size, Button::Back, prompt_decline.c_str());
     float kx = (x0 + x1 - retry_w - gap - decline_w) * 0.5f;
     const float ky = top + 185.0f * s;
     const bool clicked = ImGui::IsMouseClicked(0);
@@ -338,8 +361,8 @@ void PromptDraw() {
             Answer(choice);
             return;
         }
-        Glyph(d, ImVec2(kx + 14 * s, ky), s, choice ? Button::Select : Button::Back);
-        Text(d, key_size, ImVec2(kx + glyph, ky - key_size * 0.6f), hover ? BrightColor : TextColor, label.c_str());
+        KeyHint(d, kx, ky, s, key_size, choice ? Button::Select : Button::Back, label.c_str(),
+                hover ? BrightColor : TextColor);
         kx += w + gap;
     }
 }
@@ -561,17 +584,12 @@ void Draw() {
     // Key guide.
     d->AddLine(ImVec2(x0 + 60 * s, foot), ImVec2(x1 - 60 * s, foot), IM_COL32(150, 142, 124, 120), std::max(1.0f, s));
     const float key_size = 25.0f * s;
-    const std::string select = ": " + select_text, back = ": " + return_text;
-    const float gap = 48.0f * s, glyph = 34.0f * s;
-    const float select_w = glyph + TextSize(key_size, select.c_str()).x;
-    const float width = select_w + gap + glyph + TextSize(key_size, back.c_str()).x;
-    float kx = (x0 + x1 - width) * 0.5f;
-    const float ky = foot + 34.0f * s;
-    Glyph(d, ImVec2(kx + 14 * s, ky), s, Button::Select);
-    Text(d, key_size, ImVec2(kx + glyph, ky - key_size * 0.6f), TextColor, select.c_str());
-    kx += select_w + gap;
-    Glyph(d, ImVec2(kx + 14 * s, ky), s, Button::Back);
-    Text(d, key_size, ImVec2(kx + glyph, ky - key_size * 0.6f), TextColor, back.c_str());
+    const float gap = 48.0f * s;
+    const float select_w = KeyHintWidth(s, key_size, Button::Select, select_text.c_str());
+    const float width = select_w + gap + KeyHintWidth(s, key_size, Button::Back, return_text.c_str());
+    const float kx = (x0 + x1 - width) * 0.5f, ky = foot + 34.0f * s;
+    KeyHint(d, kx, ky, s, key_size, Button::Select, select_text.c_str(), TextColor);
+    KeyHint(d, kx + select_w + gap, ky, s, key_size, Button::Back, return_text.c_str(), TextColor);
 }
 
 } // namespace BbLampMenu
